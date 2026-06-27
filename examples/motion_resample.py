@@ -157,6 +157,10 @@ def run(spec: dict[str, Any]) -> dict[str, Any]:
 
     with np.load(src, allow_pickle=False) as data:
         quat = data[quat_key]
+        # Real corpora contain occasional zero-frame clips. That's benign data,
+        # not a task failure — skip it (so the Fixer doesn't burn retries on it).
+        if quat.shape[0] == 0:
+            return {"status": "skipped", "metrics": {"reason": "empty_input"}}
         is_valid = data[valid_key] if valid_key in data.files else None
         if "times" in data.files:
             src_times = np.asarray(data["times"], dtype=np.float64)

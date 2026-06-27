@@ -92,3 +92,18 @@ def test_run_writes_and_resumes(tmp_path):
 
     r2 = run(spec)  # resume: output exists -> skipped
     assert r2["status"] == "skipped", r2
+
+
+def test_run_skips_empty_clip(tmp_path):
+    # Real corpora contain zero-frame clips; these must skip cleanly (not fail +
+    # burn retries). Found running the real seamless_interaction corpus.
+    rroot = tmp_path / "in"
+    wroot = tmp_path / "out"
+    rroot.mkdir()
+    empty = np.zeros((0, 52, 4), dtype=np.float32)
+    np.savez(rroot / "empty.npz", quat=empty)
+    os.environ["KIROSHI_READ_ROOT"] = str(rroot)
+    os.environ["KIROSHI_WRITE_ROOT"] = str(wroot)
+    r = run({"src_path": "empty.npz", "dst_path": "r8/empty.npz",
+             "target_fps": 8.0, "src_fps": 30.0})
+    assert r["status"] == "skipped" and r["metrics"]["reason"] == "empty_input", r
