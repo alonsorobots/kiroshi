@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>KIROSHI // mesh optics</title>
+<style>
+  :root {
+    --bg: #07090d;
+    --panel: #0d1117;
+    --line: #1b2230;
+    --teal: #1ad1c8;
+    --magenta: #ff2e88;
+    --amber: #ffb648;
+    --text: #d7e0ea;
+    --muted: #6b7a8d;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.45 "Segoe UI", system-ui, sans-serif;
+    background-image:
+      radial-gradient(circle at 15% -10%, rgba(26,209,200,.08), transparent 40%),
+      radial-gradient(circle at 110% 10%, rgba(255,46,136,.08), transparent 45%);
+  }
+  header {
+    display: flex; align-items: baseline; gap: 14px;
+    padding: 16px 22px; border-bottom: 1px solid var(--line);
+  }
+  h1 {
+    font-size: 20px; letter-spacing: .35em; margin: 0; font-weight: 700;
+    color: var(--teal); text-shadow: 0 0 12px rgba(26,209,200,.45);
+  }
+  .sub { color: var(--muted); letter-spacing: .2em; font-size: 11px; text-transform: uppercase; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--magenta); display:inline-block; margin-left:auto; box-shadow: 0 0 10px var(--magenta); }
+  .dot.live { background: var(--teal); box-shadow: 0 0 10px var(--teal); }
+  main { padding: 22px; display: grid; gap: 18px; max-width: 1100px; margin: 0 auto; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px,1fr)); gap: 14px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+  .card .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .15em; }
+  .card .val { font-size: 28px; font-weight: 700; margin-top: 6px; font-variant-numeric: tabular-nums; }
+  .val.teal { color: var(--teal); } .val.magenta { color: var(--magenta); } .val.amber { color: var(--amber); }
+  .bar { height: 14px; background: #0a0f16; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .bar > span { display: block; height: 100%; background: linear-gradient(90deg, var(--teal), var(--magenta)); width: 0%; transition: width .4s ease; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+  .panel h2 { font-size: 12px; letter-spacing: .2em; text-transform: uppercase; color: var(--muted); margin: 0 0 12px; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .1em; }
+  .err { color: var(--magenta); font-family: ui-monospace, monospace; font-size: 12px; }
+  .muted { color: var(--muted); }
+  #views, nav.tabs { display: flex; gap: 10px; }
+  nav.tabs { margin-left: 24px; }
+  #views { margin-left: 12px; }
+  nav.tabs a, #views a { color: var(--amber); text-decoration: none; font-size: 12px; letter-spacing: .12em; text-transform: uppercase; border: 1px solid var(--line); padding: 4px 10px; border-radius: 6px; }
+  nav.tabs a:hover, #views a:hover { border-color: var(--amber); }
+  nav.tabs a.on { border-color: var(--teal); color: var(--teal); }
+  .curve { width: 100%; height: 120px; display: block; }
+  footer { text-align:center; color: var(--muted); padding: 16px; font-size: 11px; letter-spacing: .15em; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>KIROSHI</h1>
+    <span class="sub">mesh optics</span>
+    <nav class="tabs">
+      <a href="/" class="on">Overview</a>
+      <a href="/ui/jobs">Jobs</a>
+      <a href="/ui/history">History</a>
+    </nav>
+    <span id="views"></span>
+    <span id="live" class="dot"></span>
+  </header>
+  <main>
+    <div class="cards">
+      <div class="card"><div class="label">Done</div><div id="done" class="val teal">0</div></div>
+      <div class="card"><div class="label">Pending</div><div id="pending" class="val">0</div></div>
+      <div class="card"><div class="label">In flight</div><div id="leased" class="val amber">0</div></div>
+      <div class="card"><div class="label">Failed</div><div id="failed" class="val magenta">0</div></div>
+      <div class="card"><div class="label">Rate /s</div><div id="rate" class="val teal">0</div></div>
+      <div class="card"><div class="label">ETA</div><div id="eta" class="val">—</div></div>
+    </div>
+
+    <div class="panel">
+      <h2>Progress <span id="pct" class="muted"></span></h2>
+      <div class="bar"><span id="prog"></span></div>
+    </div>
+
+    <div class="panel">
+      <h2>Throughput <span id="curveinfo" class="muted"></span></h2>
+      <svg id="curve" class="curve" viewBox="0 0 1000 120" preserveAspectRatio="none">
+        <defs>
+          <linearGradient id="grad" x1="0" y1="1" x2="0" y2="0">
+            <stop offset="0%" stop-color="#1ad1c8" stop-opacity="0.9"/>
+            <stop offset="55%" stop-color="#ffb648" stop-opacity="0.95"/>
+            <stop offset="100%" stop-color="#ff2e88" stop-opacity="1"/>
+          </linearGradient>
+          <filter id="bloom" x="-20%" y="-20%" width="140%" height="140%">
+            <feGaussianBlur stdDeviation="2.2" result="b"/>
+            <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+          </filter>
+        </defs>
+        <polygon id="curveFill" fill="url(#grad)" fill-opacity="0.14" points=""/>
+        <polyline id="curveLine" fill="none" stroke="url(#grad)" stroke-width="2.5"
+                  filter="url(#bloom)" points=""/>
+      </svg>
+    </div>
+
+    <div class="panel">
+      <h2>Runners</h2>
+      <table>
+        <thead><tr><th>Host</th><th>In flight</th><th>Recent /s</th></tr></thead>
+        <tbody id="hosts"><tr><td class="muted" colspan="3">no runners yet</td></tr></tbody>
+      </table>
+    </div>
+
+    <div class="panel">
+      <h2>Recent failures</h2>
+      <table>
+        <thead><tr><th>Gig</th><th>Host</th><th>Error</th></tr></thead>
+        <tbody id="errors"><tr><td class="muted" colspan="3">none</td></tr></tbody>
+      </table>
+    </div>
+  </main>
+  <footer>a fixer hands gigs to runners // kiroshi optics watch the fleet</footer>
+
+<script>
+// --- auth: accept ?token= once, persist to localStorage, then strip from URL ---
+(function bootstrapToken() {
+  const u = new URL(window.location.href);
+  const t = u.searchParams.get("token");
+  if (t) {
+    try { localStorage.setItem("kiroshi_token", t); } catch (e) {}
+    u.searchParams.delete("token");
+    history.replaceState({}, "", u.pathname + (u.search || "") + (u.hash || ""));
+  }
+})();
+function authToken() {
+  try { return localStorage.getItem("kiroshi_token") || ""; } catch (e) { return ""; }
+}
+// Escape untrusted strings before putting them in innerHTML. job_id, host and
+// error text are attacker-influenceable (anyone who can seed a gig, or a rogue
+// runner), so rendering them raw would be a stored-XSS token-theft vector.
+function esc(s){return (s==null?"":String(s)).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
+async function authedFetch(url, opts) {
+  opts = opts || {};
+  const t = authToken();
+  if (t) {
+    opts.headers = Object.assign({}, opts.headers, { "Authorization": "Bearer " + t });
+  }
+  opts.cache = "no-store";
+  const r = await fetch(url, opts);
+  if (r.status === 401) {
+    const entered = window.prompt("Mesh token required to view this dashboard:");
+    if (entered) {
+      try { localStorage.setItem("kiroshi_token", entered); } catch (e) {}
+      return authedFetch(url, opts);
+    }
+  }
+  return r;
+}
+function fmtEta(s) {
+  if (s === null || s === undefined) return "—";
+  s = Math.round(s);
+  const h = Math.floor(s/3600), m = Math.floor((s%3600)/60), sec = s%60;
+  if (h) return `${h}h ${m}m`;
+  if (m) return `${m}m ${sec}s`;
+  return `${sec}s`;
+}
+async function tick() {
+  const live = document.getElementById("live");
+  try {
+    const r = await authedFetch("/status");
+    const d = await r.json();
+    live.classList.add("live");
+    document.getElementById("done").textContent = d.done.toLocaleString();
+    document.getElementById("pending").textContent = d.pending.toLocaleString();
+    document.getElementById("leased").textContent = d.leased.toLocaleString();
+    document.getElementById("failed").textContent = d.failed.toLocaleString();
+    document.getElementById("rate").textContent = (d.rate_per_s||0).toFixed(2);
+    document.getElementById("eta").textContent = fmtEta(d.eta_s);
+
+    const total = d.total || 0;
+    const pct = total ? (100 * d.done / total) : 0;
+    document.getElementById("prog").style.width = pct.toFixed(1) + "%";
+    document.getElementById("pct").textContent =
+      `${d.done.toLocaleString()} / ${total.toLocaleString()} (${pct.toFixed(1)}%)`;
+
+    const hosts = document.getElementById("hosts");
+    if (d.per_host && d.per_host.length) {
+      hosts.innerHTML = d.per_host.map(h =>
+        `<tr><td>${esc(h.host)}</td><td>${(+h.in_flight)||0}</td><td>${(+h.recent_rate||0).toFixed(2)}</td></tr>`
+      ).join("");
+    } else {
+      hosts.innerHTML = `<tr><td class="muted" colspan="3">no runners yet</td></tr>`;
+    }
+
+    const errs = document.getElementById("errors");
+    if (d.recent_errors && d.recent_errors.length) {
+      errs.innerHTML = d.recent_errors.map(e =>
+        `<tr><td>${esc(e.job_id)}</td><td>${esc(e.host||"?")}</td><td class="err">${esc((e.error||"").slice(0,120))}</td></tr>`
+      ).join("");
+    } else {
+      errs.innerHTML = `<tr><td class="muted" colspan="3">none</td></tr>`;
+    }
+  } catch (e) {
+    live.classList.remove("live");
+  }
+}
+// at-field-style hand-rolled SVG rate curve over time.
+function renderCurve(samples) {
+  const W = 1000, H = 120, pad = 6;
+  const line = document.getElementById("curveLine");
+  const fill = document.getElementById("curveFill");
+  const info = document.getElementById("curveinfo");
+  if (!samples || samples.length < 2) {
+    line.setAttribute("points", ""); fill.setAttribute("points", "");
+    info.textContent = "warming up…"; return;
+  }
+  const ts = samples.map(s => s.ts), rate = samples.map(s => s.rate || 0);
+  const t0 = ts[0], t1 = ts[ts.length - 1], span = Math.max(1, t1 - t0);
+  const maxR = Math.max(0.001, ...rate);
+  const x = t => pad + (W - 2 * pad) * (t - t0) / span;
+  const y = r => (H - pad) - (H - 2 * pad) * (r / maxR);
+  const pts = samples.map(s => `${x(s.ts).toFixed(1)},${y(s.rate || 0).toFixed(1)}`);
+  line.setAttribute("points", pts.join(" "));
+  fill.setAttribute("points", `${pad},${H - pad} ${pts.join(" ")} ${W - pad},${H - pad}`);
+  const cur = rate[rate.length - 1];
+  info.textContent = `now ${cur.toFixed(2)}/s · peak ${maxR.toFixed(2)}/s · last ${Math.round(span)}s`;
+}
+async function curveTick() {
+  try {
+    const r = await authedFetch("/metrics/history");
+    const d = await r.json();
+    renderCurve(d.samples || []);
+  } catch (e) { /* keep last */ }
+}
+async function loadViews() {
+  try {
+    const r = await authedFetch("/pages");
+    const pages = await r.json();
+    const el = document.getElementById("views");
+    el.innerHTML = (pages || []).map(p => `<a href="${esc(p.url)}" target="_blank">${esc(p.name)}</a>`).join("");
+  } catch (e) { /* no custom views */ }
+}
+loadViews();
+tick();
+curveTick();
+setInterval(tick, 1000);
+setInterval(curveTick, 2000);
+</script>
+</body>
+</html>

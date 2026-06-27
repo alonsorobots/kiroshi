@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>KIROSHI // history</title>
+<style>
+  :root { --bg:#07090d; --panel:#0d1117; --line:#1b2230; --teal:#1ad1c8; --magenta:#ff2e88; --amber:#ffb648; --green:#4ade80; --text:#d7e0ea; --muted:#6b7a8d; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.45 "Segoe UI",system-ui,sans-serif;
+    background-image: radial-gradient(circle at 15% -10%, rgba(26,209,200,.08), transparent 40%), radial-gradient(circle at 110% 10%, rgba(255,46,136,.08), transparent 45%); }
+  header { display:flex; align-items:baseline; gap:14px; padding:16px 22px; border-bottom:1px solid var(--line); }
+  h1 { font-size:20px; letter-spacing:.35em; margin:0; font-weight:700; color:var(--teal); text-shadow:0 0 12px rgba(26,209,200,.45); }
+  .sub { color:var(--muted); letter-spacing:.2em; font-size:11px; text-transform:uppercase; }
+  nav.tabs { display:flex; gap:10px; margin-left:24px; }
+  nav.tabs a { color:var(--amber); text-decoration:none; font-size:12px; letter-spacing:.12em; text-transform:uppercase; border:1px solid var(--line); padding:4px 10px; border-radius:6px; }
+  nav.tabs a:hover { border-color:var(--amber); } nav.tabs a.on { border-color:var(--teal); color:var(--teal); }
+  .dot { width:9px;height:9px;border-radius:50%;background:var(--magenta);display:inline-block;margin-left:auto;box-shadow:0 0 10px var(--magenta);} .dot.live{background:var(--teal);box-shadow:0 0 10px var(--teal);}
+  main { padding:22px; max-width:1300px; margin:0 auto; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:8px 0; overflow-x:auto; }
+  table { width:100%; border-collapse:collapse; font-variant-numeric:tabular-nums; }
+  th,td { text-align:left; padding:9px 12px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--muted); font-weight:600; font-size:11px; text-transform:uppercase; letter-spacing:.1em; }
+  td.name a { color:var(--teal); text-decoration:none; } td.name a:hover { text-decoration:underline; }
+  .minibar { height:8px; width:120px; background:#0a0f16; border:1px solid var(--line); border-radius:5px; overflow:hidden; display:inline-block; vertical-align:middle; margin-right:8px; }
+  .minibar>span { display:block; height:100%; background:linear-gradient(90deg,var(--teal),var(--magenta)); }
+  .cmd { font-family:ui-monospace,monospace; font-size:11px; color:var(--muted); max-width:360px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .cmd:hover { white-space:normal; word-break:break-all; color:var(--text); }
+  .f { color:var(--magenta); } .ok { color:var(--green); }
+  .empty { color:var(--muted); text-align:center; padding:40px; }
+  footer { text-align:center; color:var(--muted); padding:16px; font-size:11px; letter-spacing:.15em; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>KIROSHI</h1><span class="sub">history</span>
+    <nav class="tabs"><a href="/">Overview</a><a href="/ui/jobs">Jobs</a><a href="/ui/history" class="on">History</a></nav>
+    <span id="live" class="dot"></span>
+  </header>
+  <main>
+    <div class="panel">
+      <table>
+        <thead><tr><th>Job</th><th>Progress</th><th>Done/Total</th><th>Failed</th><th>Started</th><th>Ended</th><th>Launch command</th></tr></thead>
+        <tbody id="rows"><tr><td class="empty" colspan="7">loading…</td></tr></tbody>
+      </table>
+    </div>
+  </main>
+  <footer>every campaign ever seeded · click a job name for its rate curve</footer>
+<script>
+(function(){const u=new URL(location.href);const t=u.searchParams.get("token");if(t){try{localStorage.setItem("kiroshi_token",t)}catch(e){}u.searchParams.delete("token");history.replaceState({},"",u.pathname+u.search)}})();
+function tok(){try{return localStorage.getItem("kiroshi_token")||""}catch(e){return""}}
+async function aFetch(url,o){o=o||{};const t=tok();if(t)o.headers=Object.assign({},o.headers,{Authorization:"Bearer "+t});o.cache="no-store";const r=await fetch(url,o);if(r.status===401){const e=window.prompt("Mesh token required:");if(e){try{localStorage.setItem("kiroshi_token",e)}catch(x){}return aFetch(url,o)}}return r}
+function esc(s){return (s==null?"":String(s)).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}
+function fmt(t){ if(!t) return "—"; return new Date(t*1000).toLocaleString(); }
+async function tick(){
+  const live=document.getElementById("live");
+  try{
+    const d=await (await aFetch("/groups?limit=2000")).json(); live.classList.add("live");
+    const groups=d.groups||[];
+    const tb=document.getElementById("rows");
+    if(!groups.length){ tb.innerHTML='<tr><td class="empty" colspan="7">no jobs yet.</td></tr>'; return; }
+    tb.innerHTML=groups.map(g=>{
+      const pct=g.total?(100*g.done/g.total):0;
+      const cmd=(g.launch_commands&&g.launch_commands[0])||"—";
+      const ended=(g.done>=g.total&&g.total>0)?fmt(g.last_completed):"—";
+      const gid=encodeURIComponent(g.grp);
+      return `<tr>
+        <td class="name"><a href="/ui/job?job=${gid}">${esc(g.grp)}</a></td>
+        <td><span class="minibar"><span style="width:${pct.toFixed(1)}%"></span></span>${pct.toFixed(1)}%</td>
+        <td class="ok">${g.done}/${g.total}</td>
+        <td class="${g.failed?'f':''}">${g.failed}</td>
+        <td>${fmt(g.first_created)}</td>
+        <td>${ended}</td>
+        <td class="cmd" title="${esc(cmd)}">${esc(cmd)}</td>
+      </tr>`;
+    }).join("");
+  }catch(e){ live.classList.remove("live"); }
+}
+tick(); setInterval(tick,3000);
+</script>
+</body>
+</html>

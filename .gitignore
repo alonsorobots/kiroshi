@@ -1,0 +1,94 @@
+# ---------------------------------------------------------------------------
+# Kiroshi .gitignore
+# This is a PUBLIC, open-source repo. Keep ALL machine-specific / personal
+# information (absolute paths, NAS IPs, hostnames, collaborator names,
+# credentials) OUT of committed files. Such pointers live ONLY in the
+# gitignored LOCAL_CONTEXT.md (and any *.local.* files).
+# ---------------------------------------------------------------------------
+
+# --- Local-only context & pointers (PII / machine-specific) ---
+LOCAL_CONTEXT.md
+local/
+*.local.md
+*.local.toml
+*.local.json
+*.local.yaml
+*.local.yml
+kiroshi.local.*
+
+# --- Secrets / environment ---
+.env
+.env.*
+secrets*
+*.pem
+*.key
+
+# --- Kiroshi runtime state ---
+# SQLite job store (coordinator state) and any local run scratch.
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+kiroshi_state/
+runs/
+logs/
+*.log
+.live/
+.live_state/
+
+# --- Local scratch / one-off probe scripts (not part of the package) ---
+_scratch*
+_probe*
+
+# --- Data artifacts (never commit datasets/outputs) ---
+data/
+outputs/
+output/
+*.npz
+*.parquet
+*.dat
+*.npy
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg
+*.egg-info/
+.eggs/
+build/
+dist/
+wheels/
+pip-wheel-metadata/
+.installed.cfg
+
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# --- Test / type / lint caches ---
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.dmypy.json
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# --- IDE / editor ---
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# --- OS cruft ---
+.DS_Store
+Thumbs.db
+desktop.ini

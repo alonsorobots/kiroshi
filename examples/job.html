@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<!--
+  EXAMPLE custom per-job page for Kiroshi.
+
+  Drop a file named `job.html` into the Fixer's pages dir:
+      kiroshi fixer --pages-dir <dir>
+  ...and a "page" button appears on each job in /ui/jobs (and on /ui/job).
+  The button opens this file at /p/job.html?job=<campaign>&token=<token>.
+
+  Contract available to your page:
+    - URL param `job`   : the campaign/group id (job_id prefix).
+    - URL param `token` : the mesh token (also persisted to localStorage here).
+    - GET /jobs?limit=…  : all gigs (filter client-side by job_id prefix).
+    - GET /job/<job_id>  : one gig's full detail (spec, metrics, error, timing).
+  Use these to render whatever your task wants — output previews, plots, links.
+  This generic example lists the campaign's gigs with status, metrics and errors.
+-->
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>KIROSHI // job outputs</title>
+<style>
+  :root { --bg:#07090d; --panel:#0d1117; --line:#1b2230; --teal:#1ad1c8; --magenta:#ff2e88; --green:#4ade80; --amber:#ffb648; --text:#d7e0ea; --muted:#6b7a8d; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.45 "Segoe UI",system-ui,sans-serif; }
+  header { padding:16px 22px; border-bottom:1px solid var(--line); display:flex; gap:14px; align-items:baseline; }
+  h1 { font-size:18px; letter-spacing:.3em; margin:0; color:var(--teal); }
+  .job { color:var(--amber); word-break:break-all; }
+  main { padding:22px; max-width:1100px; margin:0 auto; }
+  table { width:100%; border-collapse:collapse; font-variant-numeric:tabular-nums; }
+  th,td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); }
+  th { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.1em; }
+  .done { color:var(--green); } .failed { color:var(--magenta); } .leased { color:var(--amber); } .pending { color:var(--muted); }
+  .err { color:var(--magenta); font-family:ui-monospace,monospace; font-size:12px; }
+  code { font-family:ui-monospace,monospace; font-size:12px; color:var(--muted); }
+</style>
+</head>
+<body>
+  <header><h1>KIROSHI</h1><span class="job" id="jobname"></span></header>
+  <main>
+    <p id="summary" style="color:var(--muted)"></p>
+    <table>
+      <thead><tr><th>Gig</th><th>State</th><th>Attempts</th><th>Metrics</th><th>Error</th></tr></thead>
+      <tbody id="rows"><tr><td colspan="5" style="color:var(--muted)">loading…</td></tr></tbody>
+    </table>
+  </main>
+<script>
+(function(){const u=new URL(location.href);const t=u.searchParams.get("token");if(t){try{localStorage.setItem("kiroshi_token",t)}catch(e){}}})();
+function tok(){try{return localStorage.getItem("kiroshi_token")||""}catch(e){return""}}
+async function aFetch(url){const t=tok();const o={cache:"no-store"};if(t)o.headers={Authorization:"Bearer "+t};return fetch(url,o);}
+function esc(s){return (s==null?"":String(s)).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}
+const JOB=new URLSearchParams(location.search).get("job")||"";
+document.getElementById("jobname").textContent=JOB||"(all)";
+async function tick(){
+  try{
+    const d=await (await aFetch("/jobs?limit=2000")).json();
+    const prefix=JOB?JOB+"/":"";
+    const gigs=(d.jobs||[]).filter(j=>JOB?j.job_id.startsWith(prefix):true);
+    const tb=document.getElementById("rows");
+    if(!gigs.length){ tb.innerHTML='<tr><td colspan="5" style="color:var(--muted)">no gigs for this job.</td></tr>'; }
+    else { tb.innerHTML=gigs.map(j=>`<tr>
+      <td><code>${esc(j.job_id)}</code></td>
+      <td class="${j.state}">${j.state}</td>
+      <td>${j.attempts}</td>
+      <td><code>${esc(JSON.stringify(j.metrics||{}))}</code></td>
+      <td class="err">${esc((j.error||"").slice(0,160))}</td></tr>`).join(""); }
+    const done=gigs.filter(j=>j.state==="done").length;
+    document.getElementById("summary").textContent=`${done}/${gigs.length} gigs done`;
+  }catch(e){ /* keep last */ }
+}
+tick(); setInterval(tick,3000);
+</script>
+</body>
+</html>

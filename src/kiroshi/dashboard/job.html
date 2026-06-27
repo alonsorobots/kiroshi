@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>KIROSHI // job</title>
+<style>
+  :root { --bg:#07090d; --panel:#0d1117; --line:#1b2230; --teal:#1ad1c8; --magenta:#ff2e88; --amber:#ffb648; --green:#4ade80; --text:#d7e0ea; --muted:#6b7a8d; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.45 "Segoe UI",system-ui,sans-serif;
+    background-image: radial-gradient(circle at 15% -10%, rgba(26,209,200,.08), transparent 40%), radial-gradient(circle at 110% 10%, rgba(255,46,136,.08), transparent 45%); }
+  header { display:flex; align-items:baseline; gap:14px; padding:16px 22px; border-bottom:1px solid var(--line); }
+  h1 { font-size:20px; letter-spacing:.35em; margin:0; font-weight:700; color:var(--teal); text-shadow:0 0 12px rgba(26,209,200,.45); }
+  .sub { color:var(--muted); letter-spacing:.2em; font-size:11px; text-transform:uppercase; }
+  nav.tabs { display:flex; gap:10px; margin-left:24px; }
+  nav.tabs a { color:var(--amber); text-decoration:none; font-size:12px; letter-spacing:.12em; text-transform:uppercase; border:1px solid var(--line); padding:4px 10px; border-radius:6px; }
+  nav.tabs a:hover { border-color:var(--amber); }
+  .dot { width:9px;height:9px;border-radius:50%;background:var(--magenta);display:inline-block;margin-left:auto;box-shadow:0 0 10px var(--magenta);} .dot.live{background:var(--teal);box-shadow:0 0 10px var(--teal);}
+  main { padding:22px; display:grid; gap:18px; max-width:1100px; margin:0 auto; }
+  .jobname { font-size:18px; font-weight:700; word-break:break-all; }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:14px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px 16px; }
+  .card .label { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.15em; }
+  .card .val { font-size:26px; font-weight:700; margin-top:6px; font-variant-numeric:tabular-nums; }
+  .val.teal{color:var(--teal);} .val.magenta{color:var(--magenta);} .val.amber{color:var(--amber);} .val.green{color:var(--green);}
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:16px; }
+  .panel h2 { font-size:12px; letter-spacing:.2em; text-transform:uppercase; color:var(--muted); margin:0 0 12px; }
+  .pill { position:relative; height:22px; background:#0a0f16; border:1px solid var(--line); border-radius:12px; overflow:hidden; }
+  .pill > .fill { height:100%; background:linear-gradient(90deg,var(--teal),var(--magenta)); width:0%; transition:width .5s ease; }
+  .pill > .lbl { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; font-size:11px; color:#04121a; font-weight:700; mix-blend-mode:screen; }
+  .curve { width:100%; height:200px; display:block; }
+  .cmd { font-family:ui-monospace,monospace; font-size:12px; color:var(--text); background:#0a0f16; border:1px solid var(--line); border-radius:6px; padding:8px 10px; word-break:break-all; margin-bottom:8px; }
+  .btn { cursor:pointer; background:transparent; color:var(--amber); border:1px solid var(--line); border-radius:6px; padding:5px 11px; font-size:12px; letter-spacing:.08em; text-transform:uppercase; text-decoration:none; }
+  .btn:hover { border-color:var(--amber); }
+  footer { text-align:center; color:var(--muted); padding:16px; font-size:11px; letter-spacing:.15em; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>KIROSHI</h1><span class="sub">job</span>
+    <nav class="tabs"><a href="/">Overview</a><a href="/ui/jobs">Jobs</a><a href="/ui/history">History</a></nav>
+    <span id="live" class="dot"></span>
+  </header>
+  <main>
+    <div class="jobname" id="jobname">…</div>
+    <div class="cards">
+      <div class="card"><div class="label">Progress</div><div id="pct" class="val teal">0%</div></div>
+      <div class="card"><div class="label">Done</div><div id="done" class="val green">0</div></div>
+      <div class="card"><div class="label">In flight</div><div id="leased" class="val amber">0</div></div>
+      <div class="card"><div class="label">Failed</div><div id="failed" class="val magenta">0</div></div>
+      <div class="card"><div class="label">Rate /s</div><div id="rate" class="val teal">0</div></div>
+      <div class="card"><div class="label">ETA</div><div id="eta" class="val">—</div></div>
+    </div>
+    <div class="panel"><h2>Progress</h2><div class="pill"><div id="fill" class="fill"></div><div id="lbl" class="lbl"></div></div></div>
+    <div class="panel">
+      <h2>Rate over time <span id="curveinfo" class="sub"></span></h2>
+      <svg id="curve" class="curve" viewBox="0 0 1000 200" preserveAspectRatio="none">
+        <defs>
+          <linearGradient id="grad" x1="0" y1="1" x2="0" y2="0">
+            <stop offset="0%" stop-color="#1ad1c8" stop-opacity="0.9"/>
+            <stop offset="55%" stop-color="#ffb648" stop-opacity="0.95"/>
+            <stop offset="100%" stop-color="#ff2e88" stop-opacity="1"/>
+          </linearGradient>
+          <filter id="bloom" x="-20%" y="-20%" width="140%" height="140%">
+            <feGaussianBlur stdDeviation="2.4" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+          </filter>
+        </defs>
+        <polygon id="fillc" fill="url(#grad)" fill-opacity="0.14" points=""/>
+        <polyline id="line" fill="none" stroke="url(#grad)" stroke-width="2.5" filter="url(#bloom)" points=""/>
+      </svg>
+    </div>
+    <div class="panel"><h2>Launch command(s)</h2><div id="cmds"></div>
+      <a id="pagebtn" class="btn" style="display:none" target="_blank">▤ custom job page</a>
+      <span id="times" class="sub"></span></div>
+  </main>
+  <footer>rate = gigs completed per second for this job, sampled every 2s</footer>
+<script>
+(function(){const u=new URL(location.href);const t=u.searchParams.get("token");if(t){try{localStorage.setItem("kiroshi_token",t)}catch(e){}u.searchParams.delete("token");history.replaceState({},"",u.pathname+u.search)}})();
+function tok(){try{return localStorage.getItem("kiroshi_token")||""}catch(e){return""}}
+async function aFetch(url,o){o=o||{};const t=tok();if(t)o.headers=Object.assign({},o.headers,{Authorization:"Bearer "+t});o.cache="no-store";const r=await fetch(url,o);if(r.status===401){const e=window.prompt("Mesh token required:");if(e){try{localStorage.setItem("kiroshi_token",e)}catch(x){}return aFetch(url,o)}}return r}
+function withTok(url){const t=tok();return t?url+(url.includes("?")?"&":"?")+"token="+encodeURIComponent(t):url}
+function esc(s){return (s==null?"":String(s)).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}
+const JOB = new URLSearchParams(location.search).get("job") || "";
+document.getElementById("jobname").textContent = JOB || "(all)";
+function fmtEta(s){ if(s==null) return "—"; s=Math.round(s); const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),x=s%60; if(h)return h+"h "+m+"m"; if(m)return m+"m "+x+"s"; return x+"s"; }
+function renderCurve(series){
+  const W=1000,H=200,pad=8; const line=document.getElementById("line"),fill=document.getElementById("fillc"),info=document.getElementById("curveinfo");
+  if(series.length<2){ line.setAttribute("points","");fill.setAttribute("points","");info.textContent="warming up…"; return; }
+  const t0=series[0].t, t1=series[series.length-1].t, span=Math.max(1,t1-t0);
+  const maxR=Math.max(0.001,...series.map(s=>s.r));
+  const x=t=>pad+(W-2*pad)*(t-t0)/span, y=r=>(H-pad)-(H-2*pad)*(r/maxR);
+  const pts=series.map(s=>`${x(s.t).toFixed(1)},${y(s.r).toFixed(1)}`);
+  line.setAttribute("points",pts.join(" "));
+  fill.setAttribute("points",`${pad},${H-pad} ${pts.join(" ")} ${W-pad},${H-pad}`);
+  const cur=series[series.length-1].r; info.textContent=`now ${cur.toFixed(2)}/s · peak ${maxR.toFixed(2)}/s · last ${Math.round(span)}s`;
+}
+async function tick(){
+  const live=document.getElementById("live");
+  try{
+    const [gr,mh]=await Promise.all([aFetch("/groups"),aFetch("/metrics/history")]);
+    const groups=(await gr.json()).groups||[]; const hist=(await mh.json()).samples||[];
+    live.classList.add("live");
+    const g=groups.find(x=>x.grp===JOB)|| (JOB===""?null:null);
+    if(g){
+      const pct=g.total?(100*g.done/g.total):0;
+      document.getElementById("pct").textContent=pct.toFixed(1)+"%";
+      document.getElementById("done").textContent=g.done;
+      document.getElementById("leased").textContent=g.leased;
+      document.getElementById("failed").textContent=g.failed;
+      document.getElementById("fill").style.width=pct.toFixed(1)+"%";
+      document.getElementById("lbl").textContent=`${g.done} / ${g.total}`;
+      const cmds=g.launch_commands||[];
+      document.getElementById("cmds").innerHTML=cmds.length?cmds.map(c=>`<div class="cmd">${esc(c)}</div>`).join(""):'<div class="cmd">(launch command unknown — runner not registered)</div>';
+      const pb=document.getElementById("pagebtn");
+      if(g.has_custom_page){ pb.style.display="inline-block"; pb.href=withTok("/p/job.html?job="+encodeURIComponent(JOB)); } else { pb.style.display="none"; }
+      const start=g.first_created?new Date(g.first_created*1000).toLocaleString():"—";
+      const end=(g.done>=g.total&&g.last_completed)?new Date(g.last_completed*1000).toLocaleString():"—";
+      document.getElementById("times").textContent=`started ${start} · ended ${end}`;
+    }
+    // per-job rate from done-count deltas in the history ring buffer
+    const series=[]; let prev=null;
+    for(const s of hist){ const done=(s.groups&&s.groups[JOB]!=null)?s.groups[JOB]:(JOB===""? s.done : null); if(done==null) continue;
+      if(prev){ const dt=s.ts-prev.ts; if(dt>0) series.push({t:s.ts,r:Math.max(0,(done-prev.done)/dt)}); } prev={ts:s.ts,done}; }
+    renderCurve(series);
+    const rate=series.length?series[series.length-1].r:0;
+    document.getElementById("rate").textContent=rate.toFixed(2);
+    if(g){ const remain=g.total-g.done; document.getElementById("eta").textContent=(rate>0&&remain>0)?fmtEta(remain/rate):(remain<=0?"done":"—"); }
+  }catch(e){ live.classList.remove("live"); }
+}
+tick(); setInterval(tick,2000);
+</script>
+</body>
+</html>
