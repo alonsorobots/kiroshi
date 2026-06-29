@@ -144,6 +144,44 @@ With (1)–(4), the residual exposure is "a token-holder can flood/poison the
 queue" (a DoS by an insider with the secret) — the same trust you place in anyone
 holding an SSH key to the cluster.
 
+## 6.5 Planned: task-code distribution for `join` (NOT YET IMPLEMENTED)
+
+The `kiroshi join` front-door verb (PLAN §7.5) aims to make adding a machine one
+command. The hard part is getting the **task code** onto the new machine. The
+planned mechanism — a `run --lan` Fixer serving the task source to a joining
+Runner — is a **deliberate, recorded change to the threat model**, documented here
+*before* it ships so the decision is reviewable.
+
+**Why it's sensitive.** Today the protocol ships only **specs (JSON data)**; task
+code is local and trusted on each Runner. Every guarantee above assumes that. The
+moment a Fixer can hand a Runner **executable code**, a rogue or compromised Fixer
+becomes **remote code execution on every Runner** — potentially as `LocalSystem`
+for a service-installed Runner. That is a qualitative escalation, not a footnote.
+
+**Required controls (all of them, or it doesn't ship):**
+
+1. **Opt-in, never silent.** Code distribution is off by default. A plain
+   `kiroshi run` / `runner` never sends or accepts code; only an explicit
+   `run --serve-task` (Fixer side) + an interactive/confirmed `join` (Runner side)
+   enable it.
+2. **Operator consent at the Runner.** `join` displays the code's SHA-256 and a
+   summary ("1 file, N bytes, from <fixer ip>") and requires a `[y/N]` approval
+   (or an explicit `--accept-task-hash <sha256>` for scripted installs) before the
+   code is ever written to disk or imported.
+3. **Hash pinning.** The approved hash is recorded; the Runner refuses any later
+   source whose hash differs, so a Fixer (or on-path MITM) can't swap the code
+   after consent. Re-approval is required to change it.
+4. **Still token-gated + mutually authenticated.** Fetching the source requires the
+   mesh token and passes through the existing `/auth/challenge` mutual-auth, so a
+   rogue Fixer can't even offer code without the token.
+5. **Confinement unchanged.** The fetched task still runs under the Runner's
+   (least-privilege) account and confines paths to its data roots (§6).
+
+Multi-module / heavy-dependency tasks bypass code-shipping entirely: `join
+--task-repo <url> --task-deps "…"` clones + `pip install`s (operator chose the
+URL), or the task is pre-installed (the current model). Until all of (1)–(3) land,
+**`join` requires the task to be pre-installed** — exactly today's behavior.
+
 ## 7. Remaining risks / non-goals (honest)
 
 - **No built-in TLS.** Specs/results/token travel in cleartext on plain HTTP. The

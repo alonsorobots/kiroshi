@@ -34,16 +34,25 @@ _OPEN_PATHS = frozenset({"/", "/favicon.ico", "/healthz", "/auth/challenge"})
 class SeedGig(BaseModel):
     job_id: str
     spec: dict[str, Any] = Field(default_factory=dict)
+    group: Optional[str] = None
 
 
 class SeedReq(BaseModel):
     gigs: list[SeedGig]
+    # Batch-wide campaign slug + human-readable label, applied to every gig that
+    # doesn't carry its own `group`. Lets `kiroshi seed --group X --label "..."` head
+    # a whole campaign in the dashboard instead of fragmenting it per job_id prefix.
+    group: Optional[str] = None
+    label: Optional[str] = None
 
 
 class LeaseReq(BaseModel):
     runner_id: str
     host: str = "?"
     capacity: int = 100
+    # The Runner's heartbeat cadence (s). The Fixer sizes the lease as a safe
+    # multiple of it, so a slow-but-alive Runner isn't reaped into a duplicate.
+    heartbeat_interval: Optional[float] = None
 
 
 class ResultItem(BaseModel):
@@ -62,6 +71,7 @@ class HeartbeatReq(BaseModel):
     lease_id: str
     runner_id: str = "?"
     stats: dict[str, Any] = Field(default_factory=dict)
+    heartbeat_interval: Optional[float] = None
 
 
 class RequeueReq(BaseModel):
@@ -86,10 +96,20 @@ def create_app(
     pages_dir: Optional[str] = None,
     token: Optional[str] = None,
     launch_command: Optional[str] = None,
+    lease_miss_tolerance: float = 4.0,
+    lease_ttl_cap: float = 3600.0,
+    task_source: Optional[dict[str, Any]] = None,
 ) -> FastAPI:
     app = FastAPI(title="Kiroshi Fixer", version="0.0.1")
     app.state.store = store
     app.state.lease_ttl = lease_ttl
+    # A lease must outlive several missed heartbeats, or a momentarily-slow (but
+    # alive) Runner gets reaped and its gigs handed to a second Runner — i.e. the
+    # same output written twice (at-least-once delivery). We size each lease to
+    # max(lease_ttl, miss_tolerance * runner_heartbeat), capped, so the floor is
+    # robust regardless of how the Runner is configured.
+    app.state.lease_miss_tolerance = lease_miss_tolerance
+    app.state.lease_ttl_cap = lease_ttl_cap
     app.state.token = token
     app.state._stop = threading.Event()
     # In-memory runner registry (launch command, pid, liveness) + throughput
@@ -98,6 +118,9 @@ def create_app(
     app.state.metrics = deque(maxlen=900)
     app.state.started_at = time.time()
     app.state.launch_command = launch_command or ""
+    # Opt-in task-code serving for `kiroshi join` (SECURITY.md §6.5). None unless
+    # the Fixer was started with --serve-task; gated + consent-checked client-side.
+    app.state.task_source = task_source
 
     @app.middleware("http")
     async def _auth(request: Request, call_next):
@@ -198,7 +221,10 @@ def create_app(
 
     @app.post("/seed")
     def seed(req: SeedReq) -> dict[str, int]:
-        inserted = store.seed([g.model_dump() for g in req.gigs])
+        inserted = store.seed(
+            [g.model_dump() for g in req.gigs],
+            group=req.group, label=req.label,
+        )
         return {"inserted": inserted, "received": len(req.gigs)}
 
     def _touch_runner(runner_id: str, host: str) -> None:
@@ -283,11 +309,19 @@ def create_app(
             d["task"] = r.get("task", "") if r else ""
         return rows
 
+    def _effective_ttl(hb: Optional[float]) -> float:
+        """Lease lifetime adapted to the Runner's heartbeat cadence (bounded)."""
+        floor = app.state.lease_ttl
+        if hb and hb > 0:
+            floor = max(floor, hb * app.state.lease_miss_tolerance)
+        return min(floor, app.state.lease_ttl_cap)
+
     @app.post("/lease")
     def lease(req: LeaseReq) -> dict[str, Any]:
         _touch_runner(req.runner_id, req.host)
-        res = store.lease(req.runner_id, req.host, req.capacity, app.state.lease_ttl)
-        return {"lease_id": res.lease_id, "gigs": res.gigs, "ttl": app.state.lease_ttl}
+        ttl = _effective_ttl(req.heartbeat_interval)
+        res = store.lease(req.runner_id, req.host, req.capacity, ttl)
+        return {"lease_id": res.lease_id, "gigs": res.gigs, "ttl": ttl}
 
     @app.post("/complete")
     def complete(req: CompleteReq) -> dict[str, int]:
@@ -297,13 +331,45 @@ def create_app(
     def heartbeat(req: HeartbeatReq) -> dict[str, Any]:
         if req.runner_id and req.runner_id != "?":
             _touch_runner(req.runner_id, "?")
-        extended = store.heartbeat(req.lease_id, app.state.lease_ttl)
-        return {"extended": extended, "ttl": app.state.lease_ttl}
+        ttl = _effective_ttl(req.heartbeat_interval)
+        extended = store.heartbeat(req.lease_id, ttl)
+        return {"extended": extended, "ttl": ttl}
 
     @app.post("/requeue")
     def requeue(req: RequeueReq) -> dict[str, int]:
         n = store.requeue(tuple(req.states), reset_attempts=req.reset_attempts)
         return {"requeued": n}
+
+    @app.get("/task/meta")
+    def task_meta() -> dict[str, Any]:
+        """Whether this Fixer serves task code, and its identity/hash (token-gated).
+
+        ``served=False`` means the joining Runner must already have the task
+        importable (pre-installed) — the safe default.
+        """
+        ts = app.state.task_source
+        if not ts:
+            return {"served": False, "task_ref": None, "sha256": None, "filename": None}
+        return {"served": True, "task_ref": ts["task_ref"], "sha256": ts["sha256"],
+                "filename": ts["filename"], "module": ts["module"],
+                "bytes": len(ts["source"])}
+
+    @app.get("/task/source")
+    def task_source_ep() -> JSONResponse:
+        """Serve the task source for a consenting joiner (token-gated, opt-in).
+
+        Only present when the Fixer was started with ``--serve-task``. The client
+        (`kiroshi join`) shows the SHA-256 and requires operator approval before
+        writing/importing — see SECURITY.md §6.5.
+        """
+        ts = app.state.task_source
+        if not ts:
+            return JSONResponse({"error": "this Fixer does not serve task code"},
+                                status_code=404)
+        return JSONResponse({
+            "task_ref": ts["task_ref"], "module": ts["module"],
+            "filename": ts["filename"], "source": ts["source"], "sha256": ts["sha256"],
+        })
 
     @app.get("/status")
     def status() -> JSONResponse:

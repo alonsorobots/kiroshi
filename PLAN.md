@@ -248,6 +248,71 @@ imports the task — only Runners do.
 
 ---
 
+## 7.5 The front door — `run` / `join` / `install`
+
+The original surface started at the power-user layer (`fixer` + `seed` + `runner`
++ `service` — four commands). The design north star is **one command to run your
+function across the mesh, with every knob still reachable underneath.** Three verbs:
+
+| Verb | What it does | Layer |
+|---|---|---|
+| `kiroshi run <task> [inputs]` | Enumerate inputs → start a Fixer (loopback) + a local Runner in-process → seed → render a live terminal progress bar → print where outputs landed + the dashboard URL. Add `--lan` to bind `0.0.0.0` so other machines can join. | "just run my function" |
+| `kiroshi join` | On another machine: discover the Fixer, present the token, (consent to) fetch the task, register as an auto-start Runner service, start pulling. | "add a machine" |
+| `kiroshi install` | Make it permanent: Fixer as a boot-start service + tray autostart on login. | "keep it running" |
+
+`run` and `run --lan` are the **same code path** — the only difference is the bind
+address. There is no separate "mesh mode": the Fixer already binds loopback by
+default (secure), and `--lan` simply opens the door, exactly like `kiroshi fixer
+--host 0.0.0.0`. You scale 1→N machines without changing your workflow.
+
+Design notes:
+- **In-process Fixer + Runner.** `run` starts the FastAPI Fixer in a background
+  thread and a Runner in another, both in the launching process. Ctrl-C drains
+  and exits. The coordinator is *ephemeral* — for a permanent one use `install`.
+- **Persistent DB, not `:memory:`.** `run` uses a real SQLite file (default
+  `<state_dir>/run-<slug>.db`) so the lease reaper / retry / resume survive a
+  crash+restart of the launcher. Resume also comes for free from output-existence
+  when the task implements the skip check (§5).
+- **The progress bar reads the in-process store directly** (`store.stats()`), so it
+  shows *aggregate* progress across every joined machine — the payoff of
+  distribution, visible where you launched it. TTY → live `\r` bar; non-TTY →
+  periodic status lines.
+- **Auth follows the bind.** Loopback `run` defaults to no-auth (only this box can
+  reach it). `--lan` generates + persists a mesh token and prints it, so joiners
+  have a one-time join code (same model as `fixer`).
+
+### Enumeration contract
+`run` turns *inputs* into *gigs*. Three ways, simplest first:
+
+1. `--items "<glob>"` — one gig per matching path; the spec is `{"path": <rel>}`.
+   Zero task code; covers the trivial one-file-one-gig case.
+2. `--jobs file.jsonl` — explicit gig list (same as `seed --jobs`).
+3. `--enumerate` — call the task module's **enumeration hook**:
+
+   ```python
+   def enumerate_gigs(args: dict) -> Iterator[dict]:
+       """Kiroshi enumeration contract. `args` are the pass-through tokens after
+       `--` on the `kiroshi run` line (repeated flags become lists). Yield
+       {"job_id": str, "spec": dict, "group"?: str} — one per unit of work."""
+   ```
+
+   Invoked as `kiroshi run pkg.task:run --enumerate -- --read-root //nas --fps 4 --fps 8`.
+   The task owns its fan-out (e.g. one expensive read → a 4-fps **and** an 8-fps
+   gig) — a generic globber can't infer that. This is the seam that makes `run`
+   work for real workloads, not just toys.
+
+### Task-code distribution (for `join`) — PLANNED, not yet built
+The deepest friction in adding a machine is getting the *task code* onto it.
+Planned model, **opt-in and consent-gated** (see `SECURITY.md`): a `run --lan`
+Fixer can hold the task source and serve it to a joining Runner over the
+token-gated API; `join` shows the code's hash and asks the operator to approve
+before writing/importing it. Single-file tasks join with no checkout; multi-module
+tasks use `--task-repo <url> --task-deps "…"` (clone + pip install) or are
+pre-installed. **This changes the threat model (a rogue Fixer → RCE on Runners),
+so it is never silent.**
+
+---
+
 ## 8. Build milestones
 
 - **M0 — Skeleton:** ✅ package, config, jsonio, atomic, bench, jobstore,
@@ -268,8 +333,25 @@ imports the task — only Runners do.
   elevation shims. Auto-start, rotating logs, crash auto-restart. Enforces the
   NAS-credential rule: Fixer→LocalSystem, NAS-bound Runner→real user account
   (refuses LocalSystem without `--force`). Launches via `python -m kiroshi`.
-- **M5 — Bootstrap helper:** stand up a new Runner host (Python env + deps) from
-  one command; add it to the mesh.
+- **M4.5 — Always-on + tray autostart:** ✅ `kiroshi install` (one command:
+  Fixer boot-start service + tray login-autostart via `HKCU\Run`); `kiroshi
+  uninstall`; `kiroshi autostart on|off|status`; tray self-registers on launch,
+  left-click opens the dashboard, tooltip shows live campaign progress. Fixed the
+  Windows quoting bug (`shlex.quote` single-quotes break NSSM `AppParameters`).
+- **M4.6 — The front door (`kiroshi run`):** the one-command path — enumerate
+  (`--items` glob / `--jobs` / `--enumerate` hook) → in-process Fixer (loopback)
+  + local Runner → live terminal progress bar (aggregate over the mesh) →
+  end-of-run output location + dashboard URL. `--lan` opens it to other machines.
+  Persistent run DB so self-heal/resume survive a launcher restart. (§7.5)
+- **M5 — `kiroshi join` (scoped):** ✅ one command on a new machine — discover the
+  Fixer, **mutually authenticate** it, ensure the task (pre-installed, or
+  **consent-gated + hash-pinned** fetch of a `run --serve-task` single-file task),
+  then run a Runner foreground or `--service` (auto-start). Assumes Python +
+  `pip install kiroshi` is the single prerequisite (no Python/conda bootstrapping).
+  Endpoints `/task/meta` + `/task/source` (token-gated); consent + pinning per
+  SECURITY.md §6.5. End-to-end verified: a fresh-state-dir joiner fetched+approved
+  code and joined the mesh with no checkout. A one-click `.exe` join (at-field's
+  NSIS model) and `--task-repo` (multi-module) remain later steps.
 - **M6 — Package & polish:** docs, examples, `pip install kiroshi`, dashboard
   theming, optional at-field pause-awareness, optional `kiroshi copy` (robocopy).
 

@@ -81,8 +81,7 @@ async function aFetch(url,o){o=o||{};const t=tok();if(t)o.headers=Object.assign(
 function withTok(url){const t=tok();return t?url+(url.includes("?")?"&":"?")+"token="+encodeURIComponent(t):url}
 function esc(s){return (s==null?"":String(s)).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}
 const JOB = new URLSearchParams(location.search).get("job") || "";
-document.getElementById("jobname").textContent = JOB || "(all)";
-function fmtEta(s){ if(s==null) return "—"; s=Math.round(s); const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),x=s%60; if(h)return h+"h "+m+"m"; if(m)return m+"m "+x+"s"; return x+"s"; }
+document.getElementById("jobname").textContent = JOB || "(all)";function fmtEta(s){ if(s==null) return "—"; s=Math.round(s); const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),x=s%60; if(h)return h+"h "+m+"m"; if(m)return m+"m "+x+"s"; return x+"s"; }
 function renderCurve(series){
   const W=1000,H=200,pad=8; const line=document.getElementById("line"),fill=document.getElementById("fillc"),info=document.getElementById("curveinfo");
   if(series.length<2){ line.setAttribute("points","");fill.setAttribute("points","");info.textContent="warming up…"; return; }
@@ -102,6 +101,7 @@ async function tick(){
     live.classList.add("live");
     const g=groups.find(x=>x.grp===JOB)|| (JOB===""?null:null);
     if(g){
+      document.getElementById("jobname").textContent=g.label||g.grp||JOB;
       const pct=g.total?(100*g.done/g.total):0;
       document.getElementById("pct").textContent=pct.toFixed(1)+"%";
       document.getElementById("done").textContent=g.done;

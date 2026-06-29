@@ -185,6 +185,43 @@ def test_job_detail_endpoint(client):
     assert client.get("/job/missing", headers=H).status_code == 404
 
 
+# --------------------------------------------------- explicit campaign + label
+def test_explicit_group_overrides_job_id_prefix(isolated_state):
+    store = JobStore(str(isolated_state / "g.db"), max_retries=3)
+    # job_ids have no shared prefix, but an explicit group collects them under one
+    # campaign — the fix for "thousands of per-clip jobs" in the dashboard.
+    store.seed(
+        [{"job_id": "clipA.npz|4", "spec": {}}, {"job_id": "clipB.npz|8", "spec": {}}],
+        group="seamless-30to48", label="Converting Seamless Interactions 30fps -> 4,8 fps",
+    )
+    gs = {g["grp"]: g for g in store.group_stats()}
+    assert set(gs) == {"seamless-30to48"}
+    assert gs["seamless-30to48"]["total"] == 2
+    assert gs["seamless-30to48"]["label"] == "Converting Seamless Interactions 30fps -> 4,8 fps"
+
+
+def test_label_skipped_for_mixed_batch_without_group(isolated_state):
+    store = JobStore(str(isolated_state / "g2.db"), max_retries=3)
+    # No batch group + gigs resolve to different prefixes => no single label home.
+    store.seed(
+        [{"job_id": "campA/1", "spec": {}}, {"job_id": "campB/1", "spec": {}}],
+        label="should not stick",
+    )
+    for g in store.group_stats():
+        assert g.get("label") in (None, "")
+
+
+def test_seed_endpoint_accepts_group_and_label(client):
+    H = {"Authorization": "Bearer T0KEN"}
+    client.post("/seed", headers=H, json={
+        "gigs": [{"job_id": "x/1", "spec": {}}, {"job_id": "y/2", "spec": {}}],
+        "group": "camp", "label": "My Campaign",
+    })
+    groups = client.get("/groups", headers=H).json()["groups"]
+    camp = next(g for g in groups if g["grp"] == "camp")
+    assert camp["total"] == 2 and camp["label"] == "My Campaign"
+
+
 # --------------------------------------------------- at-field pause
 def test_atfield_pause_absent_and_active(tmp_path, monkeypatch):
     monkeypatch.setenv("ATFIELD_STATE_DIR", str(tmp_path))

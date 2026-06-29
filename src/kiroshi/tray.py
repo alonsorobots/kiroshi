@@ -45,6 +45,23 @@ _GREY = (107, 122, 141)
 _MAGENTA = (255, 46, 136)
 
 
+class _TrayIcon(pystray.Icon):
+    """pystray Icon with left-click → open dashboard (at-field behavior).
+
+    pystray's default ``__call__`` opens the *menu* on left-click, identical to
+    right-click. Users expect left-click to open the main view, so we override
+    it to launch the dashboard in the browser. Right-click still shows the menu.
+    """
+
+    def __init__(self, tray: "Tray", *args, **kwargs):
+        self._tray = tray
+        super().__init__(*args, **kwargs)
+
+    def __call__(self) -> None:
+        self._tray._ensure_fixer()
+        webbrowser.open(self._tray._url("/"))
+
+
 class Tray:
     def __init__(self, fixer: Optional[str], token: Optional[str]):
         self._fixer_arg = fixer
@@ -155,16 +172,31 @@ class Tray:
     def _poll(self) -> None:
         while not self._stop.wait(2.0):
             self._ensure_fixer()
+            base = self.fixer_url or "http://127.0.0.1:8787"
             try:
-                r = requests.get(f"{self.fixer_url or 'http://127.0.0.1:8787'}/status",
-                                 timeout=4, headers=self._headers())
+                r = requests.get(f"{base}/status", timeout=4,
+                                 headers=self._headers())
                 if r.status_code == 200:
                     d = r.json()
                     self._live = True
                     pct = (100 * d.get("done", 0) / d["total"]) if d.get("total") else 0
-                    self._status = (f"done {d.get('done',0)}/{d.get('total',0)} "
-                                    f"({pct:.0f}%) · {d.get('rate_per_s',0):.1f}/s "
-                                    f"· {d.get('pending',0)} queued")
+                    # Fetch campaign summaries so the tooltip shows readable
+                    # labels (the fix for "too many jobs") not just a raw count.
+                    campaigns = self._fetch_campaigns(base)
+                    if campaigns:
+                        active = [c for c in campaigns
+                                  if c.get("leased", 0) or c.get("pending", 0)]
+                        top = active[:3]
+                        names = [c.get("label") or c.get("grp", "?") for c in top]
+                        if len(active) > 3:
+                            names.append(f"… +{len(active) - 3} more")
+                        camp_str = " | ".join(names) if names else "no active campaigns"
+                        self._status = (f"{pct:.0f}% · {d.get('rate_per_s', 0):.1f}/s · "
+                                        f"{d.get('pending', 0)} queued\n{camp_str}")
+                    else:
+                        self._status = (f"done {d.get('done', 0)}/{d.get('total', 0)} "
+                                        f"({pct:.0f}%) · {d.get('rate_per_s', 0):.1f}/s "
+                                        f"· {d.get('pending', 0)} queued")
                 else:
                     self._live = False
                     self._status = f"fixer returned {r.status_code}"
@@ -178,9 +210,34 @@ class Tray:
             except Exception:  # noqa: BLE001
                 pass
 
+    def _fetch_campaigns(self, base: str) -> list[dict]:
+        """Fetch /groups for the tray tooltip (best-effort)."""
+        try:
+            r = requests.get(f"{base}/groups?limit=20", timeout=4,
+                             headers=self._headers())
+            if r.status_code == 200:
+                return r.json().get("groups", [])
+        except requests.RequestException:
+            pass
+        return []
+
     def run(self) -> int:
-        self.icon = pystray.Icon("kiroshi", _make_icon(_GREY), "KIROSHI",
-                                 menu=self._menu())
+        # Self-register for autostart on login (idempotent, best-effort).
+        # Mirrors at-field's tray: the Fixer is a boot-start service; the
+        # tray is a login-start UI lens. This one-time registration means
+        # the tray icon shows up automatically every time you log in.
+        from . import autostart
+
+        outcome = autostart.ensure_registered()
+        if outcome == "registered":
+            print("[tray] registered for autostart on login (HKCU\\Run)", flush=True)
+            self._notify("Kiroshi tray will auto-start on login")
+        elif outcome == "updated":
+            print("[tray] updated autostart entry (interpreter moved?)", flush=True)
+
+        self.icon = _TrayIcon(
+            self, "kiroshi", _make_icon(_GREY), "KIROSHI", menu=self._menu(),
+        )
         threading.Thread(target=self._poll, name="kiroshi-tray-poll",
                          daemon=True).start()
         self.icon.run()

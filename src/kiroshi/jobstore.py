@@ -71,6 +71,15 @@ class JobStore:
                 CREATE INDEX IF NOT EXISTS idx_jobs_state ON jobs(state);
                 CREATE INDEX IF NOT EXISTS idx_jobs_lease ON jobs(lease_id);
                 CREATE INDEX IF NOT EXISTS idx_jobs_completed ON jobs(completed_at);
+                -- Campaign metadata: one human-readable label per group slug, so
+                -- the dashboard can head a campaign "Converting X 30fps -> 4,8 fps"
+                -- instead of showing the raw slug / per-clip rows. Optional: a group
+                -- with no label falls back to showing its slug.
+                CREATE TABLE IF NOT EXISTS campaigns (
+                    grp        TEXT PRIMARY KEY,
+                    label      TEXT,
+                    created_at REAL NOT NULL
+                );
                 """
             )
             # Migration: a `grp` column groups gigs into "jobs"/campaigns by the
@@ -97,13 +106,24 @@ class JobStore:
         self._conn.commit()
 
     # ---------------------------------------------------------------- seed
-    def seed(self, gigs: list[dict[str, Any]]) -> int:
-        """Insert gigs idempotently. Each gig: {job_id, spec}. Returns # inserted."""
+    def seed(self, gigs: list[dict[str, Any]],
+             group: Optional[str] = None,
+             label: Optional[str] = None) -> int:
+        """Insert gigs idempotently. Each gig: {job_id, spec, group?}.
+
+        ``group`` (per-gig or batch-wide) overrides the job_id-prefix grouping, so
+        a whole campaign can be seeded under one readable slug regardless of how
+        the ``job_id``s are shaped. ``label`` is a human-readable name for that
+        campaign, stored once in the ``campaigns`` table and shown in the UI.
+
+        Returns # inserted.
+        """
         now = time.time()
-        rows = [
-            (g["job_id"], jsonio.dumps(g.get("spec", {})), _group_of(g["job_id"]), now)
-            for g in gigs
-        ]
+        rows = []
+        for g in gigs:
+            jid = g["job_id"]
+            grp = g.get("group") or group or _group_of(jid)
+            rows.append((jid, jsonio.dumps(g.get("spec", {})), grp, now))
         with self._lock:
             before = self._conn.total_changes
             self._conn.executemany(
@@ -111,8 +131,35 @@ class JobStore:
                 "VALUES (?, ?, ?, ?)",
                 rows,
             )
+            # Count gig inserts only — *before* the campaign upsert, so the label
+            # row doesn't inflate the reported "inserted" count.
+            inserted = self._conn.total_changes - before
+            if label:
+                lbl_grp = self._label_group(gigs, group)
+                if lbl_grp:
+                    self._conn.execute(
+                        "INSERT INTO campaigns (grp, label, created_at) VALUES (?, ?, ?) "
+                        "ON CONFLICT(grp) DO UPDATE SET label=excluded.label",
+                        (lbl_grp, label, now),
+                    )
             self._conn.commit()
-            return self._conn.total_changes - before
+            return inserted
+
+    @staticmethod
+    def _label_group(gigs: list[dict[str, Any]],
+                     group: Optional[str]) -> Optional[str]:
+        """The group slug a batch-wide ``label`` should attach to.
+
+        An explicit batch ``group`` wins. Otherwise, if every gig resolves to the
+        same effective group, that one is used; a mixed batch has no single home
+        for the label, so we return None (and skip labelling rather than mislabel).
+        """
+        if group:
+            return group
+        if not gigs:
+            return None
+        eff = {g.get("group") or _group_of(g["job_id"]) for g in gigs}
+        return next(iter(eff)) if len(eff) == 1 else None
 
     def mark_done_existing(self, job_ids: list[str]) -> int:
         """Mark gigs done without execution (e.g. output already exists = resume)."""
@@ -347,19 +394,21 @@ class JobStore:
         with self._lock:
             rows = self._conn.execute(
                 """
-                SELECT grp AS grp,
+                SELECT j.grp AS grp,
+                       c.label AS label,
                        COUNT(*)                                   AS total,
-                       SUM(state='done')                          AS done,
-                       SUM(state='pending')                       AS pending,
-                       SUM(state='leased')                        AS leased,
-                       SUM(state='failed')                        AS failed,
-                       MIN(created_at)                            AS first_created,
-                       MAX(leased_at)                             AS last_leased,
-                       MAX(completed_at)                          AS last_completed,
-                       GROUP_CONCAT(DISTINCT runner_id)           AS runner_ids
-                FROM jobs
-                GROUP BY grp
-                ORDER BY COALESCE(MAX(completed_at), MAX(leased_at), MIN(created_at)) DESC
+                       SUM(j.state='done')                        AS done,
+                       SUM(j.state='pending')                     AS pending,
+                       SUM(j.state='leased')                      AS leased,
+                       SUM(j.state='failed')                      AS failed,
+                       MIN(j.created_at)                          AS first_created,
+                       MAX(j.leased_at)                           AS last_leased,
+                       MAX(j.completed_at)                        AS last_completed,
+                       GROUP_CONCAT(DISTINCT j.runner_id)         AS runner_ids
+                FROM jobs j
+                LEFT JOIN campaigns c ON c.grp = j.grp
+                GROUP BY j.grp
+                ORDER BY COALESCE(MAX(j.completed_at), MAX(j.leased_at), MIN(j.created_at)) DESC
                 LIMIT ?
                 """,
                 (int(limit),),

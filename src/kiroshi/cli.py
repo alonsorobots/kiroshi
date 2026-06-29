@@ -27,10 +27,76 @@ from .config import current_host, load_config
 
 
 def main(argv: Optional[list[str]] = None) -> int:
+    # Split off task pass-through args after a literal `--` (for `kiroshi run
+    # TASK --enumerate -- --read-root //nas --fps 4`). Everything after `--`
+    # goes to the task's enumerate_gigs, never to kiroshi's own parser.
+    raw = list(sys.argv[1:] if argv is None else argv)
+    passthrough: list[str] = []
+    if "--" in raw:
+        i = raw.index("--")
+        passthrough = raw[i + 1:]
+        raw = raw[:i]
+
     cfg = load_config()
     parser = argparse.ArgumentParser(prog="kiroshi", description="Work-stealing mesh runner.")
     parser.add_argument("--version", action="version", version=f"kiroshi {__version__}")
     sub = parser.add_subparsers(dest="cmd", required=True)
+
+    # ---- run (the front door: one command to run a task across the mesh) ----
+    prun = sub.add_parser(
+        "run",
+        help="Run a task across the mesh from one command (the front door).")
+    prun.add_argument("task", help="Task as 'module:function'.")
+    prun.add_argument("--items", default=None,
+                      help="Glob of input files; one gig per match (spec={'path':...}).")
+    prun.add_argument("--jobs", default=None,
+                      help="JSONL gig file (each line {job_id, spec}).")
+    prun.add_argument("--enumerate", action="store_true",
+                      help="Call the task module's enumerate_gigs(args) with the "
+                           "args given after a literal '--'.")
+    prun.add_argument("--group", default=None, help="Campaign slug (groups gigs in the UI).")
+    prun.add_argument("--label", default=None,
+                      help="Human-readable campaign name for the dashboard header.")
+    prun.add_argument("--workers", type=int, default=0,
+                      help="Local worker processes (default: CPU count).")
+    prun.add_argument("--capacity", type=int, default=cfg.host().capacity)
+    prun.add_argument("--port", type=int, default=cfg.fixer_port)
+    prun.add_argument("--lan", action="store_true",
+                      help="Bind 0.0.0.0 so other machines can join (generates a mesh token).")
+    prun.add_argument("--db", default=None,
+                      help="Run job-store path (default: state-dir/run-<slug>.db).")
+    prun.add_argument("--token", default=None, help="Mesh token (for --lan).")
+    prun.add_argument("--read-root", default=None, help="Set KIROSHI_READ_ROOT for the task.")
+    prun.add_argument("--write-root", default=None, help="Set KIROSHI_WRITE_ROOT for the task.")
+    prun.add_argument("--gig-timeout", type=float, default=None,
+                      help="Seconds before a hung gig is abandoned + its worker killed.")
+    prun.add_argument("--syspath", action="append", default=None,
+                      help="Extra sys.path entries for task import (repeatable).")
+    prun.add_argument("--max-retries", type=int, default=3)
+    prun.add_argument("--serve-task", action="store_true",
+                      help="Serve this (single-file, top-level) task's source to "
+                           "joiners so `kiroshi join` needs no checkout. Opt-in + "
+                           "consent-gated on the joiner — see SECURITY.md §6.5.")
+
+    # ---- join (add this machine to a running mesh) ----
+    pjoin = sub.add_parser(
+        "join", help="Join this machine to a running mesh as a Runner.")
+    pjoin.add_argument("--fixer", default="auto", help="Fixer URL or 'auto' (default).")
+    pjoin.add_argument("--task", default=None,
+                       help="Task 'module:function' (default: the Fixer's served task).")
+    pjoin.add_argument("--token", default=None, help="Mesh token (the join code).")
+    pjoin.add_argument("--workers", type=int, default=0,
+                       help="Worker processes (default: CPU count).")
+    pjoin.add_argument("--service", action="store_true",
+                       help="Install as an auto-start Runner service (else run foreground).")
+    pjoin.add_argument("--accept-task-hash", default=None,
+                       help="Pre-approve served task code by sha256 (non-interactive).")
+    pjoin.add_argument("--syspath", action="append", default=None,
+                       help="Extra sys.path entries for task import (repeatable).")
+    pjoin.add_argument("--read-root", default=None, help="Set KIROSHI_READ_ROOT for the task.")
+    pjoin.add_argument("--write-root", default=None, help="Set KIROSHI_WRITE_ROOT for the task.")
+    pjoin.add_argument("--gig-timeout", type=float, default=None,
+                       help="Seconds before a hung gig is abandoned + its worker killed.")
 
     # ---- fixer ----
     pf = sub.add_parser("fixer", help="Run the coordinator (Fixer) + dashboard.")
@@ -77,6 +143,13 @@ def main(argv: Optional[list[str]] = None) -> int:
                     help="JSONL file; each line {\"job_id\":..., \"spec\":{...}}.")
     ps.add_argument("--demo", type=int, default=0, help="Seed N demo sleep gigs.")
     ps.add_argument("--batch", type=int, default=1000, help="POST batch size.")
+    ps.add_argument("--group", default=None,
+                    help="Campaign slug; all gigs are grouped under it in the dashboard "
+                         "(overrides the job_id-prefix grouping).")
+    ps.add_argument("--label", default=None,
+                    help="Human-readable campaign name shown in the dashboard header "
+                         "(e.g. 'Converting Seamless Interactions 30fps -> 4,8 fps'). "
+                         "Pairs with --group (or a single shared group in --jobs).")
     ps.add_argument("--token", default=None, help="Mesh auth token.")
 
     # ---- status ----
@@ -118,6 +191,27 @@ def main(argv: Optional[list[str]] = None) -> int:
     ptray.add_argument("--fixer", default=cfg.fixer_url, help="Fixer base URL, or 'auto'.")
     ptray.add_argument("--token", default=None, help="Mesh auth token.")
 
+    # ---- install (one-command setup: fixer service + tray autostart) ----
+    pins = sub.add_parser("install",
+                          help="One-command setup: install the Fixer as a Windows service "
+                               "+ register the tray to auto-start on login.")
+    pins.add_argument("--db", default="kiroshi.db", help="(fixer) SQLite job-store path.")
+    pins.add_argument("--host", default="0.0.0.0", help="(fixer) bind host (LAN-default).")
+    pins.add_argument("--port", type=int, default=cfg.fixer_port, help="(fixer) bind port.")
+    pins.add_argument("--pages-dir", default=None, help="(fixer) custom views dir.")
+    pins.add_argument("--no-tray", action="store_true",
+                      help="Skip tray autostart registration (service only).")
+
+    # ---- uninstall (remove the service + tray autostart) ----
+    sub.add_parser("uninstall",
+                   help="Remove the Kiroshi Fixer service + tray autostart entry.")
+
+    # ---- autostart (manage just the tray login-autostart) ----
+    pau = sub.add_parser("autostart",
+                         help="Manage tray auto-start on login (HKCU\\Run).")
+    pau.add_argument("action", choices=["on", "off", "status"],
+                     help="on=register, off=unregister, status=show current.")
+
     # ---- service (NSSM persistence) ----
     psvc = sub.add_parser("service",
                           help="Install/uninstall/inspect Fixer or Runner as a Windows service (NSSM).")
@@ -152,8 +246,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     psvc.add_argument("--env", action="append", default=None,
                       help="Extra env as KEY=VALUE (repeatable).")
 
-    args = parser.parse_args(argv)
+    args = parser.parse_args(raw)
+    args._passthrough = passthrough
 
+    if args.cmd == "run":
+        return _cmd_run(args)
+    if args.cmd == "join":
+        return _cmd_join(args)
     if args.cmd == "fixer":
         return _cmd_fixer(args)
     if args.cmd == "runner":
@@ -172,6 +271,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         return _cmd_stop(args)
     if args.cmd == "tray":
         return _cmd_tray(args)
+    if args.cmd == "install":
+        return _cmd_install(args)
+    if args.cmd == "uninstall":
+        return _cmd_uninstall(args)
+    if args.cmd == "autostart":
+        return _cmd_autostart(args)
     if args.cmd == "service":
         return _cmd_service(args)
     return 1
@@ -274,6 +379,20 @@ def _cmd_fixer(args) -> int:
 _SECRET_FLAGS = {"--token", "--password"}
 
 
+def _win_quote(s: str) -> str:
+    """Windows command-line quoting for NSSM AppParameters.
+
+    ``shlex.quote`` is POSIX-only and wraps any path containing backslashes
+    in **single quotes** — Windows treats those as literal characters, so
+    SQLite would try to open ``'C:\\path\\jobs.db'`` (quotes included) and
+    fail. This uses double quotes only when needed (spaces), leaving
+    backslash paths alone.
+    """
+    if " " in s or "\t" in s:
+        return '"' + s.replace('"', '\\"') + '"'
+    return s
+
+
 def _launch_command() -> str:
     """Best-effort reconstruction of the command line that launched us, with flags.
 
@@ -304,6 +423,51 @@ def _launch_command() -> str:
         return " ".join(shlex.quote(p) for p in parts)
     except Exception:  # noqa: BLE001
         return " ".join(parts)
+
+
+def _cmd_run(args) -> int:
+    from .runjob import run_job
+
+    return run_job(
+        task_ref=args.task,
+        items=args.items,
+        jobs=args.jobs,
+        enumerate_=args.enumerate,
+        task_args=getattr(args, "_passthrough", []),
+        group=args.group,
+        label=args.label,
+        workers=args.workers,
+        capacity=args.capacity,
+        port=args.port,
+        lan=args.lan,
+        db=args.db,
+        token=args.token,
+        read_root=args.read_root,
+        write_root=args.write_root,
+        gig_timeout=args.gig_timeout,
+        syspath=args.syspath,
+        max_retries=args.max_retries,
+        serve_task=args.serve_task,
+        launch_command=_launch_command(),
+    )
+
+
+def _cmd_join(args) -> int:
+    from .join import join
+
+    return join(
+        fixer=args.fixer,
+        task=args.task,
+        token=args.token,
+        workers=args.workers,
+        service=args.service,
+        accept_task_hash=args.accept_task_hash,
+        syspath=args.syspath,
+        read_root=args.read_root,
+        write_root=args.write_root,
+        gig_timeout=args.gig_timeout,
+        launch_command=_launch_command(),
+    )
 
 
 def _cmd_runner(args) -> int:
@@ -347,7 +511,12 @@ def _cmd_seed(args) -> int:
     headers = _auth_headers(args)
 
     def post(gigs: list[dict]) -> None:
-        r = requests.post(f"{args.fixer.rstrip('/')}/seed", json={"gigs": gigs},
+        body: dict = {"gigs": gigs}
+        if args.group:
+            body["group"] = args.group
+        if args.label:
+            body["label"] = args.label
+        r = requests.post(f"{args.fixer.rstrip('/')}/seed", json=body,
                           timeout=60, headers=headers)
         r.raise_for_status()
         out = r.json()
@@ -460,8 +629,6 @@ def _cmd_stop(args) -> int:
 
 
 def _cmd_service(args) -> int:
-    import shlex
-
     from . import winservice as ws
     from .appstate import logs_dir, state_dir
 
@@ -545,7 +712,7 @@ def _cmd_service(args) -> int:
         display = "Kiroshi Runner"
         desc = "Kiroshi worker node (pulls gigs, runs them on a local process pool)."
 
-    app_parameters = " ".join(shlex.quote(p) for p in parts)
+    app_parameters = " ".join(_win_quote(p) for p in parts)
     cmds = ws.build_install_commands(
         nssm=nssm, service_name=name, python_exe=python_exe,
         app_parameters=app_parameters, app_directory=os.getcwd(),
@@ -570,6 +737,136 @@ def _cmd_tray(args) -> int:
               f"Install the tray extra:  pip install kiroshi[tray]")
         return 2
     return run_tray(fixer=args.fixer, token=args.token)
+
+
+def _cmd_autostart(args) -> int:
+    from . import autostart
+
+    if args.action == "on":
+        outcome = autostart.ensure_registered()
+        if outcome == "failed":
+            print("[autostart] FAILED to write HKCU\\Run (registry error).", file=sys.stderr)
+            return 1
+        print(f"[autostart] {outcome} — tray will launch on login.")
+        return 0
+    if args.action == "off":
+        outcome = autostart.unregister()
+        print(f"[autostart] {outcome}.")
+        return 0
+    # status
+    reg = autostart.current_registration()
+    if reg:
+        print(f"[autostart] registered: {reg}")
+    else:
+        print("[autostart] not registered (tray won't auto-start on login).")
+    return 0
+
+
+def _cmd_install(args) -> int:
+    """One-command setup: Fixer as a Windows service + tray autostart.
+
+    Mirrors at-field's ``atf install``: the heavy engine (Fixer) becomes a
+    boot-start LocalSystem service via NSSM; the tray (UI lens) is registered
+    in HKCU\\Run to launch on login. After this + a reboot (or ``nssm start``),
+    the mesh is always-on and the tray icon appears automatically.
+    """
+    import subprocess
+
+    from . import autostart, winservice as ws
+    from .appstate import logs_dir, state_dir
+
+    if sys.platform != "win32":
+        print("[install] Windows-only (NSSM service + HKCU autostart).", file=sys.stderr)
+        return 2
+
+    # 1. Tray autostart (user-mode, no elevation needed)
+    if not args.no_tray:
+        outcome = autostart.ensure_registered()
+        if outcome == "registered":
+            print("[install] tray autostart: registered (launches on login).")
+        elif outcome == "updated":
+            print("[install] tray autostart: updated (interpreter path changed).")
+        elif outcome == "already":
+            print("[install] tray autostart: already registered.")
+        else:
+            print("[install] tray autostart: FAILED — continuing with service install.",
+                  file=sys.stderr)
+    else:
+        print("[install] skipping tray autostart (--no-tray).")
+
+    # 2. Fixer service (needs elevation)
+    nssm = ws.find_nssm()
+    if not nssm:
+        print("[install] could not find nssm.exe.\n"
+              "  Install NSSM (https://nssm.cc) and either put it on PATH, set "
+              "KIROSHI_NSSM=<path to nssm.exe>, or drop it in "
+              f"{state_dir()}\\nssm.exe", file=sys.stderr)
+        return 2
+    if not ws.is_admin():
+        print("[install] WARNING: not elevated. Service install needs an Administrator "
+              "shell; this will likely fail. Re-run from an elevated terminal.", file=sys.stderr)
+
+    name = ws.DEFAULT_FIXER_SERVICE
+    # If the service already exists, stop + remove it first so `nssm install`
+    # succeeds cleanly (nssm install fails on an existing service). This makes
+    # `kiroshi install` idempotent — re-running updates the config, like at-field.
+    if not ws.status(name).endswith(": not installed"):
+        print(f"[install] service '{name}' already installed — stopping + removing for clean reinstall...")
+        ws.uninstall(ws.build_uninstall_commands(nssm, name))
+    else:
+        print(f"[install] registering Fixer service '{name}'...")
+
+    parts = ["-m", "kiroshi", "fixer", "--db", args.db,
+             "--host", args.host, "--port", str(args.port)]
+    if args.pages_dir:
+        parts += ["--pages-dir", args.pages_dir]
+    app_parameters = " ".join(_win_quote(p) for p in parts)
+    cmds = ws.build_install_commands(
+        nssm=nssm, service_name=name, python_exe=sys.executable,
+        app_parameters=app_parameters, app_directory=str(state_dir()),
+        log_dir=str(logs_dir()), display_name="Kiroshi Fixer",
+        description="Kiroshi coordinator (hands gigs to runners; serves the dashboard).",
+        account="LocalSystem",
+    )
+    ok, out = ws.install(cmds)
+    print(out)
+    if ok:
+        print(f"[install] Fixer service installed. Start it with:  nssm start {name}")
+        print("[install] Done. Next reboot: Fixer auto-starts as a service, tray appears on login.")
+    else:
+        print(f"[install] service install FAILED for '{name}'.", file=sys.stderr)
+    # Start the service immediately if we can
+    if ok:
+        try:
+            subprocess.run([nssm, "start", name], timeout=15, capture_output=True)
+            print(f"[install] started service '{name}'.")
+        except Exception:  # noqa: BLE001
+            print(f"[install] could not auto-start '{name}' — run: nssm start {name}")
+    return 0 if ok else 1
+
+
+def _cmd_uninstall(args) -> int:
+    """Remove the Fixer service + tray autostart entry."""
+    from . import autostart, winservice as ws
+
+    rc = 0
+
+    # 1. Tray autostart (user-mode)
+    outcome = autostart.unregister()
+    print(f"[uninstall] tray autostart: {outcome}.")
+
+    # 2. Fixer service (needs elevation)
+    if sys.platform == "win32":
+        nssm = ws.find_nssm()
+        if nssm:
+            name = ws.DEFAULT_FIXER_SERVICE
+            ok, out = ws.uninstall(ws.build_uninstall_commands(nssm, name))
+            print(out)
+            print(f"[uninstall] service '{name}': {'removed' if ok else 'errors reported'}.")
+            rc = 0 if ok else 1
+        else:
+            print("[uninstall] nssm.exe not found; skipping service removal.")
+    return rc
 
 
 def _cmd_doctor(args) -> int:

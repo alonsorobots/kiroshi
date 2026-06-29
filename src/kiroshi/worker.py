@@ -26,6 +26,30 @@ from .pool import LocalPool
 _AUTO = {"auto", "discover", "", "auto://", "http://auto"}
 
 
+def verify_fixer(url: str, token: Optional[str], timeout: float = 30.0) -> bool:
+    """Authenticate the *Fixer* via the HMAC challenge before trusting it.
+
+    Standalone form of :meth:`Runner._verify_fixer` so ``kiroshi join`` can verify
+    a Fixer *before* sending the token or fetching task code. Sends a random nonce
+    with NO Authorization header; only a Fixer holding the mesh token can return
+    ``HMAC(token, nonce)``. With no token, trusts only a Fixer that declares
+    ``auth: false`` (a deliberately open dev mesh). Fails closed.
+    """
+    nonce = security.new_nonce()
+    try:
+        r = requests.get(f"{url.rstrip('/')}/auth/challenge",
+                         params={"nonce": nonce}, timeout=timeout)
+        r.raise_for_status()
+        data = r.json()
+    except (requests.RequestException, ValueError):
+        return False
+    if not token:
+        return data.get("auth") is False
+    if not data.get("auth"):
+        return False
+    return security.verify_proof(token, nonce, data.get("proof"))
+
+
 class Runner:
     def __init__(
         self,
@@ -46,7 +70,12 @@ class Runner:
         rediscover_after: int = 3,
         token: Optional[str] = None,
         launch_command: str = "",
+        quiet: bool = False,
     ):
+        # quiet suppresses the routine per-batch / startup prints so an
+        # in-process `kiroshi run` can render a clean progress bar. Errors and
+        # security warnings are always printed.
+        self.quiet = quiet
         self._auto = (fixer_url or "").strip().lower() in _AUTO
         self.fixer_url = "" if self._auto else fixer_url.rstrip("/")
         self.token = token if token is not None else security.resolve_token()
@@ -205,11 +234,12 @@ class Runner:
     def run(self) -> None:
         self._install_signal_handlers()
         self._resolve_fixer()  # block until a Fixer is known (auto mode)
-        print(
-            f"[runner] {self.runner_id} on {self.host}: {self.workers} workers, "
-            f"capacity {self.capacity}, task {self.task_ref}, fixer {self.fixer_url}",
-            flush=True,
-        )
+        if not self.quiet:
+            print(
+                f"[runner] {self.runner_id} on {self.host}: {self.workers} workers, "
+                f"capacity {self.capacity}, task {self.task_ref}, fixer {self.fixer_url}",
+                flush=True,
+            )
         pool = LocalPool(
             task_ref=self.task_ref,
             workers=self.workers,
@@ -235,7 +265,9 @@ class Runner:
                     continue
                 lease = self._post(
                     "/lease",
-                    {"runner_id": self.runner_id, "host": self.host, "capacity": self.capacity},
+                    {"runner_id": self.runner_id, "host": self.host,
+                     "capacity": self.capacity,
+                     "heartbeat_interval": self.heartbeat_interval},
                 )
                 gigs = (lease or {}).get("gigs") or []
                 lease_id = (lease or {}).get("lease_id")
@@ -245,7 +277,9 @@ class Runner:
 
                 def _hb() -> None:
                     if lease_id:
-                        self._post("/heartbeat", {"lease_id": lease_id, "runner_id": self.runner_id})
+                        self._post("/heartbeat", {"lease_id": lease_id,
+                                                  "runner_id": self.runner_id,
+                                                  "heartbeat_interval": self.heartbeat_interval})
 
                 results = pool.run_batch(
                     gigs,
@@ -256,13 +290,15 @@ class Runner:
                 )
                 if lease_id:
                     self._post("/complete", {"lease_id": lease_id, "results": results})
-                ok = sum(1 for r in results if r["status"] in ("ok", "skipped"))
-                print(f"[runner] batch {len(gigs)} done ({ok} ok)", flush=True)
+                if not self.quiet:
+                    ok = sum(1 for r in results if r["status"] in ("ok", "skipped"))
+                    print(f"[runner] batch {len(gigs)} done ({ok} ok)", flush=True)
         finally:
             pool.close()
             if reg is not None:
                 reg.close()
-        print("[runner] drained, exiting.", flush=True)
+        if not self.quiet:
+            print("[runner] drained, exiting.", flush=True)
 
     # ------------------------------------------------------ registry / pause
     def _start_process_registration(self):

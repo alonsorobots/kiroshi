@@ -16,6 +16,7 @@ resolves any drive-letter root to its underlying UNC target before use.
 from __future__ import annotations
 
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Optional
@@ -82,6 +83,36 @@ def is_mapped_network_drive(p: str | os.PathLike[str]) -> bool:
     """
     s = str(p)
     return looks_like_drive_letter(s) and unc_for_drive(s[0]) is not None
+
+
+def looks_like_unc(p: str | os.PathLike[str]) -> bool:
+    """True for a proper UNC path (``\\\\server\\share`` or ``//server/share``)."""
+    s = str(p)
+    return s.startswith("\\\\") or s.startswith("//")
+
+
+# A single leading separator, then a host-ish token (>=2 chars, so we don't trip
+# on git-bash drive paths like ``/c/Users``), then another separator + a token.
+_MANGLED_UNC_RE = re.compile(r"^[\\/](?![\\/])([^\\/]{2,})[\\/]([^\\/]+)")
+
+
+def looks_like_mangled_unc(p: Optional[str | os.PathLike[str]]) -> bool:
+    """True if ``p`` was probably a UNC path that lost a leading separator.
+
+    Shells and env-var plumbing love to eat a backslash, turning the intended
+    ``\\\\server\\share\\...`` into ``\\server\\share\\...``. On Windows that
+    single-leading-separator form silently resolves to a *local* drive-relative
+    path (``C:\\server\\share\\...``) — so a write probe "succeeds" against a
+    bogus local directory and a real job would dump output on the wrong disk.
+    We detect that shape so callers can fail loudly with the ``//server/share``
+    fix instead. Windows-only: on POSIX ``/mnt/nas`` is a legitimate root.
+    """
+    if p is None or sys.platform != "win32":
+        return False
+    s = str(p).strip().strip('"')
+    if looks_like_unc(s):
+        return False
+    return bool(_MANGLED_UNC_RE.match(s))
 
 
 def normalize_root(p: Optional[str | os.PathLike[str]]) -> Optional[str]:

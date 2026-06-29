@@ -36,13 +36,16 @@ Enumerate gigs for seeding::
 """
 from __future__ import annotations
 
+import fnmatch
+import io
 import os
-from pathlib import Path
+from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any, Iterator, Optional
 
 import numpy as np
 
-from kiroshi.atomic import atomic_path
+from kiroshi import kfs
+from kiroshi import paths as kpaths
 
 _EPS = 1e-8
 
@@ -116,7 +119,7 @@ def resample_quaternions(
 
 
 # --------------------------------------------------------------------------- task
-def _resolve(path: str, env_root: str) -> Path:
+def _resolve(path: str, env_root: str) -> str:
     """Resolve a gig-supplied path *confined to its configured root*.
 
     SECURITY: ``spec.src_path``/``dst_path`` come from whoever seeded the gig, so
@@ -125,91 +128,197 @@ def _resolve(path: str, env_root: str) -> Path:
     malicious (or buggy) spec could make the Runner read/write anywhere its
     account can reach (e.g. overwrite a Startup script). A task that genuinely
     needs unconfined paths must opt in explicitly; the default is locked down.
+
+    Confinement is done with *pure* path arithmetic (no ``resolve()``/realpath):
+    the root may be an SMB UNC share that we deliberately never touch via the OS
+    redirector, and rejecting any ``..`` component makes traversal impossible
+    without needing the filesystem at all.
     """
     root = os.environ.get(env_root)
     if not root:
         raise ValueError(
             f"{env_root} is not set; refusing to resolve an unconfined path {path!r}"
         )
-    root_p = Path(root).resolve()
-    p = Path(path)
-    if p.is_absolute() or p.drive or p.anchor:
-        raise ValueError(f"absolute path not allowed for a gig: {path!r}")
-    full = (root_p / p).resolve()
-    try:
-        full.relative_to(root_p)
-    except ValueError:
+    if kpaths.looks_like_mangled_unc(root):
         raise ValueError(
-            f"path {path!r} escapes its root {env_root}={root!r}"
-        ) from None
-    return full
+            f"{env_root}={root!r} looks like a UNC path that lost a leading "
+            f"separator; use the //server/share form"
+        )
+    rel = str(path).replace("\\", "/")
+    pw = PureWindowsPath(rel)
+    if rel.startswith("/") or pw.is_absolute() or pw.drive:
+        raise ValueError(f"absolute path not allowed for a gig: {path!r}")
+    parts = [seg for seg in PurePosixPath(rel).parts if seg not in ("", ".")]
+    if any(seg == ".." for seg in parts):
+        raise ValueError(f"path {path!r} escapes its root {env_root}={root!r}")
+    base = root.rstrip("/\\")
+    if kfs.is_unc(root):
+        return base.replace("/", "\\") + "\\" + "\\".join(parts)
+    return os.path.join(base, *parts)
+
+
+def _targets(spec: dict[str, Any]) -> list[tuple[float, str]]:
+    """Normalize the gig's output targets to ``[(target_fps, resolved_dst), ...]``.
+
+    A gig may carry several ``targets`` (e.g. 4 and 8 fps) so a single, expensive
+    source read serves *all* of them — on a seek-bound source disk the read, not
+    the SLERP, dominates, so amortizing it across fps roughly halves total I/O.
+    The legacy single-fps form (``target_fps`` + ``dst_path``) is still accepted.
+    """
+    raw = spec.get("targets") or [{"target_fps": spec["target_fps"], "dst_path": spec["dst_path"]}]
+    return [(float(t["target_fps"]), _resolve(t["dst_path"], "KIROSHI_WRITE_ROOT")) for t in raw]
 
 
 def run(spec: dict[str, Any]) -> dict[str, Any]:
-    target_fps = float(spec["target_fps"])
     src = _resolve(spec["src_path"], "KIROSHI_READ_ROOT")
-    dst = _resolve(spec["dst_path"], "KIROSHI_WRITE_ROOT")
     quat_key = spec.get("quat_key", "quat")
     valid_key = spec.get("valid_key", "is_valid")
 
-    if dst.exists():
-        return {"status": "skipped", "metrics": {"reason": "exists"}}
+    targets = _targets(spec)
+    # Resume is per-target: only produce outputs that don't already exist, so a
+    # gig that crashed after writing some fps re-does only the rest.
+    pending = [(fps, dst) for (fps, dst) in targets if not kfs.exists(dst)]
+    if not pending:
+        return {"status": "skipped", "metrics": {"reason": "exists", "targets": len(targets)}}
 
-    with np.load(src, allow_pickle=False) as data:
-        quat = data[quat_key]
+    # Pull the whole npz in ONE sequential streaming read. np.load on a network
+    # handle issues many tiny seek+read round trips (it parses the zip central
+    # directory at EOF, then re-seeks per member), which pins the source disk
+    # under concurrency. Reading the bytes once and parsing from RAM removes all
+    # those round trips. NpzFile is lazy, so materialize arrays before discarding.
+    with kfs.open(src, "rb") as fh:
+        raw = fh.read()
+    with np.load(io.BytesIO(raw), allow_pickle=False) as data:
+        quat = np.asarray(data[quat_key])
         # Real corpora contain occasional zero-frame clips. That's benign data,
-        # not a task failure — skip it (so the Fixer doesn't burn retries on it).
+        # not a task failure — skip it (don't burn Fixer retries).
         if quat.shape[0] == 0:
             return {"status": "skipped", "metrics": {"reason": "empty_input"}}
-        is_valid = data[valid_key] if valid_key in data.files else None
+        is_valid = np.asarray(data[valid_key]) if valid_key in data.files else None
         if "times" in data.files:
             src_times = np.asarray(data["times"], dtype=np.float64)
         else:
             src_fps = float(spec.get("src_fps") or (data["fps"] if "fps" in data.files else 0.0))
             if src_fps <= 0:
-                raise ValueError(f"no source timebase for {src} (need npz 'times'/'fps' or spec.src_fps)")
+                raise ValueError(
+                    f"no source timebase for {src} (need npz 'times'/'fps' or spec.src_fps)"
+                )
             src_times = np.arange(quat.shape[0], dtype=np.float64) / src_fps
 
-    quat_out, valid_out, _tgt = resample_quaternions(quat, src_times, target_fps, is_valid)
+    n_in = int(quat.shape[0])
+    frames_out: dict[str, int] = {}
+    for target_fps, dst in pending:
+        quat_out, valid_out, _tgt = resample_quaternions(quat, src_times, target_fps, is_valid)
+        # Serialize to RAM, then write the whole payload in one streaming write
+        # (symmetric reason: avoid per-chunk SMB write round trips).
+        buf = io.BytesIO()
+        np.savez(
+            buf,
+            quat=quat_out,
+            is_valid=valid_out,
+            fps=np.float32(target_fps),
+            n_in=np.int64(n_in),
+            n_out=np.int64(quat_out.shape[0]),
+        )
+        with kfs.atomic_write(dst) as fh:
+            fh.write(buf.getvalue())
+        frames_out[f"{target_fps:g}fps"] = int(quat_out.shape[0])
 
-    with atomic_path(dst) as tmp:
-        # Pass a file handle so np.savez doesn't append ".npz" to the temp name
-        # (which would break the atomic rename).
-        with open(tmp, "wb") as fh:
-            np.savez(
-                fh,
-                quat=quat_out,
-                is_valid=valid_out,
-                fps=np.float32(target_fps),
-                n_in=np.int64(quat.shape[0]),
-                n_out=np.int64(quat_out.shape[0]),
-            )
-
-    return {
-        "status": "ok",
-        "metrics": {"frames_in": int(quat.shape[0]), "frames_out": int(quat_out.shape[0])},
-    }
+    return {"status": "ok", "metrics": {"frames_in": n_in, "frames_out": frames_out}}
 
 
 # ----------------------------------------------------------------------- seeding
-def enumerate_gigs(
-    read_root: str,
-    fps_list: list[float],
-    pattern: str = "**/*.npz",
-    out_subdir_tmpl: str = "resampled_{fps:g}fps",
-) -> Iterator[dict[str, Any]]:
-    """Yield one gig per (clip, fps). job_id is deterministic so re-seeding is safe."""
-    root = Path(read_root)
-    for p in sorted(root.glob(pattern)):
-        if not p.is_file():
-            continue
-        rel = p.relative_to(root).as_posix()
-        for fps in fps_list:
-            dst = f"{out_subdir_tmpl.format(fps=fps)}/{rel}"
-            yield {
-                "job_id": f"{rel}|{fps:g}",
-                "spec": {"src_path": rel, "dst_path": dst, "target_fps": fps},
-            }
+def _rel_posix(full: str, base: str) -> str:
+    """Root-relative POSIX path of ``full`` under ``base`` (separator-agnostic)."""
+    f = str(full).replace("\\", "/").rstrip("/")
+    b = str(base).replace("\\", "/").rstrip("/")
+    return f[len(b):].lstrip("/") if f.startswith(b) else f
+
+
+def _walk_matches(root: str, pattern: str) -> list[str]:
+    """List files under ``root`` matching ``pattern``, via :func:`kfs.walk`.
+
+    ``Path.glob("**/...")`` silently returns *nothing* on a Windows UNC root,
+    and ``os.walk`` over a UNC path fails entirely from an SSH/service network
+    logon. :func:`kfs.walk` uses ``smbprotocol`` for credentialed SMB shares and
+    ``os.walk`` otherwise, so seeding works from every context.
+
+    We support the common ``**/<fileglob>`` form (match the filename at any
+    depth) and otherwise match the root-relative POSIX path. Results are sorted
+    so ``job_id``s are deterministic and re-seeding stays idempotent.
+    """
+    if pattern.startswith("**/"):
+        filepat = pattern[3:]
+
+        def keep(rel: str) -> bool:
+            return fnmatch.fnmatch(PurePosixPath(rel).name, filepat)
+    else:
+
+        def keep(rel: str) -> bool:
+            return fnmatch.fnmatch(rel, pattern)
+
+    base = str(root).rstrip("/\\")
+    sep = "\\" if kfs.is_unc(root) else os.sep
+    out: list[str] = []
+    for dirpath, _dirs, files in kfs.walk(root):
+        for fn in files:
+            full = str(dirpath).rstrip("/\\") + sep + fn
+            rel = _rel_posix(full, base)
+            if keep(rel):
+                out.append(full)
+    out.sort(key=lambda p: _rel_posix(p, base))
+    return out
+
+
+def _fps_list(raw: Any) -> list[float]:
+    """Coerce the `fps` arg (scalar / repeated-list / absent) to a float list."""
+    if raw in (None, True):
+        return [4.0, 8.0]  # the project's two canonical targets
+    seq = raw if isinstance(raw, list) else [raw]
+    return [float(x) for x in seq]
+
+
+def enumerate_gigs(args: dict[str, Any]) -> Iterator[dict[str, Any]]:
+    """Kiroshi enumeration contract (PLAN §7.5): ``args -> gigs``.
+
+    Produces **one gig per clip** carrying every fps as a ``targets`` entry, so
+    the (seek-bound) source npz is read once and resampled to all target fps —
+    far cheaper on a NAS than one gig per (clip, fps). This is exactly the fan-out
+    a generic ``--items`` globber can't express, which is why the task owns it.
+
+    Recognized ``args`` (from the tokens after ``--`` on the ``kiroshi run`` line):
+        read_root   root to enumerate under (else ``KIROSHI_READ_ROOT`` env)
+        fps         target fps; repeat for several (``--fps 4 --fps 8``); default 4,8
+        pattern     glob (default ``**/*.npz``)
+        group       optional campaign slug
+    Run it::
+
+        kiroshi run examples.motion_resample:run --enumerate \\
+            --read-root //nas/clips --write-root //nas/out \\
+            --label "Seamless 30fps -> 4,8 fps" -- --fps 4 --fps 8
+    """
+    read_root = args.get("read_root") or os.environ.get("KIROSHI_READ_ROOT")
+    if not read_root:
+        raise ValueError(
+            "motion enumerate needs a read root: pass --read-root or set "
+            "KIROSHI_READ_ROOT"
+        )
+    fps_list = _fps_list(args.get("fps"))
+    pattern = args.get("pattern") or "**/*.npz"
+    out_tmpl = args.get("out_subdir_tmpl") or "resampled_{fps:g}fps"
+    group = args.get("group")
+
+    base = str(read_root).rstrip("/\\")
+    for full in _walk_matches(read_root, pattern):
+        rel = _rel_posix(full, base)
+        targets = [
+            {"target_fps": fps, "dst_path": f"{out_tmpl.format(fps=fps)}/{rel}"}
+            for fps in fps_list
+        ]
+        gig: dict[str, Any] = {"job_id": rel, "spec": {"src_path": rel, "targets": targets}}
+        if group:
+            gig["group"] = group
+        yield gig
 
 
 def _cli() -> int:
@@ -221,9 +330,12 @@ def _cli() -> int:
     ap.add_argument("--read-root", required=True, help="Root dir to enumerate *.npz under.")
     ap.add_argument("--fps", type=float, action="append", required=True, help="Target fps (repeatable).")
     ap.add_argument("--pattern", default="**/*.npz")
+    ap.add_argument("--group", default=None, help="Optional campaign slug.")
     args = ap.parse_args()
     n = 0
-    for gig in enumerate_gigs(args.read_root, args.fps, args.pattern):
+    enum_args = {"read_root": args.read_root, "fps": args.fps,
+                 "pattern": args.pattern, "group": args.group}
+    for gig in enumerate_gigs(enum_args):
         sys.stdout.write(json.dumps(gig) + "\n")
         n += 1
     sys.stderr.write(f"emitted {n} gigs\n")

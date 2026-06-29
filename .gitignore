@@ -41,6 +41,17 @@ logs/
 _scratch*
 _probe*
 
+# --- Campaign launchers & scratch (root-level). These embed the mesh token,
+#     NAS credentials, internal IPs and absolute paths — NEVER commit them. ---
+/_*.ps1
+/_*.py
+/_*.bat
+/_*.sh
+/_*.cmd
+*.pid
+gigs.jsonl
+clips.txt
+
 # --- Data artifacts (never commit datasets/outputs) ---
 data/
 outputs/

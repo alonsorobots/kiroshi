@@ -26,6 +26,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from . import kfs
 from . import paths as kpaths
 
 _OK = "PASS"
@@ -85,10 +86,64 @@ def _describe_root(raw: str) -> str:
     return raw
 
 
+def _mangled_unc_msg(kind: str, raw: str) -> str:
+    return (f"{raw!r} looks like a UNC path that lost a leading separator "
+            f"(\\\\server\\share became \\server\\...), which resolves to a "
+            f"*local* path — not the {kind}. A shell or env var probably ate a "
+            f"backslash; set it with forward slashes (//server/share/...) which "
+            f"don't get mangled.")
+
+
+def _unc_no_creds_warn(rep: _Report, kind: str, raw: str) -> None:
+    rep.line(_WARN, kind, f"{raw} is a UNC share but no SMB credentials are set "
+             f"(KIROSHI_NAS_USER/KIROSHI_NAS_PASS). Kiroshi will fall back to the "
+             f"Windows redirector, which CANNOT authenticate from an SSH or "
+             f"service (network) logon. Set creds to use the smbprotocol data "
+             f"plane that works in every logon context.")
+
+
+def _check_smb_read(rep: _Report, raw: str) -> None:
+    server = kfs.server_of(raw)
+    user = kfs.creds_for(server)[0] if server else None
+    try:
+        if kfs.exists(raw):
+            rep.line(_OK, "read root", f"{raw}  (smbprotocol -> {server}, auth OK as {user})")
+        else:
+            rep.line(_FAIL, "read root", f"{raw}: authenticated to {server} but path "
+                     f"not found on the share")
+    except Exception as e:  # noqa: BLE001
+        rep.line(_FAIL, "read root", f"{raw}: SMB error ({e}); check "
+                 f"KIROSHI_NAS_USER/PASS, share name, and ACL for {user!r}")
+
+
+def _check_smb_write(rep: _Report, raw: str) -> None:
+    server = kfs.server_of(raw)
+    user = kfs.creds_for(server)[0] if server else None
+    probe = raw.rstrip("/\\") + f"/.kiroshi_doctor_{os.getpid()}_{int(time.time())}.tmp"
+    try:
+        with kfs.atomic_write(probe) as fh:
+            fh.write(b"ok")
+        if kfs.exists(probe):
+            kfs.remove(probe)
+        rep.line(_OK, "write root", f"{raw} (smbprotocol -> {server}, write+delete "
+                 f"verified as {user})")
+    except Exception as e:  # noqa: BLE001
+        rep.line(_FAIL, "write root", f"{raw}: SMB write failed ({e}); check creds "
+                 f"and that {user!r} is on the share's write list")
+
+
 def _check_read_root(rep: _Report, raw: Optional[str]) -> None:
     if not raw:
         rep.line(_WARN, "read root", "KIROSHI_READ_ROOT not set")
         return
+    if kpaths.looks_like_mangled_unc(raw):
+        rep.line(_FAIL, "read root", _mangled_unc_msg("share", raw))
+        return
+    if kfs.use_smb(raw):
+        _check_smb_read(rep, raw)
+        return
+    if kpaths.looks_like_unc(raw):
+        _unc_no_creds_warn(rep, "read root", raw)
     drive_warn = kpaths.is_mapped_network_drive(raw)
     resolved = kpaths.normalize_root(raw) or raw
     p = Path(resolved)
@@ -110,6 +165,17 @@ def _check_write_root(rep: _Report, raw: Optional[str]) -> None:
     if not raw:
         rep.line(_WARN, "write root", "KIROSHI_WRITE_ROOT not set")
         return
+    # Guard BEFORE any mkdir: a mangled UNC resolves to a local path, and
+    # mkdir(parents=True) would happily create a bogus local tree and report a
+    # false PASS (masking the misconfig until jobs write to the wrong disk).
+    if kpaths.looks_like_mangled_unc(raw):
+        rep.line(_FAIL, "write root", _mangled_unc_msg("share", raw))
+        return
+    if kfs.use_smb(raw):
+        _check_smb_write(rep, raw)
+        return
+    if kpaths.looks_like_unc(raw):
+        _unc_no_creds_warn(rep, "write root", raw)
     drive_warn = kpaths.is_mapped_network_drive(raw)
     resolved = kpaths.normalize_root(raw) or raw
     p = Path(resolved)

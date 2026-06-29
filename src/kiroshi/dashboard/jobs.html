@@ -65,9 +65,10 @@ function render(groups){
     const cmds=(g.launch_commands||[]);
     const cmd=cmds.length?cmds[0]:"(launch command unknown — runner not registered yet)";
     const gid=encodeURIComponent(g.grp);
+    const name=g.label||g.grp;
     const pageBtn=g.has_custom_page?`<a class="btn" target="_blank" href="${withTok('/p/job.html?job='+gid)}">▤ page</a>`:"";
     return `<div class="job">
-      <div class="top">${badge(g)}<span class="name">${esc(g.grp)}</span>
+      <div class="top">${badge(g)}<span class="name" title="${esc(g.grp)}">${esc(name)}</span>
         <span class="counts"><b>${g.done}</b>/${g.total} done · ${g.leased} in-flight · ${g.pending} queued · <span class="f">${g.failed} failed</span></span></div>
       <div class="pill"><div class="fill" style="width:${pct.toFixed(1)}%"></div><div class="lbl">${pct.toFixed(1)}%</div></div>
       <div class="meta">

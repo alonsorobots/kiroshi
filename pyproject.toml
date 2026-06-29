@@ -30,6 +30,10 @@ fast = ["orjson>=3.9"]
 toml = ["tomli>=2.0; python_version < '3.11'"]
 motion = ["numpy>=1.24"]
 tray = ["pystray>=0.19", "pillow>=10.0"]
+# Logon-session-proof SMB data plane: talk SMB directly over TCP/445 with
+# explicit credentials, bypassing the Windows redirector (works over SSH /
+# services, where mapped drives + cmdkey cannot). See kiroshi/kfs.py.
+smb = ["smbprotocol>=1.12"]
 dev = ["pytest>=8.0", "ruff>=0.4", "numpy>=1.24", "httpx>=0.27"]
 
 [project.scripts]

@@ -64,8 +64,9 @@ async function tick(){
       const cmd=(g.launch_commands&&g.launch_commands[0])||"—";
       const ended=(g.done>=g.total&&g.total>0)?fmt(g.last_completed):"—";
       const gid=encodeURIComponent(g.grp);
+      const name=g.label||g.grp;
       return `<tr>
-        <td class="name"><a href="/ui/job?job=${gid}">${esc(g.grp)}</a></td>
+        <td class="name"><a href="/ui/job?job=${gid}" title="${esc(g.grp)}">${esc(name)}</a></td>
         <td><span class="minibar"><span style="width:${pct.toFixed(1)}%"></span></span>${pct.toFixed(1)}%</td>
         <td class="ok">${g.done}/${g.total}</td>
         <td class="${g.failed?'f':''}">${g.failed}</td>

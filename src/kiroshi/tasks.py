@@ -19,9 +19,19 @@ The Fixer never imports the task — only Runners do (``kiroshi runner --task ..
 from __future__ import annotations
 
 import importlib
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, Iterator, Optional
 
 TaskFn = Callable[[Dict[str, Any]], Dict[str, Any]]
+
+# The enumeration contract (see PLAN §7.5). A task module MAY define a
+# module-level ``enumerate_gigs(args: dict) -> Iterator[dict]`` that turns the
+# pass-through ``--`` args from ``kiroshi run`` into gigs. Each yielded gig is a
+# ``{"job_id": str, "spec": dict, "group"?: str}`` dict — exactly the shape
+# ``/seed`` and :meth:`JobStore.seed` accept. This lets a task own its own
+# fan-out (e.g. one source read -> a 4-fps and an 8-fps gig) which a generic
+# ``--items`` globber can't infer.
+ENUMERATE_FN = "enumerate_gigs"
+EnumerateFn = Callable[[Dict[str, Any]], Iterator[Dict[str, Any]]]
 
 
 def resolve_task(ref: str) -> TaskFn:
@@ -35,4 +45,23 @@ def resolve_task(ref: str) -> TaskFn:
     fn = getattr(module, fn_name, None)
     if fn is None or not callable(fn):
         raise ValueError(f"{ref!r} did not resolve to a callable")
+    return fn  # type: ignore[return-value]
+
+
+def module_of(ref: str) -> str:
+    """The module part of a ``"module:function"`` reference."""
+    return ref.partition(":")[0]
+
+
+def resolve_enumerator(ref: str) -> Optional[EnumerateFn]:
+    """Return the task module's ``enumerate_gigs`` hook, or ``None`` if absent.
+
+    ``ref`` may be a full ``"module:function"`` task ref or a bare module name;
+    the enumerator is looked up by the :data:`ENUMERATE_FN` convention in that
+    same module.
+    """
+    module = importlib.import_module(module_of(ref))
+    fn = getattr(module, ENUMERATE_FN, None)
+    if fn is None or not callable(fn):
+        return None
     return fn  # type: ignore[return-value]
