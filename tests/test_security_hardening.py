@@ -35,6 +35,22 @@ def test_prove_verify_roundtrip():
     assert security.verify_proof(None, nonce, proof) is False
 
 
+def test_no_auth_opt_out_ignores_persisted_token(tmp_path, monkeypatch):
+    # --no-auth is an explicit operator opt-out: it must return None (no auth)
+    # even when a persisted mesh.token file exists (e.g. left by a service install).
+    # Previously ensure_fixer_token consulted the token file BEFORE the opt-out,
+    # silently re-enabling auth with a stale token.
+    monkeypatch.setenv("KIROSHI_STATE_DIR", str(tmp_path / "state"))
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "mesh.token").write_text("STALE-PERSISTED-TOKEN\n")
+    monkeypatch.delenv("KIROSHI_TOKEN", raising=False)
+    assert security.ensure_fixer_token(None, allow_insecure=True) is None
+    # without the opt-out, the persisted token IS honored (auth on)
+    assert security.ensure_fixer_token(None, allow_insecure=False) == "STALE-PERSISTED-TOKEN"
+    # an explicit --token always wins, even alongside --no-auth
+    assert security.ensure_fixer_token("explicit", allow_insecure=True) == "explicit"
+
+
 def test_auth_challenge_endpoint():
     from fastapi.testclient import TestClient
 
@@ -160,24 +176,34 @@ def test_launch_command_masks_token(monkeypatch):
 # --------------------------------------------------- example task confinement
 def test_motion_resample_path_confinement(tmp_path, monkeypatch):
     pytest.importorskip("numpy")  # the example task imports numpy (the `motion` extra)
-    monkeypatch.setenv("KIROSHI_READ_ROOT", str(tmp_path))
+    root = str(tmp_path)
+    monkeypatch.setenv("KIROSHI_READ_ROOT", root)
     mr = importlib.import_module("examples.motion_resample")
 
     # a normal relative path resolves INSIDE the root
-    p = mr._resolve("clips/a.npz", "KIROSHI_READ_ROOT")
-    assert str(tmp_path) in str(p)
+    p = mr._resolve("clips/a.npz", root, "KIROSHI_READ_ROOT")
+    assert root in str(p)
 
     # absolute paths are refused (Windows drive + POSIX anchor forms)
     with pytest.raises(ValueError):
-        mr._resolve("C:\\Windows\\System32\\evil.npz", "KIROSHI_READ_ROOT")
+        mr._resolve("C:\\Windows\\System32\\evil.npz", root, "KIROSHI_READ_ROOT")
     with pytest.raises(ValueError):
-        mr._resolve("/etc/passwd", "KIROSHI_READ_ROOT")
+        mr._resolve("/etc/passwd", root, "KIROSHI_READ_ROOT")
 
     # parent-escape traversal is refused
     with pytest.raises(ValueError):
-        mr._resolve("../../../escape.npz", "KIROSHI_READ_ROOT")
+        mr._resolve("../../../escape.npz", root, "KIROSHI_READ_ROOT")
 
-    # missing root => refuse rather than fall back to cwd
+    # missing root (no per-disk root AND no env) => refuse rather than fall back to cwd
     monkeypatch.delenv("KIROSHI_READ_ROOT", raising=False)
     with pytest.raises(ValueError):
-        mr._resolve("a.npz", "KIROSHI_READ_ROOT")
+        mr._resolve("a.npz", None, "KIROSHI_READ_ROOT")
+
+    # per-gig root wins over env (dual-path routing): a topology gig carries its
+    # disk's direct root and the task reads from there, not the env root.
+    from kiroshi import paths as kpaths
+
+    assert kpaths.gig_read_root({"read_root": "//disk1/data"}) == "//disk1/data"
+    monkeypatch.setenv("KIROSHI_READ_ROOT", "//env/fallback")
+    assert kpaths.gig_read_root({"read_root": "//disk1/data"}) == "//disk1/data"
+    assert kpaths.gig_read_root({}) == "//env/fallback"  # no spec root -> env

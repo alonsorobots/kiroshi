@@ -56,6 +56,9 @@ class MeshConfig:
     read_root: Optional[str] = None
     write_root: Optional[str] = None
     hosts: dict[str, HostConfig] = field(default_factory=dict)
+    # Storage topology for shard-aware I/O scheduling (PLAN §7.6). Empty list =
+    # inert (no [[storage.disk]] config -> plain work-stealing, no per-disk budget).
+    disks: list = field(default_factory=list)
 
     @property
     def fixer_url(self) -> str:
@@ -116,6 +119,18 @@ def load_config(path: Optional[str] = None) -> MeshConfig:
                 extra={k: v for k, v in hc.items()
                        if k not in {"python", "workers", "capacity", "read_root", "write_root"}},
             )
+        # Storage topology: [[storage.disk]] sections (opt-in NAS sharding).
+        from .storage import DiskConfig
+
+        for d in (data.get("storage", {}).get("disk", []) or []):
+            cfg.disks.append(DiskConfig(
+                id=d.get("id") or d.get("match") or "disk",
+                kind=d.get("kind", "hdd"),
+                read=d.get("read"),
+                write=d.get("write"),
+                match=d.get("match", ""),
+                concurrency=d.get("concurrency"),
+            ))
 
     # Environment overrides (highest priority for connection + roots)
     cfg.fixer_host = os.environ.get("KIROSHI_FIXER_HOST", cfg.fixer_host)

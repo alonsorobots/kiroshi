@@ -90,6 +90,13 @@ class JobStore:
             if "grp" not in cols:
                 self._conn.execute("ALTER TABLE jobs ADD COLUMN grp TEXT")
             self._conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_grp ON jobs(grp)")
+            # Migration: a `disk` column tags each gig with the physical spindle its
+            # input lives on (PLAN §7.6), so /lease can enforce a global per-disk
+            # in-flight budget + round-robin across spindles. Nullable: gigs with no
+            # disk (no topology, or unmatched) are uncapped — the inert default.
+            if "disk" not in cols:
+                self._conn.execute("ALTER TABLE jobs ADD COLUMN disk TEXT")
+            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_disk ON jobs(disk)")
             self._conn.commit()
             self._backfill_groups()
 
@@ -123,12 +130,13 @@ class JobStore:
         for g in gigs:
             jid = g["job_id"]
             grp = g.get("group") or group or _group_of(jid)
-            rows.append((jid, jsonio.dumps(g.get("spec", {})), grp, now))
+            disk = g.get("disk")
+            rows.append((jid, jsonio.dumps(g.get("spec", {})), grp, disk, now))
         with self._lock:
             before = self._conn.total_changes
             self._conn.executemany(
-                "INSERT OR IGNORE INTO jobs (job_id, spec, grp, created_at) "
-                "VALUES (?, ?, ?, ?)",
+                "INSERT OR IGNORE INTO jobs (job_id, spec, grp, disk, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
                 rows,
             )
             # Count gig inserts only — *before* the campaign upsert, so the label
@@ -175,34 +183,113 @@ class JobStore:
             return self._conn.total_changes - before
 
     # --------------------------------------------------------------- lease
-    def lease(self, runner_id: str, host: str, capacity: int, ttl: float) -> LeaseResult:
+    def lease(self, runner_id: str, host: str, capacity: int, ttl: float,
+              disk_concurrency: Optional[dict[str, int]] = None) -> LeaseResult:
+        """Lease up to ``capacity`` pending gigs atomically.
+
+        With ``disk_concurrency`` (the mesh-global per-spindle budget, only the
+        Fixer can supply), candidate gigs are **round-robin interleaved across
+        disks** (every spindle fed from the first lease) and a **per-disk in-flight
+        cap** is enforced: never lease beyond ``budget[disk]`` gigs currently leased
+        across the *whole fleet*. This is the distributed DiskSemaphore — possible
+        only because the ledger is central. Disks not in the map (and ``None``) are
+        uncapped. Without ``disk_concurrency`` the selection is plain "first N
+        pending" (the inert default).
+        """
         now = time.time()
         lease_id = uuid.uuid4().hex
         with self._lock:
-            cur = self._conn.execute(
-                "SELECT job_id, spec FROM jobs WHERE state='pending' "
-                "ORDER BY created_at LIMIT ?",
-                (capacity,),
-            )
-            rows = cur.fetchall()
+            if not disk_concurrency:
+                cur = self._conn.execute(
+                    "SELECT job_id, spec, disk FROM jobs WHERE state='pending' "
+                    "ORDER BY created_at LIMIT ?",
+                    (capacity,),
+                )
+                rows = cur.fetchall()
+                if not rows:
+                    return LeaseResult(lease_id=None, gigs=[])
+                return self._finalize_lease(rows, lease_id, runner_id, host, now, ttl)
+
+            # --- disk-aware path ---
+            # 1. current in-flight per disk (leased gigs across the whole fleet)
+            inflight: dict[Optional[str], int] = {}
+            for r in self._conn.execute(
+                "SELECT disk, COUNT(*) AS c FROM jobs WHERE state='leased' GROUP BY disk"
+            ):
+                inflight[r["disk"]] = r["c"]
+            # 2. pending gigs with their disk, in creation order
+            rows = self._conn.execute(
+                "SELECT job_id, spec, disk FROM jobs WHERE state='pending' "
+                "ORDER BY created_at"
+            ).fetchall()
             if not rows:
                 return LeaseResult(lease_id=None, gigs=[])
-            ids = [r["job_id"] for r in rows]
-            self._conn.executemany(
-                "UPDATE jobs SET state='leased', lease_id=?, runner_id=?, host=?, "
-                "leased_at=?, lease_deadline=?, attempts=attempts+1 WHERE job_id=?",
-                [(lease_id, runner_id, host, now, now + ttl, jid) for jid in ids],
-            )
-            self._conn.commit()
-            gigs = [{"job_id": r["job_id"], "spec": jsonio.loads(r["spec"])} for r in rows]
-            return LeaseResult(lease_id=lease_id, gigs=gigs)
+
+            # 3. split into capped disks (in the budget map) vs uncapped (None / unknown)
+            capped: dict[str, list] = {}
+            uncapped: list = []
+            for r in rows:
+                d = r["disk"]
+                if d is not None and d in disk_concurrency:
+                    capped.setdefault(d, []).append(r)
+                else:
+                    uncapped.append(r)
+
+            # 4. round-robin interleave: one per capped disk (if budget remains) +
+            #    one from the uncapped stream, per round — keeps every spindle busy
+            #    and never starves uncapped gigs.
+            iters = {d: iter(capped[d]) for d in capped}
+            unc_iter = iter(uncapped)
+            unc_active = bool(uncapped)
+            selected: list = []
+            while len(selected) < capacity:
+                progressed = False
+                for d in list(iters):
+                    remaining = disk_concurrency[d] - inflight.get(d, 0)
+                    if remaining <= 0:
+                        continue
+                    try:
+                        selected.append(next(iters[d]))
+                    except StopIteration:
+                        del iters[d]
+                        continue
+                    inflight[d] = inflight.get(d, 0) + 1
+                    progressed = True
+                    if len(selected) >= capacity:
+                        break
+                if unc_active and len(selected) < capacity:
+                    try:
+                        selected.append(next(unc_iter))
+                        progressed = True
+                    except StopIteration:
+                        unc_active = False
+                if not progressed:
+                    break  # all capped disks saturated/exhausted and uncapped drained
+
+            if not selected:
+                return LeaseResult(lease_id=None, gigs=[])
+            return self._finalize_lease(selected, lease_id, runner_id, host, now, ttl)
+
+    def _finalize_lease(self, rows, lease_id, runner_id, host, now, ttl) -> LeaseResult:
+        ids = [r["job_id"] for r in rows]
+        self._conn.executemany(
+            "UPDATE jobs SET state='leased', lease_id=?, runner_id=?, host=?, "
+            "leased_at=?, lease_deadline=?, attempts=attempts+1 WHERE job_id=?",
+            [(lease_id, runner_id, host, now, now + ttl, jid) for jid in ids],
+        )
+        self._conn.commit()
+        gigs = [{"job_id": r["job_id"], "spec": jsonio.loads(r["spec"]),
+                 "disk": r["disk"]} for r in rows]
+        return LeaseResult(lease_id=lease_id, gigs=gigs)
 
     # ------------------------------------------------------------ complete
     def complete(self, results: list[dict[str, Any]]) -> dict[str, int]:
         """Apply a batch of results. Each: {job_id, status, error?, metrics?}.
 
-        status 'ok'/'skipped' -> done. Otherwise re-queue (pending) until
-        attempts exceed max_retries, then mark failed.
+        status 'ok'/'skipped' -> done. 'requeue' -> back to pending WITHOUT
+        consuming the retry budget (an eviction under pressure, not a task
+        failure — e.g. an at-field pause mid-batch). Otherwise (error) re-queue
+        (pending) until attempts exceed max_retries, then mark failed.
         """
         now = time.time()
         done = requeued = failed = 0
@@ -217,6 +304,18 @@ class JobStore:
                         (now, jsonio.dumps(r.get("metrics", {})), jid),
                     )
                     done += 1
+                elif status == "requeue":
+                    # Eviction: return to pending immediately. Undo the lease's
+                    # attempts+1 so a flapping pressure pause can't exhaust the
+                    # retry budget and mark a healthy gig 'failed' — the task was
+                    # preempted, not actually tried. error is cleared (not a fault).
+                    self._conn.execute(
+                        "UPDATE jobs SET state='pending', error=NULL, "
+                        "attempts=CASE WHEN attempts>0 THEN attempts-1 ELSE 0 END, "
+                        "lease_id=NULL, lease_deadline=NULL WHERE job_id=?",
+                        (jid,),
+                    )
+                    requeued += 1
                 else:
                     row = self._conn.execute(
                         "SELECT attempts FROM jobs WHERE job_id=?", (jid,)
@@ -318,6 +417,16 @@ class JobStore:
                     (now - window_s,),
                 )
             }
+            # Per-disk in-flight (leased gigs per spindle, across the whole fleet).
+            # The dashboard shows this vs the budget so you can SEE every spindle
+            # saturated and spot a cold or thrashing disk (PLAN §7.6 N6).
+            disk_inflight = {
+                (row["disk"] or "(uncapped)"): row["n"]
+                for row in self._conn.execute(
+                    "SELECT disk, COUNT(*) AS n FROM jobs "
+                    "WHERE state='leased' AND disk IS NOT NULL GROUP BY disk"
+                )
+            }
             recent_errors = [
                 {"job_id": row["job_id"], "host": row["host"], "error": row["error"]}
                 for row in self._conn.execute(
@@ -349,13 +458,27 @@ class JobStore:
             "remaining": remaining,
             "eta_s": round(eta_s, 1) if eta_s is not None else None,
             "per_host": per_host,
+            "disk_inflight": disk_inflight,
             "recent_errors": recent_errors,
             "ts": now,
         }
 
     # ------------------------------------------------------------- listing
+    def disk_done_counts(self) -> dict[str, int]:
+        """``{disk_id: done_count}`` — for the throughput sampler to derive per-disk
+        rate over time (PLAN §7.6 N6). Only disks with at least one done gig."""
+        with self._lock:
+            return {
+                row["disk"]: row["n"]
+                for row in self._conn.execute(
+                    "SELECT disk, COUNT(*) AS n FROM jobs "
+                    "WHERE state='done' AND disk IS NOT NULL GROUP BY disk"
+                )
+            }
+
     _LIST_COLS = ("job_id", "state", "host", "runner_id", "attempts",
-                  "created_at", "leased_at", "completed_at", "error", "metrics")
+                  "created_at", "leased_at", "completed_at", "error", "metrics",
+                  "grp", "disk")
 
     def list_jobs(self, states: Optional[tuple[str, ...]] = None,
                   limit: int = 200, newest_first: bool = True) -> list[dict[str, Any]]:

@@ -39,7 +39,7 @@ from __future__ import annotations
 import fnmatch
 import io
 import os
-from pathlib import PurePosixPath, PureWindowsPath
+from pathlib import PurePosixPath
 from typing import Any, Iterator, Optional
 
 import numpy as np
@@ -119,42 +119,22 @@ def resample_quaternions(
 
 
 # --------------------------------------------------------------------------- task
-def _resolve(path: str, env_root: str) -> str:
-    """Resolve a gig-supplied path *confined to its configured root*.
+def _resolve(path: str, root: Optional[str], env_name: str) -> str:
+    """Resolve a gig-supplied path *confined to its root*.
 
-    SECURITY: ``spec.src_path``/``dst_path`` come from whoever seeded the gig, so
-    they are untrusted input. We refuse absolute paths and any ``..`` traversal
-    that would escape ``KIROSHI_READ_ROOT`` / ``KIROSHI_WRITE_ROOT`` — otherwise a
-    malicious (or buggy) spec could make the Runner read/write anywhere its
-    account can reach (e.g. overwrite a Startup script). A task that genuinely
-    needs unconfined paths must opt in explicitly; the default is locked down.
-
-    Confinement is done with *pure* path arithmetic (no ``resolve()``/realpath):
-    the root may be an SMB UNC share that we deliberately never touch via the OS
-    redirector, and rejecting any ``..`` component makes traversal impossible
-    without needing the filesystem at all.
+    ``root`` is the per-gig root (the disk's direct/cached share for topology-aware
+    gigs, else the env ``KIROSHI_READ_ROOT``/``KIROSHI_WRITE_ROOT``) — see
+    :func:`kiroshi.paths.gig_read_root`. The confinement itself (no absolute paths,
+    no ``..`` traversal, pure path arithmetic so an SMB UNC is never touched via the
+    OS redirector) lives in :func:`kiroshi.paths.confined_join` and is shared by
+    every task. SECURITY: ``spec.src_path``/``dst_path`` are untrusted.
     """
-    root = os.environ.get(env_root)
     if not root:
         raise ValueError(
-            f"{env_root} is not set; refusing to resolve an unconfined path {path!r}"
+            f"{env_name} is not set and the gig carries no per-disk root; "
+            f"refusing to resolve an unconfined path {path!r}"
         )
-    if kpaths.looks_like_mangled_unc(root):
-        raise ValueError(
-            f"{env_root}={root!r} looks like a UNC path that lost a leading "
-            f"separator; use the //server/share form"
-        )
-    rel = str(path).replace("\\", "/")
-    pw = PureWindowsPath(rel)
-    if rel.startswith("/") or pw.is_absolute() or pw.drive:
-        raise ValueError(f"absolute path not allowed for a gig: {path!r}")
-    parts = [seg for seg in PurePosixPath(rel).parts if seg not in ("", ".")]
-    if any(seg == ".." for seg in parts):
-        raise ValueError(f"path {path!r} escapes its root {env_root}={root!r}")
-    base = root.rstrip("/\\")
-    if kfs.is_unc(root):
-        return base.replace("/", "\\") + "\\" + "\\".join(parts)
-    return os.path.join(base, *parts)
+    return kpaths.confined_join(root, path)
 
 
 def _targets(spec: dict[str, Any]) -> list[tuple[float, str]]:
@@ -166,11 +146,13 @@ def _targets(spec: dict[str, Any]) -> list[tuple[float, str]]:
     The legacy single-fps form (``target_fps`` + ``dst_path``) is still accepted.
     """
     raw = spec.get("targets") or [{"target_fps": spec["target_fps"], "dst_path": spec["dst_path"]}]
-    return [(float(t["target_fps"]), _resolve(t["dst_path"], "KIROSHI_WRITE_ROOT")) for t in raw]
+    wroot = kpaths.gig_write_root(spec)
+    return [(float(t["target_fps"]), _resolve(t["dst_path"], wroot, "KIROSHI_WRITE_ROOT"))
+            for t in raw]
 
 
 def run(spec: dict[str, Any]) -> dict[str, Any]:
-    src = _resolve(spec["src_path"], "KIROSHI_READ_ROOT")
+    src = _resolve(spec["src_path"], kpaths.gig_read_root(spec), "KIROSHI_READ_ROOT")
     quat_key = spec.get("quat_key", "quat")
     valid_key = spec.get("valid_key", "is_valid")
 

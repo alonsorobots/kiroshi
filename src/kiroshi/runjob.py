@@ -176,6 +176,8 @@ def run_job(
     max_retries: int = 3,
     poll: float = 1.0,
     serve_task: bool = False,
+    max_tasks_per_child: Optional[int] = None,
+    gc_between_tasks: bool = False,
     launch_command: str = "",
 ) -> int:
     import uvicorn
@@ -240,6 +242,19 @@ def run_job(
         print("[run] no gigs produced — nothing to do.", file=sys.stderr)
         return 1
 
+    # --- tag each gig with its physical disk (topology-aware leasing, PLAN §7.6) ---
+    # A gig may already carry a disk (set by enumerate_gigs); only absent ones are
+    # derived. No topology => disk stays None and leasing is inert (plain work-steal).
+    from .storage import derive_disk, load_topology
+
+    disks = load_topology()
+    if disks:
+        for g in gigs:
+            if not g.get("disk"):
+                d = derive_disk(g["job_id"], g.get("spec", {}), disks)
+                if d:
+                    g["disk"] = d
+
     # --- auth follows the bind, resolved CONSISTENTLY for both sides ---
     # --lan: ensure a token exists (generate+persist) so joiners have a join code.
     # loopback: use an explicit/env/file token if one exists, else no-auth. We must
@@ -278,7 +293,7 @@ def run_job(
                   flush=True)
 
     app = create_app(store, token=token, launch_command=launch_command,
-                     task_source=task_source)
+                     task_source=task_source, disks=disks)
     config = uvicorn.Config(app, host=host, port=port, log_level="warning")
     server = uvicorn.Server(config)
     server_thread = threading.Thread(target=server.run, name="kiroshi-run-fixer",
@@ -302,6 +317,8 @@ def run_job(
         extra_syspath=syspath,
         quiet=True,
         launch_command=launch_command,
+        max_tasks_per_child=max_tasks_per_child,
+        gc_between_tasks=gc_between_tasks,
     )
     runner_thread = threading.Thread(target=runner.run, name="kiroshi-run-runner",
                                      daemon=True)

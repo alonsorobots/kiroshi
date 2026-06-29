@@ -99,6 +99,7 @@ def create_app(
     lease_miss_tolerance: float = 4.0,
     lease_ttl_cap: float = 3600.0,
     task_source: Optional[dict[str, Any]] = None,
+    disks: Optional[list] = None,
 ) -> FastAPI:
     app = FastAPI(title="Kiroshi Fixer", version="0.0.1")
     app.state.store = store
@@ -121,6 +122,13 @@ def create_app(
     # Opt-in task-code serving for `kiroshi join` (SECURITY.md §6.5). None unless
     # the Fixer was started with --serve-task; gated + consent-checked client-side.
     app.state.task_source = task_source
+    # Storage topology for shard-aware leasing (PLAN §7.6). None/[] => inert (no
+    # per-disk budget, plain work-stealing). The mesh-global per-spindle budget is
+    # derived here once; only the Fixer can enforce it across the whole fleet.
+    app.state.disks = disks or []
+    from .storage import disk_concurrency_map
+
+    app.state.disk_concurrency = disk_concurrency_map(app.state.disks)
 
     @app.middleware("http")
     async def _auth(request: Request, call_next):
@@ -188,12 +196,14 @@ def create_app(
         # Sample throughput/counts into the ring buffer so the dashboard can draw
         # an at-field-style rate curve over time (TRUE rate from /status window).
         # Also snapshot per-group done counts (top groups) so each "job" gets its
-        # own progress-over-time curve.
+        # own progress-over-time curve, and per-disk done counts (N6) so each
+        # spindle gets its own throughput sparkline.
         while not app.state._stop.wait(2.0):
             try:
                 s = store.stats()
                 groups = {g["grp"]: g["done"]
                           for g in store.group_stats(limit=40)}
+                disk_done = store.disk_done_counts() if app.state.disks else {}
                 app.state.metrics.append({
                     "ts": s["ts"],
                     "rate": s.get("rate_per_s", 0.0),
@@ -202,6 +212,7 @@ def create_app(
                     "leased": s.get("leased", 0),
                     "failed": s.get("failed", 0),
                     "groups": groups,
+                    "disk_done": disk_done,
                 })
             except Exception:  # pragma: no cover
                 pass
@@ -221,10 +232,21 @@ def create_app(
 
     @app.post("/seed")
     def seed(req: SeedReq) -> dict[str, int]:
-        inserted = store.seed(
-            [g.model_dump() for g in req.gigs],
-            group=req.group, label=req.label,
-        )
+        # Derive each gig's physical disk from the topology (if declared) so /lease
+        # can budget per-spindle. A gig that already carries a disk (set by the
+        # task's enumerate_gigs) wins; only absent ones are derived. No topology =>
+        # disk stays None (uncapped / inert).
+        disks = app.state.disks
+        gigs = [g.model_dump() for g in req.gigs]
+        if disks:
+            from .storage import derive_disk
+
+            for g in gigs:
+                if not g.get("disk"):
+                    d = derive_disk(g["job_id"], g.get("spec", {}), disks)
+                    if d:
+                        g["disk"] = d
+        inserted = store.seed(gigs, group=req.group, label=req.label)
         return {"inserted": inserted, "received": len(req.gigs)}
 
     def _touch_runner(runner_id: str, host: str) -> None:
@@ -320,7 +342,15 @@ def create_app(
     def lease(req: LeaseReq) -> dict[str, Any]:
         _touch_runner(req.runner_id, req.host)
         ttl = _effective_ttl(req.heartbeat_interval)
-        res = store.lease(req.runner_id, req.host, req.capacity, ttl)
+        res = store.lease(req.runner_id, req.host, req.capacity, ttl,
+                          disk_concurrency=app.state.disk_concurrency or None)
+        # Dual-path routing (N3): stamp each gig's spec with its disk's read/write
+        # roots so the task reads the direct spindle share / writes the cached share.
+        # Inert without a topology (gig has no disk -> spec roots unset -> env fallback).
+        if app.state.disks and res.gigs:
+            from .storage import inject_roots
+
+            inject_roots(res.gigs, app.state.disks)
         return {"lease_id": res.lease_id, "gigs": res.gigs, "ttl": ttl}
 
     @app.post("/complete")
@@ -373,7 +403,30 @@ def create_app(
 
     @app.get("/status")
     def status() -> JSONResponse:
-        return JSONResponse(store.stats())
+        st = store.stats()
+        # Per-disk observability (N6): attach the budget + disk metadata so the
+        # dashboard can render in-flight vs budget per spindle. Inert without a
+        # topology (disk_budget empty -> the panel doesn't render).
+        if app.state.disk_concurrency:
+            st["disk_budget"] = app.state.disk_concurrency
+            st["disk_info"] = [
+                {"id": d.id, "kind": d.kind, "match": d.match}
+                for d in app.state.disks
+            ]
+        return JSONResponse(st)
+
+    @app.get("/storage")
+    def storage() -> dict[str, Any]:
+        """Storage topology + live per-disk in-flight/budget for the dashboard.
+        Empty when no topology is configured (inert)."""
+        if not app.state.disks:
+            return {"disks": [], "budget": {}}
+        return {
+            "disks": [{"id": d.id, "kind": d.kind, "match": d.match,
+                        "read": d.read, "write": d.write}
+                      for d in app.state.disks],
+            "budget": app.state.disk_concurrency,
+        }
 
     @app.get("/job/{job_id:path}")
     def job_detail(job_id: str) -> JSONResponse:

@@ -71,6 +71,8 @@ class Runner:
         token: Optional[str] = None,
         launch_command: str = "",
         quiet: bool = False,
+        max_tasks_per_child: Optional[int] = None,
+        gc_between_tasks: bool = False,
     ):
         # quiet suppresses the routine per-batch / startup prints so an
         # in-process `kiroshi run` can render a clean progress bar. Errors and
@@ -92,6 +94,8 @@ class Runner:
         self.item_retries = item_retries
         self.item_backoff = item_backoff
         self.gig_timeout = gig_timeout
+        self.max_tasks_per_child = max_tasks_per_child
+        self.gc_between_tasks = gc_between_tasks
         self.http_timeout = http_timeout
         self.discover_timeout = discover_timeout
         self.rediscover_after = rediscover_after
@@ -246,6 +250,8 @@ class Runner:
             extra_syspath=self.extra_syspath,
             item_retries=self.item_retries,
             item_backoff=self.item_backoff,
+            max_tasks_per_child=self.max_tasks_per_child,
+            gc_between_tasks=self.gc_between_tasks,
         )
         reg = self._start_process_registration()
         try:
@@ -287,12 +293,15 @@ class Runner:
                     gig_timeout=self.gig_timeout,
                     heartbeat_cb=_hb,
                     hb_interval=self.heartbeat_interval,
+                    pause_cb=self._pause_active,
                 )
                 if lease_id:
                     self._post("/complete", {"lease_id": lease_id, "results": results})
                 if not self.quiet:
                     ok = sum(1 for r in results if r["status"] in ("ok", "skipped"))
-                    print(f"[runner] batch {len(gigs)} done ({ok} ok)", flush=True)
+                    ev = sum(1 for r in results if r["status"] == "requeue")
+                    extra = f", {ev} evicted" if ev else ""
+                    print(f"[runner] batch {len(gigs)} done ({ok} ok{extra})", flush=True)
         finally:
             pool.close()
             if reg is not None:
@@ -323,6 +332,14 @@ class Runner:
             ).start()
         except Exception:  # noqa: BLE001
             return None
+
+    def _pause_active(self) -> bool:
+        """Pure check (no side effects) — used as ``pause_cb`` inside run_batch so a
+        pressure signal mid-batch evicts queued gigs immediately (abort-with-
+        eviction) instead of holding the whole lease while sleeping."""
+        from . import atfield
+
+        return atfield.is_paused()
 
     def _check_atfield_pause(self) -> bool:
         """If at-field has paused the rig, back off (don't lease). Returns True

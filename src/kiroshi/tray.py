@@ -197,6 +197,15 @@ class Tray:
                         self._status = (f"done {d.get('done', 0)}/{d.get('total', 0)} "
                                         f"({pct:.0f}%) · {d.get('rate_per_s', 0):.1f}/s "
                                         f"· {d.get('pending', 0)} queued")
+                    # Per-disk in-flight when a topology is active (N6): a compact
+                    # one-line-per-disk breakdown so the tray shows which spindles
+                    # are busy vs their budget.
+                    di = d.get("disk_inflight")
+                    db = d.get("disk_budget")
+                    if di and db:
+                        parts = [f"{did}:{di.get(did,0)}/{db.get(did,'?')}"
+                                 for did in db]
+                        self._status += "\n" + " ".join(parts)
                 else:
                     self._live = False
                     self._status = f"fixer returned {r.status_code}"

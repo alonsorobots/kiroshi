@@ -195,12 +195,53 @@ kiroshi runner --fixer auto --task mypkg.mytask:run
   share and the **write** root at a cache/SSD-backed share — small-file writes to
   a parity disk are the usual throughput wall.
 
+## NAS sharding (opt-in: maximize a multi-HDD NAS)
+
+A NAS with N HDDs delivers ~N× the throughput **only if** every spindle is busy
+and none is over-subscribed (too many concurrent readers on one HDD = head
+thrashing → throughput *collapses*). On a single machine you'd enforce that with a
+semaphore per disk; across a mesh you can't — three Runners each capping themselves
+would still pile 3× onto one spindle. **Only the Fixer sees the whole fleet**, so
+it enforces a *mesh-global per-spindle budget* — the one thing that structurally
+belongs in Kiroshi, not the task.
+
+It's **100% opt-in**. With no `[[storage.disk]]` config Kiroshi behaves exactly as
+today (one read/write root, plain work-stealing). Declare your spindles once in
+`kiroshi.local.toml` (gitignored):
+
+```toml
+[[storage.disk]]
+kind  = "hdd"                          # hdd -> low concurrency; nvme/ssd -> high
+read  = "//nas/disk1_direct/dataset"   # direct per-spindle share (fast sequential read)
+write = "//nas/disk1/dataset"          # cached share (absorbs small-file write storms)
+match = "shard_01..08"                 # which gigs live on this spindle
+# concurrency = 6   # optional; `kiroshi nas benchmark` finds the thrash knee
+```
+
+Then the Fixer tags each gig to its disk, **round-robin interleaves leases across
+spindles**, enforces the per-disk budget fleet-wide, and routes each gig to its
+disk's direct-read / cached-write path. The dashboard grows a **Storage panel**
+(per-spindle in-flight/budget + throughput sparkline) so you can watch every disk.
+
+Tools to set it up and keep it healthy:
+
+```bash
+kiroshi nas assess //nas/dataset --pattern "*.npz" --topology  # readiness health check
+kiroshi nas shard  //nas/dataset --disks 7                     # bin-pack into shard_NN/ dirs
+kiroshi nas benchmark                                          # sweep concurrency, find the knee
+kiroshi nas probe  nas --pattern "disk{1..7}"                  # scaffold a starter topology
+```
+
+`nas assess` gives a **READY / NEEDS-ATTENTION** verdict with actionable fixes
+(format mismatch, data concentrated on one disk, shards matching no disk, skew).
+
 ## CLI
 
 | Command | What |
 |---|---|
 | `kiroshi run m:f --items GLOB` | **Front door** — enumerate, run a local mesh, live progress bar. `--lan` invites other machines; `--enumerate` calls the task's `enumerate_gigs(args)`; `--serve-task` offers the code to joiners. |
 | `kiroshi join` | Add this machine to a running mesh as a Runner (`--service` to auto-start; consent-gated code fetch). |
+| `kiroshi nas assess <root>` | **Throughput-readiness health check** (read-only): walks a dataset, checks file format (`--pattern`), per-disk distribution + concentration, shard-to-disk coverage, and balance — then gives a READY / NEEDS-ATTENTION verdict with actionable fixes. `nas benchmark` sweeps per-disk concurrency and recommends `concurrency`. `nas shard` bin-packs a flat dataset into `shard_NN/` dirs across N disks (+ emits config). `nas probe` discovers a NAS's shares and scaffolds a topology. |
 | `kiroshi install` | One-command always-on: Fixer as a boot-start service + tray autostart on login. (`uninstall` to remove.) |
 | `kiroshi autostart on\|off\|status` | Manage the tray's login-autostart (`HKCU\Run`). |
 | `kiroshi fixer` | Run the coordinator + dashboard (auto-generates a mesh token). |
@@ -220,8 +261,10 @@ Common flags: `--token` (or `KIROSHI_TOKEN`) on every networked command;
 
 The dashboard has three views, all themed like Kiroshi optics:
 
-- **Overview** (`/`) — totals, aggregate progress bar, and an at-field-style
-  **throughput rate-curve over time** (hand-rolled SVG, no chart libs).
+- **Overview** (`/`) — totals, aggregate progress bar, an at-field-style
+  **throughput rate-curve over time** (hand-rolled SVG, no chart libs), and — when
+  a NAS topology is configured — a **Storage panel** with per-spindle
+  in-flight/budget and a throughput sparkline per disk.
 - **Jobs** (`/ui/jobs`) — one row per **campaign** (gigs grouped by `job_id`
   prefix): a pill progress bar, live counts, the **full launch command** that
   produced it, a **graph** button (per-job rate-over-time curve), and an

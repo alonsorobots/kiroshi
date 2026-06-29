@@ -18,8 +18,8 @@ from __future__ import annotations
 import os
 import re
 import sys
-from pathlib import Path
-from typing import Optional
+from pathlib import Path, PurePosixPath, PureWindowsPath
+from typing import Any, Optional
 
 from .config import HostConfig, MeshConfig
 
@@ -34,6 +34,53 @@ def resolve_write_root(cfg: MeshConfig, host: Optional[HostConfig] = None) -> Op
     host = host or cfg.host()
     val = os.environ.get("KIROSHI_WRITE_ROOT") or host.write_root or cfg.write_root
     return Path(normalize_root(val)) if val else None
+
+
+# --------------------------------------------------------- per-gig roots (N3)
+def gig_read_root(spec: dict[str, Any]) -> Optional[str]:
+    """The read root for a specific gig: the disk's direct share (injected by the
+    Fixer at lease time for topology-aware gigs), else the env
+    ``KIROSHI_READ_ROOT``. ``None`` if neither is set. Prefer the spec root so a
+    gig on ``disk1`` reads from ``disk1``'s direct spindle share, not the single
+    mesh-wide root — the dual-path routing win (PLAN §7.6)."""
+    return spec.get("read_root") or os.environ.get("KIROSHI_READ_ROOT")
+
+
+def gig_write_root(spec: dict[str, Any]) -> Optional[str]:
+    """The write root for a specific gig: the disk's cached share, else the env
+    ``KIROSHI_WRITE_ROOT``. See :func:`gig_read_root`."""
+    return spec.get("write_root") or os.environ.get("KIROSHI_WRITE_ROOT")
+
+
+def confined_join(root: str, rel: str) -> str:
+    """Join a gig-supplied relative path under ``root`` using PURE path arithmetic
+    (no ``resolve()``/realpath — the root may be an SMB UNC we deliberately never
+    touch via the OS redirector).
+
+    SECURITY: ``rel`` is untrusted (whoever seeded the gig). We refuse absolute
+    paths and any ``..`` traversal that would escape ``root`` — otherwise a
+    malicious/buggy spec could make a Runner read/write anywhere its account can
+    reach. A task that genuinely needs unconfined paths must opt in explicitly.
+
+    UNC roots get backslash separators (Windows wants ``\\\\server\\share\\x``);
+    everything else uses ``os.path.join``. Extracted from the motion task so every
+    task gets the same confinement for free.
+    """
+    if looks_like_mangled_unc(root):
+        raise ValueError(
+            f"root {root!r} looks like a UNC path that lost a leading separator; "
+            f"use the //server/share form")
+    r = str(rel).replace("\\", "/")
+    pw = PureWindowsPath(r)
+    if r.startswith("/") or pw.is_absolute() or pw.drive:
+        raise ValueError(f"absolute path not allowed for a gig: {rel!r}")
+    parts = [seg for seg in PurePosixPath(r).parts if seg not in ("", ".")]
+    if any(seg == ".." for seg in parts):
+        raise ValueError(f"path {rel!r} escapes its root {root!r}")
+    base = root.rstrip("/\\")
+    if looks_like_unc(base):
+        return base.replace("/", "\\") + "\\" + "\\".join(parts)
+    return os.path.join(base, *parts)
 
 
 def looks_like_drive_letter(p: str | os.PathLike[str]) -> bool:

@@ -73,6 +73,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     prun.add_argument("--syspath", action="append", default=None,
                       help="Extra sys.path entries for task import (repeatable).")
     prun.add_argument("--max-retries", type=int, default=3)
+    prun.add_argument("--max-tasks-per-child", type=int, default=None,
+                      help="Recycle worker processes every N gigs (band-aid for C-level "
+                           "leaks; off by default — prefer fixing the real accumulator).")
+    prun.add_argument("--gc-between-tasks", action="store_true",
+                      help="Run gc.collect() after every gig (defensive; off by default).")
     prun.add_argument("--serve-task", action="store_true",
                       help="Serve this (single-file, top-level) task's source to "
                            "joiners so `kiroshi join` needs no checkout. Opt-in + "
@@ -131,6 +136,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     pr.add_argument("--retries", type=int, default=2, help="Per-item local retries.")
     pr.add_argument("--gig-timeout", type=float, default=None,
                     help="Seconds before a hung gig is abandoned + its worker killed.")
+    pr.add_argument("--max-tasks-per-child", type=int, default=None,
+                    help="Recycle worker processes every N gigs (band-aid for leaks; off by default).")
+    pr.add_argument("--gc-between-tasks", action="store_true",
+                    help="Run gc.collect() after every gig (defensive; off by default).")
     pr.add_argument("--syspath", action="append", default=None,
                     help="Extra sys.path entries for task import (repeatable).")
     pr.add_argument("--token", default=None,
@@ -212,6 +221,56 @@ def main(argv: Optional[list[str]] = None) -> int:
     pau.add_argument("action", choices=["on", "off", "status"],
                      help="on=register, off=unregister, status=show current.")
 
+    # ---- nas (storage topology tools) ----
+    pnas = sub.add_parser("nas",
+                          help="Assess + benchmark NAS storage topology (PLAN §7.6).")
+    nas_sub = pnas.add_subparsers(dest="nas_cmd", required=True)
+
+    pna = nas_sub.add_parser("assess", help="Walk a dataset root and report shard balance + throughput-readiness (read-only).")
+    pna.add_argument("root", help="Dataset root to assess (local path or UNC //server/share).")
+    pna.add_argument("--shard-depth", type=int, default=1,
+                     help="Path components that form a shard key (default: 1 = top-level dir).")
+    pna.add_argument("--pattern", default=None,
+                     help="File glob to count (e.g. '*.npz'); non-matching files are flagged in the format check.")
+    pna.add_argument("--topology", action="store_true",
+                     help="Load [[storage.disk]] from config and check shard->disk coverage + per-disk distribution.")
+
+    pnb = nas_sub.add_parser("benchmark",
+                             help="Measure per-disk read throughput at increasing concurrency; "
+                                  "recommend `concurrency` per disk (finds the thrash knee).")
+    pnb.add_argument("--size", type=int, default=64, help="Temp file size in MB per disk.")
+    pnb.add_argument("--levels", default="1,2,4,6,8,12,16",
+                     help="Comma-separated concurrency levels to sweep.")
+    pnb.add_argument("--seconds", type=float, default=3.0,
+                     help="Seconds to measure at each level.")
+
+    pns = nas_sub.add_parser("shard",
+                             help="Distribute a dataset into shard_NN/ dirs bin-packed by "
+                                  "byte size across N disks (sets up the layout the "
+                                  "scheduler expects). Emits matching [[storage.disk]] config.")
+    pns.add_argument("root", help="Dataset root to shard (local or UNC).")
+    pns.add_argument("--disks", type=int, default=2, help="Number of target disks/shards.")
+    pns.add_argument("--dest", default=None, help="Destination root (default: same as root).")
+    pns.add_argument("--dry-run", action="store_true", help="Show the plan without moving files.")
+    pns.add_argument("--rebalance", action="store_true",
+                     help="Re-pack an existing sharded layout for better balance.")
+    pns.add_argument("--kind", default="hdd", choices=["hdd", "ssd", "nvme"],
+                     help="Device kind for the emitted config (drives concurrency defaults).")
+    pns.add_argument("--read-tmpl", default=None,
+                     help="Read-path template for config, e.g. '//nas/disk{n}/data' ({n}=disk#).")
+    pns.add_argument("--write-tmpl", default=None,
+                     help="Write-path template for config, e.g. '//nas/disk{n}/data'.")
+
+    pnp = nas_sub.add_parser("probe",
+                             help="Discover a NAS's per-disk shares and scaffold a topology.")
+    pnp.add_argument("server", help="NAS server (hostname or //server).")
+    pnp.add_argument("--shares", default=None,
+                     help="Comma-separated explicit share names to check (e.g. 'vol1,vol2').")
+    pnp.add_argument("--pattern", default=None,
+                     help="Share-name pattern with a range, e.g. 'disk{1..7}' or 'vol{1..3}'.")
+    pnp.add_argument("--n", type=int, default=7,
+                     help="Number of shares to try if no --shares/--pattern (default: disk1..7).")
+
     # ---- service (NSSM persistence) ----
     psvc = sub.add_parser("service",
                           help="Install/uninstall/inspect Fixer or Runner as a Windows service (NSSM).")
@@ -277,6 +336,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         return _cmd_uninstall(args)
     if args.cmd == "autostart":
         return _cmd_autostart(args)
+    if args.cmd == "nas":
+        return _cmd_nas(args)
     if args.cmd == "service":
         return _cmd_service(args)
     return 1
@@ -333,12 +394,15 @@ def _cmd_fixer(args) -> int:
               "join, restart with --host 0.0.0.0.", flush=True)
 
     store = JobStore(args.db, max_retries=args.max_retries)
+    from .storage import load_topology
+
     app = create_app(
         store,
         lease_ttl=args.lease_ttl,
         reap_interval=args.reap_interval,
         pages_dir=args.pages_dir,
         token=token,
+        disks=load_topology(),
     )
     beacon = None
     if not args.no_beacon:
@@ -448,6 +512,8 @@ def _cmd_run(args) -> int:
         syspath=args.syspath,
         max_retries=args.max_retries,
         serve_task=args.serve_task,
+        max_tasks_per_child=args.max_tasks_per_child,
+        gc_between_tasks=args.gc_between_tasks,
         launch_command=_launch_command(),
     )
 
@@ -493,6 +559,8 @@ def _cmd_runner(args) -> int:
         extra_syspath=args.syspath,
         token=args.token,
         launch_command=_launch_command(),
+        max_tasks_per_child=getattr(args, "max_tasks_per_child", None),
+        gc_between_tasks=getattr(args, "gc_between_tasks", False),
     ).run()
     return 0
 
@@ -737,6 +805,69 @@ def _cmd_tray(args) -> int:
               f"Install the tray extra:  pip install kiroshi[tray]")
         return 2
     return run_tray(fixer=args.fixer, token=args.token)
+
+
+def _cmd_nas(args) -> int:
+    from . import nascli
+    from .storage import load_topology
+
+    if args.nas_cmd == "assess":
+        disks = load_topology() if args.topology else None
+        report = nascli.assess_layout(args.root, depth=args.shard_depth,
+                                      pattern=args.pattern, disks=disks)
+        nascli.print_assessment(report, disks)
+        return 0 if report["total_files"] > 0 else 1
+
+    if args.nas_cmd == "benchmark":
+        disks = load_topology()
+        if not disks:
+            print("[benchmark] no [[storage.disk]] topology in config — nothing to "
+                  "benchmark. Declare disks in kiroshi.local.toml first.", file=sys.stderr)
+            return 2
+        levels = tuple(int(x) for x in args.levels.split(",") if x.strip())
+        reports = nascli.benchmark_disks(disks, size_mb=args.size, levels=levels,
+                                         seconds=args.seconds)
+        nascli.print_benchmark(reports)
+        return 0
+
+    if args.nas_cmd == "shard":
+        files = nascli._collect_files(args.root)
+        if not files:
+            print(f"[shard] no files found under {args.root!r}", file=sys.stderr)
+            return 1
+        total_bytes = sum(s for _, s in files)
+        print(f"[shard] {len(files)} files, {nascli._fmt_bytes(total_bytes)} "
+              f"-> {args.disks} disk(s)", flush=True)
+        bins = nascli.plan_shard(files, args.disks)
+        nascli.print_shard_plan(bins, total_bytes)
+        print(flush=True)
+        if args.dry_run:
+            print("dry-run plan (no files moved):", flush=True)
+        else:
+            print(f"{'rebalancing' if args.rebalance else 'moving'} files...", flush=True)
+        result = nascli.execute_shard(
+            args.root, bins, dest=args.dest, dry_run=args.dry_run,
+            rebalance=args.rebalance)
+        if not args.dry_run:
+            print(f"  moved={result['moved']} skipped={result['skipped']} "
+                  f"errors={result['errors']}", flush=True)
+        print(flush=True)
+        print("Matching topology (paste into kiroshi.local.toml):", flush=True)
+        print(flush=True)
+        print(nascli.emit_shard_config(args.disks, kind=args.kind,
+                                       read_tmpl=args.read_tmpl,
+                                       write_tmpl=args.write_tmpl), flush=True)
+        return 0 if result["errors"] == 0 else 1
+
+    if args.nas_cmd == "probe":
+        server = args.server.lstrip("/").split("/")[0]  # normalize //server -> server
+        shares = args.shares.split(",") if args.shares else None
+        disks = nascli.probe_nas(server, shares=shares, pattern=args.pattern, n=args.n)
+        nascli.print_probe_topology(disks)
+        return 0 if disks else 1
+
+    print(f"[nas] unknown subcommand {args.nas_cmd!r}", file=sys.stderr)
+    return 2
 
 
 def _cmd_autostart(args) -> int:

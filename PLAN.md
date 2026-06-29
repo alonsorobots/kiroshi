@@ -313,6 +313,128 @@ so it is never silent.**
 
 ---
 
+## 7.6 NAS sharding — topology-aware I/O scheduling (opt-in)
+
+When a mesh shares storage that is **many physical drives** (a NAS HDD array,
+optionally with an NVMe cache tier), the bottleneck is rarely CPU — it's the
+spindles. The throughput rule (measured on a 7-HDD Unraid array over 10GbE):
+
+| Pattern | Throughput |
+|---|---|
+| One HDD, sequential | ~150 MB/s |
+| 7 HDDs in parallel | ~1,050 MB/s (≈ 7×, fits under the 10GbE cap) |
+| One HDD, **over-subscribed** | *collapses* — `d=6 → 5,510 fps`, `d=8 → 4,081 fps` (head thrash) |
+
+Peak throughput needs two things at once: **every spindle busy** and **no spindle
+over-subscribed**. On one machine you'd enforce that with a semaphore per disk.
+**In a mesh you cannot** — three Runners each capping themselves at 4 reads/disk =
+12 on one spindle = thrash.
+
+### Why this is structurally Kiroshi's job (the boundary principle)
+The rule for what lives in Kiroshi vs in the task: **does the decision need
+knowledge only the *coordinator* has, or knowledge only the *task* has?**
+
+- The **per-spindle in-flight count across the whole fleet** is global state only
+  the Fixer sees → the Fixer is the *only* place a correct per-disk budget can
+  live. Not scope creep: coordinating N machines against shared storage is
+  Kiroshi's reason to exist.
+- How to *read/parse/write the bytes* (orjson, parquet, prefetch, async writer) is
+  data knowledge only the task has → stays in the **job**. Kiroshi resolves *which
+  path*; the task does the I/O.
+
+| In Kiroshi | In the job |
+|---|---|
+| Storage topology + device `kind` | Reading/parsing/writing bytes |
+| Global per-spindle concurrency budget (Fixer) | orjson/parquet/async-writer choices |
+| Round-robin interleave across disks at lease time | `enumerate_gigs` (may tag a gig's disk) |
+| Resolving `gig → disk → read/write path` | Consuming that path |
+
+### Inert by default
+With **no `[[storage.disk]]` config**, Kiroshi behaves exactly as today: one
+`read_root`, one `write_root`, plain work-stealing, no per-disk bookkeeping.
+Sharding is 100% opt-in and adds zero complexity to the common case or to
+CPU-only jobs that never touch shared storage.
+
+### Config — declared once at mesh setup (`kiroshi.local.toml`, gitignored)
+```toml
+# A NAS HDD array with an NVMe-cached write tier. Declared, not magic-detected
+# (you can't see physical spindles over SMB reliably); a probe tool can scaffold it.
+[[storage.disk]]
+kind  = "hdd"                               # -> Kiroshi caps concurrency LOW
+read  = "//nas/disk1_direct/dataset"   # direct per-spindle share (fast sequential read)
+write = "//nas/disk1/dataset"          # NVMe-cached user share (absorbs small-file writes)
+match = "shard_01..08"                       # which gigs live on this spindle (range/glob/prefix)
+# concurrency = 6      # optional; omitted -> kind default, or `kiroshi nas benchmark` fills it
+# ... one block per spindle (a {1..7} shorthand expands)
+```
+
+`kind` drives the concurrency policy — **HDD and NVMe are the same mechanism with
+opposite settings**:
+
+| kind | per-disk concurrency | rationale |
+|---|---|---|
+| `hdd` | low (≈4–6) | seeks dominate; over-parallelizing one disk goes *slower* |
+| `ssd` / `nvme` | high / uncapped | no seeks; wants queue depth, not limits |
+
+The dual `read`/`write` paths capture "read from the fast direct HDD share, write
+to the NVMe-cached share" — the NVMe benefit arrives through the write path with
+no extra concept.
+
+### Mechanism
+1. **`gig.disk` tagging** — a `disk` column on the gig (parallels `grp`). Derived
+   by the Fixer from the input path via each disk's `match`, or set explicitly by
+   the task's `enumerate_gigs`. Indexed for fast per-disk counts.
+2. **Disk-aware leasing** (the centerpiece, all in `/lease`):
+   - candidate gigs are **round-robin interleaved across disks** so every spindle
+     is fed from the first lease, and
+   - a **global per-disk in-flight budget** is enforced inside the atomic lease
+     transaction: never lease beyond `concurrency[disk]` gigs currently
+     leased+running on that spindle, summed across **all** Runners — the
+     distributed `DiskSemaphore`, possible only because the Fixer owns the ledger.
+   - Composes with work-stealing: a fast 32-worker Runner gets a *disk-diverse*
+     batch capped per spindle, not 32 gigs hammering one disk.
+3. **Dual-path routing** — the leased gig carries its disk's resolved `read`/
+   `write` roots; `paths.py`/`kfs.py` hand the task the right `Path`. Generalizes
+   today's single read/write root.
+4. **Per-disk observability** — extend the throughput sampler + dashboard/tray to
+   show per-disk MB/s + in-flight, so you can *see* every spindle saturated and
+   spot a cold or thrashing disk.
+
+### Tools (assess *and* do)
+Kiroshi has an opinion about the optimal layout (bytes balanced across spindles,
+shards mapping contiguously to disks), so it ships tools to reach **and verify** it:
+
+- **`kiroshi nas assess <root>`** — *read-only*. Walks a layout and reports balance:
+  bytes/files per spindle, skew, mismatched `match` rules, shards that span disks.
+  Tells you whether a layout will actually parallelize *before* you run anything.
+- **`kiroshi nas shard <src> --disks …`** — *the doer*. Distributes a flat dataset
+  into `shard_NN/` dirs **greedily bin-packed by byte size** across the declared
+  spindles so round-robin = balanced load, and emits the matching
+  `[[storage.disk]]` blocks. Sets the data up in exactly the shape the scheduler
+  expects. `--rebalance` fixes a skewed layout; `--dry-run` previews.
+- **`kiroshi nas benchmark`** — measures per-disk + aggregate read/write MB/s and
+  **recommends `concurrency` per `kind`** (finds the thrash knee), so "optimal"
+  isn't a guess.
+- **`kiroshi nas probe`** — best-effort discovery of a NAS's disks (e.g. enumerate
+  `*_direct` shares) to scaffold a starter topology you then edit.
+
+### Honest constraints
+- **No byte-range striping** — parallelize across *files on different spindles*,
+  not within one file. Right call for many-files workloads.
+- **Declare, don't magic-detect** — SMB usually hides physical spindles; `probe`
+  scaffolds, the human confirms.
+- **Budget is a strong guardrail, not a hard mutex** — brief over-subscription
+  between lease ticks is possible; the cap dominates real contention.
+- **Inert on a single SSD/NVMe** — `kind` defaults make it a no-op there.
+
+> **Orthogonal workstream — Runner pool hardening (§8 M7).** The execution-substrate
+> lessons (BrokenProcessPool dedup+refill, hard-shutdown tree-kill, staggered
+> cold-start, requeue-the-lease under memory pressure instead of sleep-while-holding)
+> belong in Kiroshi *regardless* of NAS sharding and ship independently. Don't
+> entangle them with storage topology.
+
+---
+
 ## 8. Build milestones
 
 - **M0 — Skeleton:** ✅ package, config, jsonio, atomic, bench, jobstore,
@@ -354,6 +476,41 @@ so it is never silent.**
   NSIS model) and `--task-repo` (multi-module) remain later steps.
 - **M6 — Package & polish:** docs, examples, `pip install kiroshi`, dashboard
   theming, optional at-field pause-awareness, optional `kiroshi copy` (robocopy).
+- **M7 — Runner pool hardening:** execution-substrate robustness, independent of
+  any feature (ported from hard-won YT_Filtering Windows lessons — spawn, IPC
+  pipe, GPU-teardown hangs): `BrokenProcessPool` recovery with **dedup + bounded-
+  window refill**; **hard shutdown** (`wait=False` + psutil timeout + Windows
+  `taskkill /F /T` tree-kill); **staggered cold-start** submissions; under
+  at-field/memory pressure **requeue the in-flight lease** (abort-with-eviction)
+  instead of sleep-while-holding; optional `max_tasks_per_child` + per-task `gc`
+  cleanup hook (documented as band-aids, off by default).
+- **M8 — NAS sharding (opt-in, §7.6):** topology-aware I/O scheduling. Inert
+  without `[[storage.disk]]` config.
+  - **N1** ✅ — `[[storage.disk]]` config + `gig.disk` tagging (path-`match`
+    derivation; `kind`-based concurrency defaults).
+  - **N2** ✅ — disk-aware leasing: **global per-spindle budget + round-robin
+    interleave** in `/lease` (the throughput win; only the Fixer can do it).
+  - **N3** ✅ — dual-path routing: `/lease` stamps each gig's spec with its disk's
+    `read` (direct spindle) / `write` (cached) roots; `paths.confined_join` +
+    `gig_read_root`/`gig_write_root` let the task read direct / write cached with a
+    per-gig root that overrides the env (inert fallback). Path confinement
+    (no-absolute / no-`..`) centralized in `paths.py`.
+  - **N4** ✅ — `kiroshi nas benchmark` (per-disk read sweep at concurrency levels,
+    finds the thrash knee, recommends `concurrency`) + `nas assess` (read-only
+    shard-balance report: bytes/files per shard, skew verdict, topology coverage,
+    unmatched-shard warnings).
+  - **N5** ✅ — `kiroshi nas shard` (greedy bin-pack by byte size into `shard_NN/`
+    dirs, `--dry-run`/`--rebalance`, emits matching `[[storage.disk]]` config with
+    `--read-tmpl`/`--write-tmpl` path templates) + `nas probe` (discovers a NAS's
+    per-disk shares by trying candidate names / `{1..N}` patterns, detects
+    `_direct` variants, scaffolds a starter topology).
+  - **N6** ✅ — per-disk observability: `/status` carries `disk_inflight` (leased
+    per spindle) + `disk_budget` + `disk_info`; the throughput sampler records
+    per-disk done-counts so each spindle gets a throughput sparkline; a new
+    `/storage` endpoint exposes the topology; the dashboard overview renders a
+    **Storage panel** (per-disk in-flight/budget bar + colored throughput sparkline,
+    appears only when a topology is active); the tray tooltip shows `disk:cur/budget`
+    per spindle. All inert without a topology.
 
 ---
 
@@ -399,6 +556,14 @@ OSS-exposure analysis: **`SECURITY.md`**.
 - **Name: `kiroshi`** (PyPI-free; the all-seeing optics → the mesh dashboard).
 - **Fully OSS** like at-field → strict PII hygiene; pointers only in
   `LOCAL_CONTEXT.md`.
+- **NAS sharding lives in the Fixer, not the task** (§7.6) — the boundary rule is
+  *coordinator-only knowledge vs task-only knowledge*. A mesh-global per-spindle
+  concurrency budget can be enforced **only** by the coordinator (no task or lone
+  Runner sees fleet-wide in-flight counts), so disk-aware scheduling + path routing
+  are Kiroshi's; I/O *mechanics* (serialization, prefetch, async writers) stay in
+  the job. Opt-in via `[[storage.disk]]`; fully inert without it.
+- **Runner pool hardening is its own workstream (M7)**, orthogonal to NAS
+  sharding — execution-substrate robustness ships independently of any feature.
 
 ---
 

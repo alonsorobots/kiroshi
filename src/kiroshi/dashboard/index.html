@@ -56,6 +56,11 @@
   nav.tabs a:hover, #views a:hover { border-color: var(--amber); }
   nav.tabs a.on { border-color: var(--teal); color: var(--teal); }
   .curve { width: 100%; height: 120px; display: block; }
+  .diskrow { display: grid; grid-template-columns: 90px 50px 1fr 50px; gap: 10px; align-items: center; padding: 6px 0; }
+  .diskbar { height: 10px; background: #0a0f16; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  .diskbar > span { display: block; height: 100%; background: var(--teal); transition: width .4s ease; }
+  .diskbar.over > span { background: var(--magenta); }
+  .disk-spark { width: 100%; height: 24px; display: block; }
   footer { text-align:center; color: var(--muted); padding: 16px; font-size: 11px; letter-spacing: .15em; }
 </style>
 </head>
@@ -112,6 +117,11 @@
         <thead><tr><th>Host</th><th>In flight</th><th>Recent /s</th></tr></thead>
         <tbody id="hosts"><tr><td class="muted" colspan="3">no runners yet</td></tr></tbody>
       </table>
+    </div>
+
+    <div class="panel" id="storagePanel" style="display:none">
+      <h2>Storage <span id="storageInfo" class="muted"></span></h2>
+      <div id="disks"></div>
     </div>
 
     <div class="panel">
@@ -195,6 +205,9 @@ async function tick() {
       hosts.innerHTML = `<tr><td class="muted" colspan="3">no runners yet</td></tr>`;
     }
 
+    // --- per-disk observability (N6): in-flight vs budget per spindle ---
+    renderDisks(d);
+
     const errs = document.getElementById("errors");
     if (d.recent_errors && d.recent_errors.length) {
       errs.innerHTML = d.recent_errors.map(e =>
@@ -233,7 +246,64 @@ async function curveTick() {
     const r = await authedFetch("/metrics/history");
     const d = await r.json();
     renderCurve(d.samples || []);
+    renderDiskSparks(d.samples || []);
   } catch (e) { /* keep last */ }
+}
+
+// --- per-disk panel (N6) ---
+const DISK_COLORS = ["#1ad1c8","#ffb648","#ff2e88","#7c5cff","#3ddc97","#ff6b6b","#4dabf7"];
+let _diskMeta = null; // cached disk_info from /status
+
+function renderDisks(d) {
+  const panel = document.getElementById("storagePanel");
+  if (!d.disk_budget || !d.disk_info) { panel.style.display = "none"; _diskMeta = null; return; }
+  panel.style.display = "";
+  _diskMeta = d.disk_info;
+  const inflight = d.disk_inflight || {};
+  const budget = d.disk_budget;
+  const el = document.getElementById("disks");
+  el.innerHTML = d.disk_info.map((disk, i) => {
+    const cap = budget[disk.id] || 0;
+    const cur = inflight[disk.id] || 0;
+    const pct = cap ? Math.min(100, 100 * cur / cap) : 0;
+    const over = cap && cur > cap;
+    const color = DISK_COLORS[i % DISK_COLORS.length];
+    return `<div class="diskrow">
+      <span style="color:${color}">${esc(disk.id)}</span>
+      <span class="muted">${esc(disk.kind||'')}</span>
+      <div class="diskbar ${over?'over':''}"><span style="width:${pct.toFixed(0)}%;background:${over?'':color}"></span></div>
+      <span style="text-align:right;font-variant-numeric:tabular-nums">${cur}/${cap}</span>
+    </div>
+    <svg class="disk-spark" id="spark_${esc(disk.id)}" viewBox="0 0 200 24" preserveAspectRatio="none"></svg>`;
+  }).join("");
+  document.getElementById("storageInfo").textContent =
+    `${d.disk_info.length} disk(s) · ${Object.values(inflight).reduce((a,b)=>a+b,0)} in flight`;
+}
+
+function renderDiskSparks(samples) {
+  if (!_diskMeta || samples.length < 2) return;
+  const W = 200, H = 24, pad = 2;
+  const t0 = samples[0].ts, t1 = samples[samples.length-1].ts, span = Math.max(1, t1-t0);
+  for (let i = 0; i < _diskMeta.length; i++) {
+    const disk = _diskMeta[i];
+    const svg = document.getElementById("spark_" + disk.id);
+    if (!svg) continue;
+    const color = DISK_COLORS[i % DISK_COLORS.length];
+    // per-disk done rate = delta(done) / delta(t) between consecutive samples
+    const pts = [];
+    let maxR = 0.001;
+    for (let j = 1; j < samples.length; j++) {
+      const dd0 = (samples[j-1].disk_done||{})[disk.id] || 0;
+      const dd1 = (samples[j].disk_done||{})[disk.id] || 0;
+      const dt = samples[j].ts - samples[j-1].ts;
+      const r = dt > 0 ? (dd1 - dd0) / dt : 0;
+      if (r > maxR) maxR = r;
+      const x = pad + (W - 2*pad) * (samples[j].ts - t0) / span;
+      const y = (H - pad) - (H - 2*pad) * (r / maxR);
+      pts.push(`${x.toFixed(1)},${y.toFixed(1)}`);
+    }
+    svg.innerHTML = `<polyline fill="none" stroke="${color}" stroke-width="1.5" points="${pts.join(' ')}" opacity="0.8"/>`;
+  }
 }
 async function loadViews() {
   try {

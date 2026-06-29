@@ -85,13 +85,18 @@ def ensure_fixer_token(explicit: Optional[str] = None,
     """Resolve the token for the Fixer, auto-generating + persisting if absent.
 
     Returns ``None`` only when the operator explicitly opted out (``allow_insecure``
-    with no token configured) — used to run a wide-open dev mesh on a trusted LAN.
+    with no explicit token) — used to run a wide-open dev mesh on a trusted LAN.
+    An explicit ``--no-auth`` wins over an *ambient* token (env / persisted
+    ``mesh.token``): the operator asked for no auth, so a stale persisted token from
+    a previous service install must not silently re-enable it.
     """
-    tok = resolve_token(explicit)
-    if tok:
-        return tok
+    if explicit:
+        return explicit.strip() or None
     if allow_insecure:
         return None
+    tok = resolve_token(None)
+    if tok:
+        return tok
     tok = generate_token()
     _write_token_file(tok)
     return tok
