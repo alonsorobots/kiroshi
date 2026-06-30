@@ -20,6 +20,7 @@ no-ops so the rest of the codebase can call them unconditionally.
 """
 from __future__ import annotations
 
+import os
 import sys
 from typing import Optional
 
@@ -31,15 +32,19 @@ if sys.platform == "win32":
     import winreg
 
     def _tray_command() -> str:
-        """The command line to register: ``"<python>" -m kiroshi tray``.
+        """The command line to register: ``"<pythonw>" -m kiroshi tray``.
 
         Uses the current interpreter so an editable/venv install keeps
         working. Quotes paths with spaces (common for venvs under
-        ``Program Files`` or user profiles).
+        ``Program Files`` or user profiles). Prefers the windowless
+        ``pythonw.exe`` beside ``python.exe`` (same dir) so the tray launches
+        silently on login without popping a console window.
         """
         exe = sys.executable
-        cmd = f'"{exe}" -m kiroshi tray'
-        return cmd
+        cand = os.path.join(os.path.dirname(exe), "pythonw.exe")
+        if os.path.exists(cand):
+            exe = cand
+        return f'"{exe}" -m kiroshi tray'
 
     def ensure_registered() -> str:
         """Idempotently register the tray for user-mode autostart.
