@@ -481,17 +481,27 @@ class JobStore:
                   "grp", "disk")
 
     def list_jobs(self, states: Optional[tuple[str, ...]] = None,
-                  limit: int = 200, newest_first: bool = True) -> list[dict[str, Any]]:
-        """Return job rows (for the /jobs + /history views). Newest by activity."""
+                  limit: int = 200, newest_first: bool = True,
+                  grp: Optional[str] = None) -> list[dict[str, Any]]:
+        """Return job rows (for the /jobs + /history views). Newest by activity.
+
+        ``grp`` optionally filters to one campaign (the ``grp`` column set at
+        seed time). Without it, rows from every campaign are mixed (the existing
+        behavior for the dashboard).
+        """
         cols = ", ".join(self._LIST_COLS)
         order = "DESC" if newest_first else "ASC"
         # sort by most-recent activity timestamp
         order_expr = ("COALESCE(completed_at, leased_at, created_at) " + order)
         params: list[Any] = []
-        where = ""
+        clauses: list[str] = []
         if states:
-            where = "WHERE state IN (%s)" % ",".join("?" for _ in states)
+            clauses.append("state IN (%s)" % ",".join("?" for _ in states))
             params.extend(states)
+        if grp:
+            clauses.append("grp = ?")
+            params.append(grp)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
         params.append(int(limit))
         with self._lock:
             rows = self._conn.execute(
@@ -506,6 +516,44 @@ class JobStore:
             except Exception:  # noqa: BLE001
                 d["metrics"] = {}
             out.append(d)
+        return out
+
+    def export_metrics(self, grp: Optional[str] = None,
+                       states: tuple[str, ...] = ("done",),
+                       limit: int = 100000) -> list[dict[str, Any]]:
+        """Bulk export of (job_id, metrics, state) for result aggregation.
+
+        Unlike :meth:`list_jobs` (dashboard-shaped, capped at 2000), this is
+        for consumers that need to fold metrics across a whole campaign -- e.g.
+        ranking 32k clips by worst-section MPJPE. Returns lightweight rows
+        (job_id, metrics, state, grp, disk) ordered by job_id (deterministic),
+        so a caller can page by job_id if the set is huge. ``limit`` defaults
+        high (100k) since a single campaign rarely exceeds that.
+        """
+        cols = "job_id, metrics, state, grp, disk"
+        params: list[Any] = []
+        clauses: list[str] = []
+        if states:
+            clauses.append("state IN (%s)" % ",".join("?" for _ in states))
+            params.extend(states)
+        if grp:
+            clauses.append("grp = ?")
+            params.append(grp)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        params.append(int(limit))
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT {cols} FROM jobs {where} ORDER BY job_id LIMIT ?",
+                params,
+            ).fetchall()
+        out = []
+        for r in rows:
+            try:
+                m = jsonio.loads(r["metrics"]) if r["metrics"] else {}
+            except Exception:  # noqa: BLE001
+                m = {}
+            out.append({"job_id": r["job_id"], "metrics": m,
+                        "state": r["state"], "grp": r["grp"], "disk": r["disk"]})
         return out
 
     def group_stats(self, limit: int = 200) -> list[dict[str, Any]]:

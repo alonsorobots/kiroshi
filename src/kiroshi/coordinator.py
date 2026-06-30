@@ -307,10 +307,29 @@ def create_app(
         return {"groups": rows, "ts": time.time()}
 
     @app.get("/jobs")
-    def jobs(state: Optional[str] = None, limit: int = 200) -> dict[str, Any]:
+    def jobs(state: Optional[str] = None, limit: int = 200,
+             grp: Optional[str] = None) -> dict[str, Any]:
         states = tuple(s.strip() for s in state.split(",")) if state else None
-        rows = store.list_jobs(states=states, limit=min(max(limit, 1), 2000))
+        rows = store.list_jobs(states=states, limit=min(max(limit, 1), 2000), grp=grp)
         return {"jobs": _attach_launch(rows), "runners": _runner_index(), "ts": time.time()}
+
+    @app.get("/metrics/export")
+    def metrics_export(grp: Optional[str] = None,
+                       state: Optional[str] = "done",
+                       limit: int = 100000) -> dict[str, Any]:
+        """Bulk per-gig metrics for result aggregation across a campaign.
+
+        Returns ``{rows: [{job_id, metrics, state, grp, disk}], count, ts}``.
+        Unlike ``/jobs`` (dashboard-shaped, capped at 2000), this streams up to
+        ``limit`` (default 100k) lightweight rows so a consumer can fold metrics
+        across a whole campaign -- e.g. ranking every clip by worst-section
+        error. ``grp`` filters to one campaign; ``state`` defaults to ``done``.
+        Ordered by job_id for deterministic paging.
+        """
+        states = tuple(s.strip() for s in state.split(",")) if state else None
+        rows = store.export_metrics(grp=grp, states=states,
+                                    limit=min(max(limit, 1), 200000))
+        return {"rows": rows, "count": len(rows), "ts": time.time()}
 
     @app.get("/history")
     def history(limit: int = 500) -> dict[str, Any]:
