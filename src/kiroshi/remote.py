@@ -279,7 +279,7 @@ def _io_probe():
                     found = kpaths.confined_join(rr, files[0]) if dp.rstrip("/\\") == str(rr).rstrip("/\\") \
                         else (dp.rstrip("/\\") + ("\\" if kfs.is_unc(rr) else "/") + files[0])
                     break
-                if seen > 300:
+                if seen > 60:
                     break
             if found:
                 with kfs.open(found, "rb") as fh:
@@ -307,7 +307,14 @@ def _io_probe():
             out["write"] = {"ok": False, "err": repr(e)[:200]}
     return out
 
-R["io"] = _io_probe()
+# Time-bound the I/O probe: the OS SMB redirector can HANG in a network-logon
+# (SSH) context, so never let it block the whole preflight.
+import threading
+_io_box = {}
+_io_t = threading.Thread(target=lambda: _io_box.update(_io_probe()), daemon=True)
+_io_t.start()
+_io_t.join(timeout=12)
+R["io"] = _io_box if not _io_t.is_alive() else {"timeout": True}
 
 print("PREFLIGHT=" + json.dumps(R))
 '''
@@ -460,7 +467,13 @@ def _print_preflight(host: str, r: dict, local_fp: Optional[dict] = None) -> boo
 
     # --- real I/O probe: did kfs actually read + write the NAS roots? --------
     io = r.get("io") or {}
-    if io.get("error"):
+    if io.get("timeout"):
+        print("  [WARN] NAS I/O probe timed out (>12s). The OS SMB redirector "
+              "hangs in a network-logon (SSH) context — this does NOT necessarily "
+              "mean the Scheduled Task (interactive) will fail, but it's a strong "
+              "signal to configure direct SMB (KIROSHI_NAS_USER/PASS) for "
+              "context-proof access.")
+    elif io.get("error"):
         line("kfs available", False, io["error"])
     else:
         backend = ("direct-SMB" if io.get("smb_creds_env")
@@ -500,7 +513,7 @@ def run_remote(args) -> int:
     pre_cfg = {k: eff[k] for k in ("task", "syspath", "fixer", "token",
                                    "read_root", "write_root")}
     rc, out, err = _ssh_python(host, eff["python"],
-                               _embed(pre_cfg) + _PREFLIGHT, timeout=45)
+                               _embed(pre_cfg) + _PREFLIGHT, timeout=60)
     if rc != 0 and not _marker_json(out, "PREFLIGHT="):
         print(f"[remote] could not reach {host} or run its interpreter "
               f"({eff['python']}).", file=sys.stderr)
