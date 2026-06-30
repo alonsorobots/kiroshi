@@ -196,6 +196,16 @@ def run_job(
     if write_root:
         os.environ["KIROSHI_WRITE_ROOT"] = write_root
 
+    # --- apply --syspath to THIS process too, so the fail-fast task import
+    # check below sees the same paths the spawned runner workers will. Without
+    # this, `kiroshi run <task>` from a cwd that isn't the task's repo fails the
+    # import validation even though the workers (which DO get extra_syspath)
+    # would have imported it fine. ---
+    if syspath:
+        for p in syspath:
+            if p and p not in sys.path:
+                sys.path.insert(0, p)
+
     # --- fail fast: the task must import before we stand anything up ---
     try:
         resolve_task(task_ref)
