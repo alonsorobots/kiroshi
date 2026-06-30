@@ -272,7 +272,7 @@ class Runner:
                 lease = self._post(
                     "/lease",
                     {"runner_id": self.runner_id, "host": self.host,
-                     "capacity": self.capacity,
+                     "capacity": min(self.capacity, self.workers * 2),
                      "heartbeat_interval": self.heartbeat_interval},
                 )
                 gigs = (lease or {}).get("gigs") or []
