@@ -308,6 +308,21 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = parser.parse_args(raw)
     args._passthrough = passthrough
 
+    # Best-effort: ensure the tray autostarts on login for interactive
+    # commands. This closes the chicken-and-egg where autostart was only
+    # registered *inside* Tray.run() (so if no one ever launched `kiroshi
+    # tray`, it never registered and never autostarted). Registered once here
+    # on first CLI use. Headless-only paths (seed/requeue/stop) and any
+    # non-Windows host are skipped; never raises -- autostart is best-effort
+    # and must not block a job. The tray itself stays decoupled from jobs.
+    if args.cmd in ("run", "fixer", "runner", "status", "ps", "tray"):
+        try:
+            from . import autostart as _autostart
+            if hasattr(_autostart, "ensure_registered"):
+                _autostart.ensure_registered()
+        except Exception:  # noqa: BLE001
+            pass
+
     if args.cmd == "run":
         return _cmd_run(args)
     if args.cmd == "join":
