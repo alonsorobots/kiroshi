@@ -103,6 +103,39 @@ def main(argv: Optional[list[str]] = None) -> int:
     pjoin.add_argument("--gig-timeout", type=float, default=None,
                        help="Seconds before a hung gig is abandoned + its worker killed.")
 
+    # ---- remote (launch/manage a Runner on another machine, quoting-proof) ----
+    prem = sub.add_parser(
+        "remote",
+        help="Launch a Runner on another machine over SSH (interpreter-aware, "
+             "durable, no shell-quoting pitfalls).")
+    prem.add_argument("remote_cmd", choices=["probe", "join"],
+                      help="probe: preflight only (report what's missing on the "
+                           "remote). join: preflight + durable launch.")
+    prem.add_argument("host", help="SSH host (alias in ~/.ssh/config or user@host). "
+                                   "Matched to [hosts.<Host>] in kiroshi.local.toml.")
+    prem.add_argument("--task", default=None, help="Task 'module:function' to run.")
+    prem.add_argument("--fixer", default=None,
+                      help="Fixer URL the remote should pull from "
+                           "(default: http://<this-LAN-ip>:<fixer_port>).")
+    prem.add_argument("--workers", type=int, default=0,
+                      help="Worker processes on the remote (default: its [hosts.<Host>].workers).")
+    prem.add_argument("--python", default=None,
+                      help="Remote interpreter (default: [hosts.<Host>].python).")
+    prem.add_argument("--syspath", action="append", default=None,
+                      help="Extra sys.path entry on the remote for task import (repeatable).")
+    prem.add_argument("--read-root", default=None, help="Remote KIROSHI_READ_ROOT.")
+    prem.add_argument("--write-root", default=None, help="Remote KIROSHI_WRITE_ROOT.")
+    prem.add_argument("--token", default=None,
+                      help="Mesh token (default: resolved from local env/token file).")
+    prem.add_argument("--group", default=None,
+                      help="Campaign slug (names the launcher/log/task).")
+    prem.add_argument("--task-name", default=None,
+                      help="Scheduled Task name on the remote (default derived from --group).")
+    prem.add_argument("--force", action="store_true",
+                      help="Launch even if preflight reports problems.")
+    prem.add_argument("--no-verify", action="store_true",
+                      help="Skip waiting for the runner to appear in the fixer.")
+
     # ---- fixer ----
     pf = sub.add_parser("fixer", help="Run the coordinator (Fixer) + dashboard.")
     pf.add_argument("--db", default="kiroshi.db", help="SQLite job-store path (gitignored).")
@@ -327,6 +360,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         return _cmd_run(args)
     if args.cmd == "join":
         return _cmd_join(args)
+    if args.cmd == "remote":
+        from .remote import run_remote
+        return run_remote(args)
     if args.cmd == "fixer":
         return _cmd_fixer(args)
     if args.cmd == "runner":

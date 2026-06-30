@@ -13,10 +13,12 @@ in ``pystray`` + ``pillow``. Importing this module without them raises
 """
 from __future__ import annotations
 
+import functools
 import os
 import sys
 import threading
 import webbrowser
+from datetime import datetime
 from typing import Optional
 
 import pystray  # noqa: E402  (import error surfaced as a friendly CLI hint)
@@ -28,6 +30,61 @@ from .appstate import logs_dir
 from .discovery import discover_fixer
 
 _AUTO = {"auto", "discover", "", None}
+
+
+def _log(msg: str) -> None:
+    """pythonw-safe logging.
+
+    Under ``pythonw.exe`` there is no console and ``sys.stdout`` may be ``None``,
+    so a bare ``print`` raises ``AttributeError`` — which, if it happens inside a
+    tray callback, propagates into the Win32 message loop and kills the icon.
+    We append to a log file instead, and only fall back to ``print`` when a real
+    stdout exists.
+    """
+    line = f"[{datetime.now():%H:%M:%S}] [tray] {msg}"
+    try:
+        with open(logs_dir() / "tray.log", "a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+    except Exception:  # noqa: BLE001  (logging must never raise)
+        pass
+    try:
+        if sys.stdout is not None:
+            print(line, flush=True)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+class _guard:
+    """Wrap a pystray callback so an exception can never escape into the native
+    message loop (which on Windows terminates ``icon.run()`` and makes the tray
+    icon vanish). Any error is logged and swallowed.
+
+    Implemented as a callable *object* (no ``__code__`` attribute) with a
+    descriptor ``__get__`` so it binds correctly as a method. pystray inspects
+    ``action.__code__.co_argcount`` to decide arity; a plain ``functools.wraps``
+    wrapper over ``(*args, **kwargs)`` reports ``co_argcount == 0`` which becomes
+    ``-1`` for a bound method and trips pystray's ``ValueError``. Because this
+    object has no ``__code__``, pystray accepts it verbatim and simply calls it
+    with ``(icon, item)``.
+    """
+
+    def __init__(self, fn, instance=None):
+        self._fn = fn
+        self._instance = instance
+        functools.update_wrapper(self, getattr(fn, "__func__", fn), updated=())
+
+    def __get__(self, obj, objtype=None):
+        if obj is None:
+            return self
+        return _guard(self._fn.__get__(obj, objtype), instance=obj)
+
+    def __call__(self, *args, **kwargs):
+        try:
+            return self._fn(*args, **kwargs)
+        except Exception as e:  # noqa: BLE001
+            name = getattr(self._fn, "__name__", self._fn)
+            _log(f"callback {name!r} failed: {e!r}")
+            return None
 
 
 def _make_icon(color: tuple[int, int, int]) -> Image.Image:
@@ -57,6 +114,7 @@ class _TrayIcon(pystray.Icon):
         self._tray = tray
         super().__init__(*args, **kwargs)
 
+    @_guard
     def __call__(self) -> None:
         self._tray._ensure_fixer()
         webbrowser.open(self._tray._url("/"))
@@ -76,14 +134,20 @@ class Tray:
     def _headers(self) -> dict:
         return {"Authorization": f"Bearer {self.token}"} if self.token else {}
 
+    def _base(self) -> str:
+        # Prefer the resolved/discovered fixer; fall back to the conventional
+        # local default only as a last resort.
+        return self.fixer_url or "http://127.0.0.1:8787"
+
     def _url(self, path: str) -> str:
-        base = self.fixer_url or "http://127.0.0.1:8787"
+        base = self._base()
         sep = "&" if "?" in path else "?"
         if self.token:
             return f"{base}{path}{sep}token={self.token}"
         return f"{base}{path}"
 
     def _open(self, path: str):
+        @_guard
         def _cb(icon, item):
             self._ensure_fixer()
             webbrowser.open(self._url(path))
@@ -114,6 +178,7 @@ class Tray:
             Item("Quit tray", self._quit),
         )
 
+    @_guard
     def _open_logs(self, icon, item):
         d = str(logs_dir())
         try:
@@ -126,6 +191,7 @@ class Tray:
         except OSError:
             pass
 
+    @_guard
     def _copy_token(self, icon, item):
         if not self.token:
             return
@@ -138,8 +204,9 @@ class Tray:
             r.update()
             r.destroy()
         except Exception:  # noqa: BLE001
-            print(f"[tray] mesh token: {self.token}", flush=True)
+            _log(f"mesh token: {self.token}")
 
+    @_guard
     def _stop_runners(self, icon, item):
         from .processreg import list_registered, request_stop
         n = 0
@@ -149,6 +216,7 @@ class Tray:
                     n += 1
         self._notify(f"asked {n} runner(s) to drain")
 
+    @_guard
     def _stop_fixer(self, icon, item):
         from .processreg import list_registered, request_stop
         n = 0
@@ -160,10 +228,14 @@ class Tray:
 
     def _notify(self, msg: str):
         try:
-            self.icon.notify(msg, "KIROSHI")
+            if self.icon is not None:
+                self.icon.notify(msg, "KIROSHI")
+            else:
+                _log(msg)
         except Exception:  # noqa: BLE001
-            print(f"[tray] {msg}", flush=True)
+            _log(msg)
 
+    @_guard
     def _quit(self, icon, item):
         self._stop.set()
         self.icon.stop()
@@ -172,7 +244,7 @@ class Tray:
     def _poll(self) -> None:
         while not self._stop.wait(2.0):
             self._ensure_fixer()
-            base = self.fixer_url or "http://127.0.0.1:8787"
+            base = self._base()
             try:
                 r = requests.get(f"{base}/status", timeout=4,
                                  headers=self._headers())
@@ -237,16 +309,22 @@ class Tray:
         # the tray icon shows up automatically every time you log in.
         from . import autostart
 
-        outcome = autostart.ensure_registered()
-        if outcome == "registered":
-            print("[tray] registered for autostart on login (HKCU\\Run)", flush=True)
-            self._notify("Kiroshi tray will auto-start on login")
-        elif outcome == "updated":
-            print("[tray] updated autostart entry (interpreter moved?)", flush=True)
+        try:
+            outcome = autostart.ensure_registered()
+        except Exception as e:  # noqa: BLE001  (autostart must never block the UI)
+            outcome = None
+            _log(f"autostart registration failed: {e!r}")
 
         self.icon = _TrayIcon(
             self, "kiroshi", _make_icon(_GREY), "KIROSHI", menu=self._menu(),
         )
+        # Notify *after* the icon exists (notify() needs a live icon handle).
+        if outcome == "registered":
+            _log("registered for autostart on login (HKCU\\Run)")
+            self._notify("Kiroshi tray will auto-start on login")
+        elif outcome == "updated":
+            _log("updated autostart entry (interpreter moved?)")
+
         threading.Thread(target=self._poll, name="kiroshi-tray-poll",
                          daemon=True).start()
         self.icon.run()
