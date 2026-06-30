@@ -427,6 +427,13 @@ def _print_preflight(host: str, r: dict, local_fp: Optional[dict] = None) -> boo
             ok = False
         print(f"  [{mark}] {label}" + (f" - {detail}" if detail else ""))
 
+    def warn(label, good, detail=""):
+        # Advisory: prints OK/WARN but never blocks launch (drift signals that
+        # rarely affect correctness — python minor version, dep versions, a
+        # dirty working tree). Code-SHA mismatch stays a hard block via line().
+        mark = "OK  " if good else "WARN"
+        print(f"  [{mark}] {label}" + (f" - {detail}" if detail else ""))
+
     print(f"[remote] preflight on {host} (interpreter: {r.get('python')}):")
     line("python present", bool(r.get("python")),
          f"{r.get('version','?')} as {r.get('user','?')}")
@@ -445,25 +452,32 @@ def _print_preflight(host: str, r: dict, local_fp: Optional[dict] = None) -> boo
     rfp = r.get("fingerprint") or {}
     lfp = local_fp or {}
     if lfp:
-        # python major.minor
-        line(f"python version matches ({rfp.get('python','?')})",
+        # python major.minor — advisory (rarely affects numpy correctness)
+        warn(f"python version matches ({rfp.get('python','?')})",
              rfp.get("python") == lfp.get("python"),
              f"local {lfp.get('python','?')}")
-        # per-repo git SHA (THE check that prevents stale-code drift)
+        # per-repo git SHA — THE check that prevents stale-code drift. A real
+        # SHA divergence is a HARD block (line); a dirty tree alone is advisory.
         rrepos, lrepos = rfp.get("repos", {}), lfp.get("repos", {})
         for name in sorted(set(rrepos) | set(lrepos)):
             rv, lv = rrepos.get(name, {}), lrepos.get(name, {})
             rsha, lsha = rv.get("sha"), lv.get("sha")
-            match = bool(rsha) and rsha == lsha
-            detail = f"remote {rsha or '-'} vs local {lsha or '-'}"
-            if rv.get("dirty") or lv.get("dirty"):
-                detail += " (dirty working tree!)"
-            line(f"code in sync: {name}", match, detail)
-        # key package versions
+            dirty = rv.get("dirty") or lv.get("dirty")
+            if rsha and lsha and rsha == lsha:
+                detail = rsha + (" (dirty working tree)" if dirty else "")
+                warn(f"code in sync: {name}", True, detail) if dirty \
+                    else line(f"code in sync: {name}", True, detail)
+            elif not rsha or not lsha:
+                warn(f"code in sync: {name}", False,
+                     f"cannot verify (no git) remote {rsha or '-'} / local {lsha or '-'}")
+            else:
+                line(f"code in sync: {name}", False,
+                     f"remote {rsha} vs local {lsha} - STALE CODE; sync before launch")
+        # key package versions — advisory
         rpk, lpk = rfp.get("pkgs", {}), lfp.get("pkgs", {})
         for mod in sorted(set(rpk) | set(lpk)):
             rv, lv = rpk.get(mod), lpk.get(mod)
-            line(f"{mod} version matches ({rv or '-'})", rv == lv,
+            warn(f"{mod} version matches ({rv or '-'})", rv == lv,
                  f"local {lv or '-'}")
 
     # --- real I/O probe: did kfs actually read + write the NAS roots? --------
