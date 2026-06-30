@@ -189,7 +189,7 @@ if CFG.get("read_root"):
     parts += ["--read-root", q(CFG["read_root"])]
 if CFG.get("write_root"):
     parts += ["--write-root", q(CFG["write_root"])]
-cmdline = " ".join(parts) + " >> " + q(logpath) + " 2>&1"
+cmdline = " ".join(parts) + " > " + q(logpath) + " 2>&1"
 with open(launcher, "w", encoding="utf-8") as f:
     f.write("@echo off\r\n" + cmdline + "\r\n")
 

@@ -162,6 +162,14 @@ def join(
 
     token = security.resolve_token(token)
 
+    # Apply --syspath EARLY so _acquire_task's importability check can find
+    # pre-installed task modules (e.g. mesh.tasks.finger_mpjpe under scripts/).
+    # Without this, _task_importable() fails and join tries to fetch served
+    # code that isn't there.
+    for sp in (syspath or []):
+        if sp and sp not in sys.path:
+            sys.path.insert(0, sp)
+
     # Mutual auth BEFORE sending the token or fetching code (SECURITY.md §3).
     if not verify_fixer(url, token):
         print(f"[join] could not verify the Fixer at {url} (wrong/missing token, or "
