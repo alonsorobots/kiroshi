@@ -83,6 +83,60 @@ def _embed(cfg: dict) -> str:
     return f"CFG = __import__('json').loads(r'''{payload}''')\n"
 
 
+def _git_local(path: str, *args: str) -> Optional[str]:
+    git = r"C:\Program Files\Git\bin\git.exe"
+    if not os.path.isfile(git):
+        git = "git"
+    try:
+        p = subprocess.run([git, "-C", path, *args], capture_output=True,
+                           text=True, timeout=15)
+        return p.stdout.strip() if p.returncode == 0 else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _repo_root_local(start: str) -> Optional[str]:
+    d = os.path.abspath(start)
+    while True:
+        if os.path.isdir(os.path.join(d, ".git")):
+            return d
+        nd = os.path.dirname(d)
+        if nd == d:
+            return None
+        d = nd
+
+
+def _fingerprint_local(syspath: list) -> dict:
+    """Compute the same env fingerprint locally (the coordinator = source of
+    truth) so the remote's can be compared against it."""
+    import sys as _sys
+    fp = {"python": ".".join(map(str, _sys.version_info[:2])), "repos": {}, "pkgs": {}}
+    roots = set()
+    try:
+        import kiroshi
+        kr = _repo_root_local(os.path.dirname(kiroshi.__file__))
+        if kr:
+            roots.add(kr)
+    except Exception:  # noqa: BLE001
+        pass
+    for sp in (syspath or []):
+        rr = _repo_root_local(sp)
+        if rr:
+            roots.add(rr)
+    for root in roots:
+        sha = _git_local(root, "rev-parse", "HEAD")
+        dirty = _git_local(root, "status", "--porcelain")
+        fp["repos"][os.path.basename(root)] = {"sha": (sha or "")[:12],
+                                               "dirty": bool(dirty)}
+    for mod in ("kiroshi", "numpy"):
+        try:
+            m = __import__(mod)
+            fp["pkgs"][mod] = getattr(m, "__version__", "?")
+        except Exception:  # noqa: BLE001
+            fp["pkgs"][mod] = None
+    return fp
+
+
 def _lan_ip(hint: str = "192.168.50.69") -> str:
     """Best-effort primary LAN IPv4 of this machine (the Fixer host)."""
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -149,6 +203,112 @@ for key in ("read_root", "write_root"):
         R[key] = {"path": v, "exists": os.path.isdir(v)}
 
 R["schtasks"] = bool(__import__("shutil").which("schtasks"))
+
+# ---- ENV FINGERPRINT (catches stale code + version drift in ONE check) ----
+import subprocess
+
+def _git(path, *args):
+    g = r"C:\Program Files\Git\bin\git.exe"
+    if not os.path.isfile(g):
+        g = "git"
+    try:
+        p = subprocess.run([g, "-C", path, *args], capture_output=True,
+                           text=True, timeout=15)
+        return p.stdout.strip() if p.returncode == 0 else None
+    except Exception:
+        return None
+
+def _repo_root(start):
+    d = os.path.abspath(start)
+    while True:
+        if os.path.isdir(os.path.join(d, ".git")):
+            return d
+        nd = os.path.dirname(d)
+        if nd == d:
+            return None
+        d = nd
+
+fp = {"python": ".".join(map(str, sys.version_info[:2])), "repos": {}, "pkgs": {}}
+# kiroshi's own repo + each requested syspath repo
+roots = set()
+try:
+    import kiroshi
+    kr = _repo_root(os.path.dirname(kiroshi.__file__))
+    if kr:
+        roots.add(kr)
+except Exception:
+    pass
+for sp in CFG.get("syspath", []):
+    rr = _repo_root(sp)
+    if rr:
+        roots.add(rr)
+for root in roots:
+    sha = _git(root, "rev-parse", "HEAD")
+    dirty = _git(root, "status", "--porcelain")
+    fp["repos"][os.path.basename(root)] = {
+        "sha": (sha or "")[:12], "dirty": bool(dirty)}
+for mod in ("kiroshi", "numpy"):
+    try:
+        m = __import__(mod)
+        fp["pkgs"][mod] = getattr(m, "__version__", "?")
+    except Exception:
+        fp["pkgs"][mod] = None
+R["fingerprint"] = fp
+
+# ---- REAL I/O PROBE (exercise kfs read + write in the remote's context) ----
+def _io_probe():
+    out = {}
+    try:
+        from kiroshi import kfs
+        from kiroshi import paths as kpaths
+    except Exception as e:
+        return {"error": "kfs import failed: " + repr(e)}
+    rr = CFG.get("read_root")
+    wr = CFG.get("write_root")
+    # Backend signal: direct SMB (context-proof) vs OS redirector (logon-bound)
+    out["is_unc"] = bool(rr and kfs.is_unc(rr))
+    out["smb_creds_env"] = bool(os.environ.get("KIROSHI_NAS_USER"))
+    # READ: find one file under read_root (bounded walk) and read a few bytes
+    if rr:
+        try:
+            found = None
+            seen = 0
+            for dp, _dirs, files in kfs.walk(rr):
+                seen += 1
+                if files:
+                    found = kpaths.confined_join(rr, files[0]) if dp.rstrip("/\\") == str(rr).rstrip("/\\") \
+                        else (dp.rstrip("/\\") + ("\\" if kfs.is_unc(rr) else "/") + files[0])
+                    break
+                if seen > 300:
+                    break
+            if found:
+                with kfs.open(found, "rb") as fh:
+                    fh.read(64)
+                out["read"] = {"ok": True}
+            else:
+                out["read"] = {"ok": False, "err": "no file found under read_root"}
+        except Exception as e:
+            out["read"] = {"ok": False, "err": repr(e)[:200]}
+    # WRITE: atomic_write a tiny temp under write_root, then remove it
+    if wr:
+        try:
+            import uuid as _uuid
+            name = ".kiroshi_ioprobe_" + _uuid.uuid4().hex[:8]
+            sep = "\\" if kfs.is_unc(wr) else "/"
+            tpath = str(wr).rstrip("/\\") + sep + name
+            with kfs.atomic_write(tpath) as fh:
+                fh.write(b"probe")
+            try:
+                kfs.remove(tpath)
+            except Exception:
+                pass
+            out["write"] = {"ok": True}
+        except Exception as e:
+            out["write"] = {"ok": False, "err": repr(e)[:200]}
+    return out
+
+R["io"] = _io_probe()
+
 print("PREFLIGHT=" + json.dumps(R))
 '''
 
@@ -248,7 +408,7 @@ def _resolve(args, cfg: MeshConfig) -> dict:
     }
 
 
-def _print_preflight(host: str, r: dict) -> bool:
+def _print_preflight(host: str, r: dict, local_fp: Optional[dict] = None) -> bool:
     """Pretty-print the preflight report; return True if good to launch."""
     ok = True
 
@@ -272,6 +432,52 @@ def _print_preflight(host: str, r: dict) -> bool:
     fx = r.get("fixer")
     line("fixer reachable + authed", fx == 200,
          "HTTP 200" if fx == 200 else str(fx))
+
+    # --- env fingerprint: code (git SHA) + key deps vs the coordinator -------
+    rfp = r.get("fingerprint") or {}
+    lfp = local_fp or {}
+    if lfp:
+        # python major.minor
+        line(f"python version matches ({rfp.get('python','?')})",
+             rfp.get("python") == lfp.get("python"),
+             f"local {lfp.get('python','?')}")
+        # per-repo git SHA (THE check that prevents stale-code drift)
+        rrepos, lrepos = rfp.get("repos", {}), lfp.get("repos", {})
+        for name in sorted(set(rrepos) | set(lrepos)):
+            rv, lv = rrepos.get(name, {}), lrepos.get(name, {})
+            rsha, lsha = rv.get("sha"), lv.get("sha")
+            match = bool(rsha) and rsha == lsha
+            detail = f"remote {rsha or '-'} vs local {lsha or '-'}"
+            if rv.get("dirty") or lv.get("dirty"):
+                detail += " (dirty working tree!)"
+            line(f"code in sync: {name}", match, detail)
+        # key package versions
+        rpk, lpk = rfp.get("pkgs", {}), lfp.get("pkgs", {})
+        for mod in sorted(set(rpk) | set(lpk)):
+            rv, lv = rpk.get(mod), lpk.get(mod)
+            line(f"{mod} version matches ({rv or '-'})", rv == lv,
+                 f"local {lv or '-'}")
+
+    # --- real I/O probe: did kfs actually read + write the NAS roots? --------
+    io = r.get("io") or {}
+    if io.get("error"):
+        line("kfs available", False, io["error"])
+    else:
+        backend = ("direct-SMB" if io.get("smb_creds_env")
+                   else ("OS-redirector (logon-bound!)" if io.get("is_unc") else "local-fs"))
+        rd, wr = io.get("read"), io.get("write")
+        if rd is not None:
+            line(f"NAS read probe ({backend})", bool(rd.get("ok")),
+                 rd.get("err", ""))
+        if wr is not None:
+            line(f"NAS write probe ({backend})", bool(wr.get("ok")),
+                 wr.get("err", ""))
+        if io.get("is_unc") and not io.get("smb_creds_env"):
+            print("  [WARN] using the OS SMB redirector (no KIROSHI_NAS_USER set); "
+                  "this probe ran over SSH (network logon) and may differ from the "
+                  "Scheduled Task (interactive) context. Set machine-scoped NAS "
+                  "creds for context-proof, higher-throughput direct SMB.")
+
     for key in ("read_root", "write_root"):
         if key in r:
             d = r[key]
@@ -302,7 +508,8 @@ def run_remote(args) -> int:
             print("  ssh/stderr: " + err.strip()[:400], file=sys.stderr)
         return 2
     report = _marker_json(out, "PREFLIGHT=") or {}
-    good = _print_preflight(host, report)
+    local_fp = _fingerprint_local(eff["syspath"])
+    good = _print_preflight(host, report, local_fp)
 
     if args.remote_cmd == "probe":
         return 0 if good else 1
