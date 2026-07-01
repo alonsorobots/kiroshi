@@ -130,6 +130,12 @@ def load_config(path: Optional[str] = None) -> MeshConfig:
                 write=d.get("write"),
                 match=d.get("match", ""),
                 concurrency=d.get("concurrency"),
+                parity_protected=d.get("parity_protected", False),
+                write_concurrency=d.get("write_concurrency"),
+                direct_path=d.get("direct_path"),
+                cache_tier=d.get("cache_tier"),
+                seq_read_mbps=d.get("seq_read_mbps"),
+                write_mbps=d.get("write_mbps"),
             ))
 
     # Environment overrides (highest priority for connection + roots)

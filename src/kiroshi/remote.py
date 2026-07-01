@@ -520,6 +520,28 @@ def _print_preflight(host: str, r: dict, local_fp: Optional[dict] = None) -> boo
             d = r[key]
             line(f"{key} visible", bool(d.get("exists")), d.get("path", ""))
     line("schtasks available", bool(r.get("schtasks")))
+
+    # --- storage perf advisory: FUSE vs direct, parity warning ---
+    from .storage import load_topology, has_parity
+    topo = load_topology()
+    if topo:
+        for d in topo:
+            if d.direct_path and d.read:
+                # Warn if the read_root uses FUSE (user share) instead of direct
+                rr = eff.get("read_root") or ""
+                if rr and "/mnt/user" in rr.replace("\\", "/") and d.direct_path not in rr:
+                    print(f"  [WARN] read_root uses FUSE ({rr}) — disk {d.id} has a "
+                          f"direct_path ({d.direct_path}) that bypasses Shfs. "
+                          f"Use the direct path for ~2x read throughput.")
+            if d.parity_protected:
+                print(f"  [WARN] disk {d.id} is parity-protected — array writes RMW "
+                      f"through the parity spindle (global bottleneck). Use the "
+                      f"cache tier ({d.cache_tier or 'NVMe'}) for write-heavy workloads.")
+        if has_parity(topo):
+            print("  [INFO] parity-protected topology detected — the resource "
+                  "governor's global write budget is active. Non-gig workloads "
+                  "using ResourceClient.acquire(mode='write') will self-limit.")
+
     return ok
 
 
