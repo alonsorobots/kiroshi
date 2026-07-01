@@ -40,11 +40,30 @@ class DiskConfig:
     write: Optional[str] = None       # cached user share (fast small-file writes)
     match: str = ""                   # which gigs live here: "shard_01..08", glob, or substring
     concurrency: Optional[int] = None  # None -> kind default; benchmark fills this
+    # --- write/parity contention model (PLAN: mesh resource governor) ---
+    # On a parity-protected array (Unraid single/dual parity, RAID5/6), every
+    # array write requires a read-modify-write through the parity spindle(s) —
+    # a GLOBAL bottleneck, not per-disk. A single parity_protected=true disk
+    # in the topology turns on a fleet-wide write semaphore so non-gig workloads
+    # (downloads, bulk transfers) self-limit instead of thrashing the parity disk.
+    parity_protected: bool = False
+    write_concurrency: Optional[int] = None  # None -> 6 (measured optimal for RMW parity)
+    # --- storage performance characteristics (for preflight routing + warnings) ---
+    direct_path: Optional[str] = None   # raw device path (e.g. /mnt/diskN) — bypass FUSE
+    cache_tier: Optional[str] = None    # "nvme" / "ssd" / None — write-fast tier
+    seq_read_mbps: Optional[float] = None   # measured sequential read throughput
+    write_mbps: Optional[float] = None      # measured write throughput (post-parity)
 
     @property
     def effective_concurrency(self) -> int:
         return self.concurrency if self.concurrency and self.concurrency > 0 \
             else kind_default_concurrency(self.kind)
+
+    @property
+    def effective_write_concurrency(self) -> int:
+        if self.write_concurrency and self.write_concurrency > 0:
+            return self.write_concurrency
+        return 6  # measured: RMW parity writes are fastest with ~6 concurrent
 
 
 def load_topology() -> list[DiskConfig]:
@@ -59,6 +78,22 @@ def disk_concurrency_map(disks: list[DiskConfig]) -> dict[str, int]:
     """``{disk_id: budget}`` for the disks that have a cap. Only disks present in
     this map are budgeted at lease time; any other disk (or ``None``) is uncapped."""
     return {d.id: d.effective_concurrency for d in disks if d.id}
+
+
+def has_parity(disks: list[DiskConfig]) -> bool:
+    """True if any disk in the topology is parity-protected (triggers the global
+    write semaphore). On a non-parity setup (all NVMe/SSD, or a RAID0 stripe),
+    this returns False and write budgeting is inert — matching the user's
+    requirement that these features only apply to HW configs that need them."""
+    return any(d.parity_protected for d in disks)
+
+
+def global_write_concurrency(disks: list[DiskConfig]) -> int:
+    """The fleet-wide write budget for parity-protected arrays. If any disk
+    declares parity_protected, the tightest (smallest) write_concurrency wins —
+    that's the bottleneck spindle."""
+    caps = [d.effective_write_concurrency for d in disks if d.parity_protected]
+    return min(caps) if caps else 0
 
 
 # --------------------------------------------------------------- gig -> disk

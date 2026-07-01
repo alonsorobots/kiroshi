@@ -111,7 +111,8 @@ def _fingerprint_local(syspath: list) -> dict:
     """Compute the same env fingerprint locally (the coordinator = source of
     truth) so the remote's can be compared against it."""
     import sys as _sys
-    fp = {"python": ".".join(map(str, _sys.version_info[:2])), "repos": {}, "pkgs": {}}
+    fp = {"python": ".".join(map(str, _sys.version_info[:2])), "repos": {}, "pkgs": {},
+          "interpreter": _sys.executable}
     roots = set()
     try:
         import kiroshi
@@ -229,7 +230,8 @@ def _repo_root(start):
             return None
         d = nd
 
-fp = {"python": ".".join(map(str, sys.version_info[:2])), "repos": {}, "pkgs": {}}
+fp = {"python": ".".join(map(str, sys.version_info[:2])), "repos": {}, "pkgs": {},
+      "interpreter": sys.executable}
 # kiroshi's own repo + each requested syspath repo
 roots = set()
 try:
@@ -479,6 +481,13 @@ def _print_preflight(host: str, r: dict, local_fp: Optional[dict] = None) -> boo
             rv, lv = rpk.get(mod), lpk.get(mod)
             warn(f"{mod} version matches ({rv or '-'})", rv == lv,
                  f"local {lv or '-'}")
+        # interpreter path — advisory (different paths aren't wrong, but flag
+        # them so hardcoded paths in launch scripts are caught early)
+        r_int = rfp.get("interpreter", "?")
+        l_int = lfp.get("interpreter", "?")
+        warn(f"interpreter path", r_int == l_int,
+             f"remote {r_int} vs local {l_int}" +
+             (" (different env managers — don't hardcode paths!)" if r_int != l_int else ""))
 
     # --- real I/O probe: did kfs actually read + write the NAS roots? --------
     io = r.get("io") or {}

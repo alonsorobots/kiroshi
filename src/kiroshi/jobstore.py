@@ -476,6 +476,16 @@ class JobStore:
                 )
             }
 
+    def disk_inflight_count(self, disk: str) -> int:
+        """Count of leased (in-flight) gigs on a specific disk — for the resource
+        governor to share the per-disk read budget between gigs and external
+        resource-acquire clients."""
+        with self._lock:
+            r = self._conn.execute(
+                "SELECT COUNT(*) AS c FROM jobs WHERE state='leased' AND disk=?",
+                (disk,)).fetchone()
+            return r["c"] if r else 0
+
     _LIST_COLS = ("job_id", "state", "host", "runner_id", "attempts",
                   "created_at", "leased_at", "completed_at", "error", "metrics",
                   "grp", "disk")

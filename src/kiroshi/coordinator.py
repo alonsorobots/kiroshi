@@ -14,7 +14,7 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Body
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -129,6 +129,16 @@ def create_app(
     from .storage import disk_concurrency_map
 
     app.state.disk_concurrency = disk_concurrency_map(app.state.disks)
+
+    # --- Mesh resource governor (standalone resource-acquire service) ---
+    # Extends the per-disk read budget to non-gig workloads + adds a global
+    # write/parity budget. Any process can acquire via /resource/acquire.
+    from .storage import has_parity, global_write_concurrency
+    app.state.resource_slots = {}  # slot_id -> {disk, mode, holder, deadline}
+    app.state.resource_lock = threading.Lock()
+    app.state.has_parity = has_parity(app.state.disks)
+    app.state.global_write_budget = global_write_concurrency(app.state.disks)
+    app.state.global_write_inflight = 0  # current write slots held
 
     @app.middleware("http")
     async def _auth(request: Request, call_next):
@@ -432,6 +442,13 @@ def create_app(
                 {"id": d.id, "kind": d.kind, "match": d.match}
                 for d in app.state.disks
             ]
+            # Resource governor state
+            st["resource"] = {
+                "has_parity": app.state.has_parity,
+                "global_write_budget": app.state.global_write_budget,
+                "global_write_inflight": app.state.global_write_inflight,
+                "active_resource_slots": len(app.state.resource_slots),
+            }
         return JSONResponse(st)
 
     @app.get("/storage")
@@ -483,5 +500,94 @@ def create_app(
     @app.get("/ui/job", response_class=HTMLResponse)
     def ui_job() -> str:
         return _serve("job.html")
+
+    # ================================================================
+    # Mesh resource governor: standalone resource-acquire service
+    # ================================================================
+
+    @app.post("/resource/acquire")
+    def resource_acquire(body: dict = Body(...)) -> JSONResponse:
+        """Acquire a read (per-disk) or write (global-parity) resource slot.
+
+        Any process — not just Kiroshi gigs — can call this to coordinate I/O
+        across the mesh. The Fixer is the single mesh-global arbiter.
+
+        Request: {"slot_id": "...", "disk": "disk3"|"None", "mode": "read"|"write", "ttl": 120}
+        Response: {"granted": true} or {"granted": false, "retry_after": 0.5}
+        If no topology / no parity: always granted (inert, HW-config-gated).
+        """
+        slot_id = body.get("slot_id", "")
+        disk = body.get("disk")
+        mode = (body.get("mode") or "read").lower()
+        ttl = float(body.get("ttl", 120))
+
+        # Reap expired slots first
+        now = time.time()
+        with app.state.resource_lock:
+            expired = [sid for sid, s in app.state.resource_slots.items()
+                       if s["deadline"] < now]
+            for sid in expired:
+                s = app.state.resource_slots.pop(sid)
+                if s["mode"] == "write":
+                    app.state.global_write_inflight -= 1
+
+        with app.state.resource_lock:
+            if mode == "write":
+                # Global parity-write budget
+                if not app.state.has_parity or app.state.global_write_budget == 0:
+                    # No parity protection — always grant (inert for NVMe/SSD)
+                    app.state.resource_slots[slot_id] = {
+                        "disk": None, "mode": "write", "deadline": now + ttl}
+                    return JSONResponse({"granted": True})
+                if app.state.global_write_inflight >= app.state.global_write_budget:
+                    return JSONResponse({"granted": False, "retry_after": 0.5},
+                                        status_code=503)
+                app.state.global_write_inflight += 1
+                app.state.resource_slots[slot_id] = {
+                    "disk": None, "mode": "write", "deadline": now + ttl}
+                return JSONResponse({"granted": True})
+
+            else:  # read — per-disk budget
+                budget_map = app.state.disk_concurrency
+                if not budget_map or disk not in budget_map:
+                    # No budget for this disk — always grant
+                    app.state.resource_slots[slot_id] = {
+                        "disk": disk, "mode": "read", "deadline": now + ttl}
+                    return JSONResponse({"granted": True})
+                # Count in-flight reads on this disk (from both gigs + resource slots)
+                inflight_gigs = store.disk_inflight_count(disk) if hasattr(store, "disk_inflight_count") else 0
+                inflight_slots = sum(1 for s in app.state.resource_slots.values()
+                                     if s["mode"] == "read" and s["disk"] == disk)
+                total_inflight = inflight_gigs + inflight_slots
+                if total_inflight >= budget_map[disk]:
+                    return JSONResponse({"granted": False, "retry_after": 0.5},
+                                        status_code=503)
+                app.state.resource_slots[slot_id] = {
+                    "disk": disk, "mode": "read", "deadline": now + ttl}
+                return JSONResponse({"granted": True})
+
+    @app.post("/resource/release")
+    def resource_release(body: dict = Body(...)) -> JSONResponse:
+        """Release a previously acquired resource slot."""
+        slot_id = body.get("slot_id", "")
+        with app.state.resource_lock:
+            slot = app.state.resource_slots.pop(slot_id, None)
+            if slot and slot["mode"] == "write":
+                app.state.global_write_inflight = max(0, app.state.global_write_inflight - 1)
+        return JSONResponse({"released": slot is not None})
+
+    @app.get("/resource/status")
+    def resource_status() -> dict[str, Any]:
+        """Live view of resource slots for observability."""
+        now = time.time()
+        with app.state.resource_lock:
+            active = [s for s in app.state.resource_slots.values() if s["deadline"] >= now]
+        return {
+            "active_slots": len(active),
+            "global_write_inflight": app.state.global_write_inflight,
+            "global_write_budget": app.state.global_write_budget,
+            "has_parity": app.state.has_parity,
+            "read_budget": app.state.disk_concurrency,
+        }
 
     return app
