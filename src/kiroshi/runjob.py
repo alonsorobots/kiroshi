@@ -179,6 +179,7 @@ def run_job(
     max_tasks_per_child: Optional[int] = None,
     gc_between_tasks: bool = False,
     launch_command: str = "",
+    origin: Optional[dict[str, Any]] = None,
 ) -> int:
     import uvicorn
 
@@ -304,6 +305,16 @@ def run_job(
 
     app = create_app(store, token=token, launch_command=launch_command,
                      task_source=task_source, disks=disks)
+    # M9: stash the origin so advisories fired against this campaign's spindle
+    # can be attributed (and, if `callback` is present, webhook'd back to
+    # whoever launched this run). Same in-memory shape as the /seed endpoint's
+    # ``origins_by_group`` map — the seed already happened in-process above,
+    # so we just record the origin here for the same group.
+    if origin:
+        from .jobstore import UNGROUPED
+
+        grp = group or UNGROUPED
+        app.state.origins_by_group.setdefault(grp, []).append(dict(origin))
     config = uvicorn.Config(app, host=host, port=port, log_level="warning")
     server = uvicorn.Server(config)
     server_thread = threading.Thread(target=server.run, name="kiroshi-run-fixer",

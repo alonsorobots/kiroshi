@@ -277,6 +277,13 @@ class Runner:
                 )
                 gigs = (lease or {}).get("gigs") or []
                 lease_id = (lease or {}).get("lease_id")
+                # M9: any advisories the Fixer attached to this lease response
+                # are printed loudly on the Runner's stdout so they survive into
+                # the rotating log file — the "in-band" delivery channel that
+                # works for every consumer (a human tailing logs, an LLM that
+                # reads terminal output between turns, a CI grep). Deduped
+                # server-side by fingerprint; we just render.
+                self._emit_advisories((lease or {}).get("advisories") or [])
                 if not gigs:
                     time.sleep(self.poll_interval)
                     continue
@@ -308,6 +315,37 @@ class Runner:
                 reg.close()
         if not self.quiet:
             print("[runner] drained, exiting.", flush=True)
+
+    # -------------------------------------------------------------- advisories
+    def _emit_advisories(self, advisories: list[dict[str, Any]]) -> None:
+        """Print each advisory as a distinctive stdout line (M9).
+
+        Format: ``KIROSHI-ADVISORY: <SEV> <code> [disk=<d>] | <detail> | action: <sa>``.
+        Always printed (even with ``quiet=True``) — advisories are the whole
+        point of the channel, and they're rate-limited server-side by
+        fingerprint dedup so they're never spammy.
+        """
+        if not advisories:
+            return
+        try:
+            from .advisories import format_stdout_line
+        except Exception:  # pragma: no cover - import-time defense
+            return
+        seen: set[str] = getattr(self, "_advisory_seen", set())
+        for adv in advisories:
+            fp = adv.get("fingerprint") or adv.get("code") or ""
+            # Skip the exact same fingerprint we just printed on the previous
+            # tick so an advisory that stays active for minutes doesn't spam
+            # our log every poll interval. New fingerprints are always shown.
+            if fp and fp in seen:
+                continue
+            if fp:
+                seen.add(fp)
+            print(format_stdout_line(adv), flush=True)
+        # Keep only what's still active-with-us; forget the rest so a re-fired
+        # advisory (after the condition cleared + returned) prints again.
+        current = {a.get("fingerprint") or a.get("code") or "" for a in advisories}
+        self._advisory_seen = seen & current
 
     # ------------------------------------------------------ registry / pause
     def _start_process_registration(self):

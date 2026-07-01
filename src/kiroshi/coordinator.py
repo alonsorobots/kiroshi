@@ -44,6 +44,12 @@ class SeedReq(BaseModel):
     # a whole campaign in the dashboard instead of fragmenting it per job_id prefix.
     group: Optional[str] = None
     label: Optional[str] = None
+    # Opaque attribution blob — carried as-is, never interpreted by Kiroshi except
+    # for the optional ``callback`` URL used by the advisory webhook. Lets a
+    # launcher say "I'm cursor-agent X, POST warnings to Y" so a script that
+    # oversubscribes the NAS gets a message back to whoever authored it.
+    # See ``advisories.py`` and the M9 plan for the full delivery contract.
+    origin: Optional[dict[str, Any]] = None
 
 
 class LeaseReq(BaseModel):
@@ -100,6 +106,15 @@ def create_app(
     lease_ttl_cap: float = 3600.0,
     task_source: Optional[dict[str, Any]] = None,
     disks: Optional[list] = None,
+    # M9 advisory channel — background detectors + optional outbound webhook.
+    # Additive: with defaults the Fixer behaves exactly as before, only gaining a
+    # /advisories endpoint that returns [] until something fires. Set
+    # ``enable_advisories=False`` to skip starting the threads entirely (used by
+    # some unit tests to keep the app synchronous).
+    enable_advisories: bool = True,
+    advisory_sample_interval_s: float = 10.0,
+    advisory_sustain_s: float = 60.0,
+    advisory_webhook_interval_s: float = 2.0,
 ) -> FastAPI:
     app = FastAPI(title="Kiroshi Fixer", version="0.0.1")
     app.state.store = store
@@ -150,6 +165,88 @@ def create_app(
     _direct_paths = {d.id: d.direct_path for d in app.state.disks if d.direct_path}
     app.state.io_watcher = IOWatcher(_hdd_disk_ids, _parity_map, _direct_paths)
     app.state.io_watcher.start()
+
+    # --- Advisory channel (M9) ---
+    # Structured warnings for whoever launched the work: humans reading the
+    # dashboard, monitors, MCP clients, or LLM agents via an outbound webhook.
+    # The Fixer only ships primitives (detect + query + optional POST); IDE-
+    # specific consumers live outside this repo. Origins are opaque attribution
+    # blobs the launcher supplied via `--origin` on `run`/`seed`.
+    from . import advisories as _adv_mod
+
+    app.state.advisories = _adv_mod.AdvisoryStore()
+    # grp -> list[origin_dict], deduped by identity of (kind, agent_id, callback).
+    # Merged from every /seed request that carries an origin.
+    app.state.origins_by_group: dict[str, list[dict[str, Any]]] = {}
+    app.state.enable_advisories = enable_advisories
+
+    def _origins_for(disk: Optional[str]) -> list[dict[str, Any]]:
+        """Union of origins whose in-flight (leased/pending) gigs land on ``disk``.
+
+        For fleet-wide advisories (``disk is None``) it's the union across every
+        group with any pending/leased work. Cheap enough at Kiroshi scale (the
+        detector runs every 10s and leased-set size is capped by budget)."""
+        origins_map = app.state.origins_by_group
+        if not origins_map:
+            return []
+        try:
+            rows = store.list_jobs(states=("leased", "pending"), limit=5000)
+        except Exception:
+            return []
+        grps: set[str] = set()
+        for row in rows:
+            if disk is not None and row.get("disk") != disk:
+                continue
+            g = row.get("grp")
+            if g:
+                grps.add(g)
+        seen: set[tuple] = set()
+        out: list[dict[str, Any]] = []
+        for g in grps:
+            for o in origins_map.get(g, []):
+                key = (o.get("kind"), o.get("agent_id"), o.get("callback"))
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(o)
+        return out
+
+    def _parity_disks() -> set[str]:
+        return {d.id for d in app.state.disks if getattr(d, "parity_protected", False)}
+
+    def _dashboard_url_for(_disk: Optional[str]) -> Optional[str]:
+        # Kiroshi doesn't know its own external base URL (Fixer may bind
+        # 0.0.0.0 behind NAT / an overlay), so we return a relative path a
+        # consumer can join to whatever hostname they used. Callers that need
+        # an absolute URL should combine with `origin.dashboard_base`.
+        return "/ui/jobs"
+
+    def _resource_state() -> dict[str, Any]:
+        return {
+            "has_parity": app.state.has_parity,
+            "global_write_budget": app.state.global_write_budget,
+            "global_write_inflight": app.state.global_write_inflight,
+        }
+
+    app.state.advisory_detector = _adv_mod.AdvisoryDetector(
+        adv_store=app.state.advisories,
+        stats_fn=store.stats,
+        iowatcher_fn=(app.state.io_watcher.snapshot
+                      if _hdd_disk_ids else None),
+        metrics_ring=app.state.metrics,
+        resource_fn=_resource_state,
+        origins_for=_origins_for,
+        disk_budget_fn=lambda: dict(app.state.disk_concurrency or {}),
+        disk_inflight_fn=store.disk_inflight_count,
+        parity_disks_fn=_parity_disks,
+        dashboard_url_fn=_dashboard_url_for,
+        sample_interval_s=advisory_sample_interval_s,
+        sustain_s=advisory_sustain_s,
+    )
+    app.state.advisory_dispatcher = _adv_mod.WebhookDispatcher(
+        adv_store=app.state.advisories,
+        interval_s=advisory_webhook_interval_s,
+    )
 
     @app.middleware("http")
     async def _auth(request: Request, call_next):
@@ -246,10 +343,16 @@ def create_app(
         ts = threading.Thread(target=_sampler, name="kiroshi-sampler", daemon=True)
         ts.start()
         app.state._sampler = ts
+        if app.state.enable_advisories:
+            app.state.advisory_detector.start()
+            app.state.advisory_dispatcher.start()
 
     @app.on_event("shutdown")
     def _stop() -> None:
         app.state._stop.set()
+        if app.state.enable_advisories:
+            app.state.advisory_detector.stop()
+            app.state.advisory_dispatcher.stop()
 
     @app.post("/seed")
     def seed(req: SeedReq) -> dict[str, int]:
@@ -268,6 +371,33 @@ def create_app(
                     if d:
                         g["disk"] = d
         inserted = store.seed(gigs, group=req.group, label=req.label)
+        # M9: remember which origin(s) seeded which group, so an advisory that
+        # trips on a spindle can name (and optionally webhook back to) whoever
+        # launched the work. Deduped by (kind, agent_id, callback) so re-seeding
+        # doesn't stack copies of the same launcher.
+        if req.origin:
+            # Any group referenced by this seed request should carry the origin.
+            grps: set[str] = set()
+            if req.group:
+                grps.add(req.group)
+            for g in gigs:
+                gg = g.get("group") or req.group
+                if gg:
+                    grps.add(gg)
+            if not grps:
+                # Ungrouped gigs live under the sentinel group name from jobstore.
+                from .jobstore import UNGROUPED
+                grps.add(UNGROUPED)
+            for grp in grps:
+                lst = app.state.origins_by_group.setdefault(grp, [])
+                key = (req.origin.get("kind"),
+                       req.origin.get("agent_id"),
+                       req.origin.get("callback"))
+                if not any(
+                    (o.get("kind"), o.get("agent_id"), o.get("callback")) == key
+                    for o in lst
+                ):
+                    lst.append(dict(req.origin))
         return {"inserted": inserted, "received": len(req.gigs)}
 
     def _touch_runner(runner_id: str, host: str) -> None:
@@ -411,7 +541,23 @@ def create_app(
             from .storage import inject_roots
 
             inject_roots(res.gigs, app.state.disks)
-        return {"lease_id": res.lease_id, "gigs": res.gigs, "ttl": ttl}
+        # M9: attach advisories the Runner should see — unscoped ones plus any
+        # tied to the disks in this batch. Empty list unless something is
+        # actively firing, so the /lease payload shape is unchanged in the
+        # steady state. Runner prints them as ``KIROSHI-ADVISORY:`` lines.
+        adv_out: list[dict[str, Any]] = []
+        if app.state.enable_advisories:
+            from .advisories import filter_advisories_for_lease
+
+            leased_disks = {g.get("disk") for g in res.gigs if g.get("disk")}
+            active = app.state.advisories.active()
+            adv_out = filter_advisories_for_lease(active, leased_disks)
+        payload: dict[str, Any] = {
+            "lease_id": res.lease_id, "gigs": res.gigs, "ttl": ttl,
+        }
+        if adv_out:
+            payload["advisories"] = adv_out
+        return payload
 
     @app.post("/complete")
     def complete(req: CompleteReq) -> dict[str, int]:
@@ -481,6 +627,36 @@ def create_app(
                 "active_resource_slots": len(app.state.resource_slots),
             }
         return JSONResponse(st)
+
+    @app.get("/advisories")
+    def advisories_list(
+        since: Optional[float] = None,
+        severity: Optional[str] = None,
+        disk: Optional[str] = None,
+        active_only: bool = False,
+        limit: int = 200,
+    ) -> dict[str, Any]:
+        """Structured Fixer-side warnings for humans / monitors / agents (M9).
+
+        Query params:
+          - ``since``: unix timestamp; only newer entries.
+          - ``severity``: one of ``info|warn|critical``.
+          - ``disk``: filter to one spindle.
+          - ``active_only``: hide resolved fingerprints.
+          - ``limit``: cap (default 200; max 1000).
+
+        Returns ``{advisories: [...], active: N, ts: <now>}`` where each entry
+        is the JSON of :class:`~kiroshi.advisories.Advisory`.
+        """
+        items = app.state.advisories.list(
+            since=since, severity=severity, disk=disk,
+            active_only=active_only, limit=min(max(limit, 1), 1000),
+        )
+        return {
+            "advisories": [a.to_dict() for a in items],
+            "active": len(app.state.advisories.active()),
+            "ts": time.time(),
+        }
 
     @app.get("/storage")
     def storage() -> dict[str, Any]:

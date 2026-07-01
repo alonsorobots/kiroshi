@@ -57,6 +57,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     prun.add_argument("--group", default=None, help="Campaign slug (groups gigs in the UI).")
     prun.add_argument("--label", default=None,
                       help="Human-readable campaign name for the dashboard header.")
+    prun.add_argument("--origin", default=None,
+                      help="Opaque JSON attribution blob for advisory delivery "
+                           "(M9). Any dict; if it has a `callback` URL, structured "
+                           "warnings about this campaign's spindle/health are "
+                           "POSTed there. Also picked up from KIROSHI_ORIGIN. "
+                           "Example: --origin '{\"kind\":\"cursor-agent\","
+                           "\"callback\":\"http://localhost:9123/notify\"}'.")
     prun.add_argument("--workers", type=int, default=0,
                       help="Local worker processes (default: CPU count).")
     prun.add_argument("--capacity", type=int, default=cfg.host().capacity)
@@ -192,6 +199,10 @@ def main(argv: Optional[list[str]] = None) -> int:
                     help="Human-readable campaign name shown in the dashboard header "
                          "(e.g. 'Converting Seamless Interactions 30fps -> 4,8 fps'). "
                          "Pairs with --group (or a single shared group in --jobs).")
+    ps.add_argument("--origin", default=None,
+                    help="Opaque JSON attribution blob (M9); if it has a `callback` "
+                         "URL, structured advisories about this campaign's spindle "
+                         "health are POSTed there. Also picked up from KIROSHI_ORIGIN.")
     ps.add_argument("--token", default=None, help="Mesh auth token.")
 
     # ---- status ----
@@ -551,6 +562,7 @@ def _cmd_run(args) -> int:
         task_args=getattr(args, "_passthrough", []),
         group=args.group,
         label=args.label,
+        origin=_resolve_origin(getattr(args, "origin", None)),
         workers=args.workers,
         capacity=args.capacity,
         port=args.port,
@@ -623,11 +635,35 @@ def _auth_headers(args) -> dict:
     return {"Authorization": f"Bearer {tok}"} if tok else {}
 
 
+def _resolve_origin(cli_arg: Optional[str]) -> Optional[dict]:
+    """Resolve the M9 attribution blob from ``--origin`` or ``KIROSHI_ORIGIN``.
+
+    Both must be JSON that parses to an object (dict). Anything else prints a
+    warning and returns None so the caller proceeds without attribution — a
+    malformed origin should never block the run.
+    """
+    raw = cli_arg if cli_arg is not None else os.environ.get("KIROSHI_ORIGIN")
+    if not raw:
+        return None
+    try:
+        obj = json.loads(raw)
+    except (ValueError, TypeError):
+        print(f"[origin] ignoring --origin/KIROSHI_ORIGIN: not valid JSON ({raw[:80]!r})",
+              file=sys.stderr)
+        return None
+    if not isinstance(obj, dict):
+        print(f"[origin] ignoring --origin/KIROSHI_ORIGIN: must be a JSON object, "
+              f"got {type(obj).__name__}", file=sys.stderr)
+        return None
+    return obj
+
+
 def _cmd_seed(args) -> int:
     import requests
 
     args.fixer = _resolve_fixer_arg(args.fixer)
     headers = _auth_headers(args)
+    origin = _resolve_origin(getattr(args, "origin", None))
 
     def post(gigs: list[dict]) -> None:
         body: dict = {"gigs": gigs}
@@ -635,6 +671,8 @@ def _cmd_seed(args) -> int:
             body["group"] = args.group
         if args.label:
             body["label"] = args.label
+        if origin:
+            body["origin"] = origin
         r = requests.post(f"{args.fixer.rstrip('/')}/seed", json=body,
                           timeout=60, headers=headers)
         r.raise_for_status()
