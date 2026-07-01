@@ -157,6 +157,20 @@ class ResourceClient:
         logger.warning("resource: acquire timed out after %.1fs (fail-open)", timeout)
         return None
 
+    def _do_renew(self, slot_id: Optional[str], disk: Optional[str],
+                  mode: str) -> None:
+        """Extend a held slot's TTL so a long operation isn't reaped mid-hold."""
+        if slot_id is None or not self._check_available():
+            return
+        try:
+            import requests
+            requests.post(f"{self._fixer}/resource/renew",
+                          json={"slot_id": slot_id, "disk": disk, "mode": mode,
+                                "ttl": self._slot_ttl},
+                          headers=self._headers(), timeout=5)
+        except Exception:
+            pass  # a missed renewal is fine as long as some succeed
+
     def _do_release(self, slot_id: Optional[str]) -> None:
         """Release a slot back to the Fixer."""
         if slot_id is None:
@@ -175,7 +189,13 @@ class ResourceClient:
 
 
 class ResourceSlot:
-    """Context manager for a held resource slot. Released on __exit__."""
+    """Context manager for a held resource slot. Released on __exit__.
+
+    While held, a background thread RENEWS the slot at ~1/3 the TTL interval —
+    so a long-running hold (a multi-minute download, a big file stage) keeps its
+    slot alive instead of being reaped by the Fixer's TTL and over-subscribed by
+    another client. Same pattern as gig-lease heartbeats.
+    """
 
     def __init__(self, client: ResourceClient, disk: Optional[str],
                  mode: str, timeout: float):
@@ -184,12 +204,25 @@ class ResourceSlot:
         self._mode = mode
         self._timeout = timeout
         self._slot_id: Optional[str] = None
+        self._renew_stop = threading.Event()
+        self._renew_thread: Optional[threading.Thread] = None
 
     def __enter__(self) -> "ResourceSlot":
         self._slot_id = self._client._do_acquire(self._disk, self._mode, self._timeout)
+        if self._slot_id is not None:
+            # Renew at 1/3 TTL so a slow op never lets its slot expire mid-hold.
+            interval = max(5.0, self._client._slot_ttl / 3.0)
+            self._renew_thread = threading.Thread(
+                target=self._renew_loop, args=(interval,), daemon=True)
+            self._renew_thread.start()
         return self
 
+    def _renew_loop(self, interval: float) -> None:
+        while not self._renew_stop.wait(interval):
+            self._client._do_renew(self._slot_id, self._disk, self._mode)
+
     def __exit__(self, *exc) -> None:
+        self._renew_stop.set()
         self._client._do_release(self._slot_id)
 
     @property

@@ -597,6 +597,22 @@ def create_app(
                     "disk": disk, "mode": "read", "deadline": now + ttl}
                 return JSONResponse({"granted": True})
 
+    @app.post("/resource/renew")
+    def resource_renew(body: dict = Body(...)) -> JSONResponse:
+        """Extend a held slot's TTL (heartbeat) so a long-running hold — a
+        multi-minute download, a large file stage — isn't reaped and
+        over-subscribed. Re-grants the slot if it was already reaped (best
+        effort, subject to the same budget)."""
+        slot_id = body.get("slot_id", "")
+        ttl = float(body.get("ttl", 120))
+        now = time.time()
+        with app.state.resource_lock:
+            slot = app.state.resource_slots.get(slot_id)
+            if slot is not None:
+                slot["deadline"] = now + ttl
+                return JSONResponse({"renewed": True})
+        return JSONResponse({"renewed": False}, status_code=404)
+
     @app.post("/resource/release")
     def resource_release(body: dict = Body(...)) -> JSONResponse:
         """Release a previously acquired resource slot."""

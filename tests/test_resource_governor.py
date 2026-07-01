@@ -179,6 +179,33 @@ def test_resource_inert_no_parity(tmp_path):
     assert all(g)  # NVMe: no write budget, all granted
 
 
+def test_resource_renew_extends_slot(app_with_parity):
+    """A held slot can be renewed (heartbeat) so a long op isn't reaped."""
+    app, _ = app_with_parity
+    client = TestClient(app)
+    client.post("/resource/acquire", json={"slot_id": "w1", "mode": "write", "ttl": 60})
+    r = client.post("/resource/renew", json={"slot_id": "w1", "mode": "write", "ttl": 120})
+    assert r.json()["renewed"] is True
+    # renewing an unknown slot returns 404
+    r2 = client.post("/resource/renew", json={"slot_id": "nope", "ttl": 60})
+    assert r2.status_code == 404
+
+
+def test_resource_slot_ttl_reap(app_with_parity):
+    """Expired slots are reaped so a crashed holder doesn't pin the budget."""
+    app, _ = app_with_parity
+    client = TestClient(app)
+    # acquire all 3 write slots with a tiny TTL
+    for i in range(3):
+        client.post("/resource/acquire",
+                    json={"slot_id": f"w{i}", "mode": "write", "ttl": 0.01})
+    time.sleep(0.05)
+    # next acquire triggers reap of the expired slots -> granted
+    r = client.post("/resource/acquire",
+                    json={"slot_id": "w9", "mode": "write", "ttl": 60})
+    assert r.json()["granted"] is True
+
+
 def test_resource_status_endpoint(app_with_parity):
     app, _ = app_with_parity
     client = TestClient(app)
