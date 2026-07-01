@@ -147,7 +147,8 @@ def create_app(
     from .iowatcher import IOWatcher
     _hdd_disk_ids = [d.id for d in app.state.disks if d.kind.lower() == "hdd"]
     _parity_map = {d.id: d.parity_protected for d in app.state.disks}
-    app.state.io_watcher = IOWatcher(_hdd_disk_ids, _parity_map)
+    _direct_paths = {d.id: d.direct_path for d in app.state.disks if d.direct_path}
+    app.state.io_watcher = IOWatcher(_hdd_disk_ids, _parity_map, _direct_paths)
     app.state.io_watcher.start()
 
     @app.middleware("http")
@@ -377,12 +378,32 @@ def create_app(
             floor = max(floor, hb * app.state.lease_miss_tolerance)
         return min(floor, app.state.lease_ttl_cap)
 
+    def _effective_disk_budget() -> Optional[dict[str, int]]:
+        """The per-disk read budget available to GIGS = topology budget minus
+        read resource-slots currently held by external (non-gig) clients. This
+        unifies the mesh-global budget: gigs and external workloads draw from
+        ONE shared counter, so their combined in-flight never exceeds the cap.
+        """
+        base = app.state.disk_concurrency
+        if not base:
+            return None
+        # Count active read slots per disk held by external clients
+        now = time.time()
+        slot_reads: dict[str, int] = {}
+        with app.state.resource_lock:
+            for s in app.state.resource_slots.values():
+                if s["mode"] == "read" and s["disk"] and s["deadline"] >= now:
+                    slot_reads[s["disk"]] = slot_reads.get(s["disk"], 0) + 1
+        if not slot_reads:
+            return base
+        return {d: max(0, cap - slot_reads.get(d, 0)) for d, cap in base.items()}
+
     @app.post("/lease")
     def lease(req: LeaseReq) -> dict[str, Any]:
         _touch_runner(req.runner_id, req.host)
         ttl = _effective_ttl(req.heartbeat_interval)
         res = store.lease(req.runner_id, req.host, req.capacity, ttl,
-                          disk_concurrency=app.state.disk_concurrency or None)
+                          disk_concurrency=_effective_disk_budget())
         # Dual-path routing (N3): stamp each gig's spec with its disk's read/write
         # roots so the task reads the direct spindle share / writes the cached share.
         # Inert without a topology (gig has no disk -> spec roots unset -> env fallback).

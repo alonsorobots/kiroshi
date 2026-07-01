@@ -89,15 +89,55 @@ class IOWatcher:
     Inert if neither is available or if no HDD disks are in the topology.
     """
 
-    def __init__(self, disk_ids: list[str], is_parity: dict[str, bool]):
+    def __init__(self, disk_ids: list[str], is_parity: dict[str, bool],
+                 direct_paths: Optional[dict[str, str]] = None):
         self._disk_ids = disk_ids
         self._is_parity = is_parity
+        self._direct_paths = direct_paths or {}
         self._stats: dict[str, DiskRollingStats] = {
             d: DiskRollingStats(d) for d in disk_ids
         }
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self._platform = sys.platform
+        # Resolve each disk_id -> backing block-device name (sda, sdb, ...) so we
+        # can look it up in /proc/diskstats (which is keyed by device, not by our
+        # topology disk_id). Without this mapping the watcher records nothing.
+        self._dev_for_disk: dict[str, str] = self._resolve_devices()
+        # Reverse: device name -> disk_id, for the sampler.
+        self._disk_for_dev: dict[str, str] = {
+            dev: did for did, dev in self._dev_for_disk.items()}
+
+    def _resolve_devices(self) -> dict[str, str]:
+        """Map each disk_id to its backing block device via /proc/mounts.
+
+        For each disk with a ``direct_path`` (e.g. ``/mnt/disk1``), find the
+        device mounted there (e.g. ``/dev/sde1`` -> base device ``sde``). Unraid
+        mounts each array disk at ``/mnt/diskN`` from a partition ``/dev/sdX1``.
+        """
+        mapping: dict[str, str] = {}
+        if self._platform != "linux":
+            return mapping
+        try:
+            with open("/proc/mounts") as f:
+                mounts = [ln.split() for ln in f if len(ln.split()) >= 2]
+        except (FileNotFoundError, PermissionError):
+            return mapping
+        for did in self._disk_ids:
+            mount_point = self._direct_paths.get(did) or f"/mnt/{did}"
+            for parts in mounts:
+                dev, mp = parts[0], parts[1]
+                if mp == mount_point and dev.startswith("/dev/"):
+                    # /dev/sde1 -> sde  (strip /dev/ prefix + trailing partition digits)
+                    base = os.path.basename(dev)
+                    # nvme0n1p1 -> nvme0n1 ; sde1 -> sde
+                    if "nvme" in base:
+                        base = base.split("p")[0]
+                    else:
+                        base = base.rstrip("0123456789")
+                    mapping[did] = base
+                    break
+        return mapping
 
     def start(self) -> None:
         if not self._disk_ids:
@@ -133,17 +173,20 @@ class IOWatcher:
                     if len(parts) < 14:
                         continue
                     dev_name = parts[2]
-                    # Match by device name (sda, sdb, etc.) or disk_id
-                    # The disk_ids in topology are like "disk1", "disk2" —
-                    # we need a mapping from disk_id to device name.
-                    # For now, we sample all block devices and let the caller
-                    # map. This is a simplified version.
-                    if dev_name not in self._stats:
+                    # /proc/diskstats is keyed by device name (sda, sde, ...).
+                    # Map it back to our topology disk_id via the resolved
+                    # mount->device table. If a disk couldn't be resolved, we
+                    # also accept a direct disk_id==dev_name match (e.g. a config
+                    # that names disks by device directly).
+                    disk_id = self._disk_for_dev.get(dev_name)
+                    if disk_id is None and dev_name in self._stats:
+                        disk_id = dev_name
+                    if disk_id is None or disk_id not in self._stats:
                         continue
                     read_sectors = int(parts[5])
                     write_sectors = int(parts[9])
                     io_ms = int(parts[12])
-                    self._stats[dev_name].add(
+                    self._stats[disk_id].add(
                         DiskSample(now, read_sectors, write_sectors, io_ms))
         except (FileNotFoundError, PermissionError):
             pass
