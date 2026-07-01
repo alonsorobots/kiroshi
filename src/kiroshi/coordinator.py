@@ -140,6 +140,16 @@ def create_app(
     app.state.global_write_budget = global_write_concurrency(app.state.disks)
     app.state.global_write_inflight = 0  # current write slots held
 
+    # --- External-process I/O watcher (rolling-window observability) ---
+    # Only active when the topology has HDD disks (seek/saturation matters).
+    # NVMe-only nodes skip it (no contention concern). On Linux (NAS) reads
+    # /proc/diskstats; inert on Windows or when no HDD disks configured.
+    from .iowatcher import IOWatcher
+    _hdd_disk_ids = [d.id for d in app.state.disks if d.kind.lower() == "hdd"]
+    _parity_map = {d.id: d.parity_protected for d in app.state.disks}
+    app.state.io_watcher = IOWatcher(_hdd_disk_ids, _parity_map)
+    app.state.io_watcher.start()
+
     @app.middleware("http")
     async def _auth(request: Request, call_next):
         cfg = app.state.token
@@ -578,16 +588,20 @@ def create_app(
 
     @app.get("/resource/status")
     def resource_status() -> dict[str, Any]:
-        """Live view of resource slots for observability."""
+        """Live view of resource slots + per-disk I/O saturation for observability."""
         now = time.time()
         with app.state.resource_lock:
             active = [s for s in app.state.resource_slots.values() if s["deadline"] >= now]
-        return {
+        result = {
             "active_slots": len(active),
             "global_write_inflight": app.state.global_write_inflight,
             "global_write_budget": app.state.global_write_budget,
             "has_parity": app.state.has_parity,
             "read_budget": app.state.disk_concurrency,
         }
+        # I/O watcher rolling-window stats (which spindle is the wall)
+        if hasattr(app.state, "io_watcher") and app.state.io_watcher:
+            result["io"] = app.state.io_watcher.snapshot()
+        return result
 
     return app
