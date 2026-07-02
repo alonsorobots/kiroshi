@@ -187,6 +187,26 @@ class BeaconBroadcaster:
             sock.close()
 
 
+def check_singleton_fixer(
+    timeout: float = 3.0,
+    disc_port: Optional[int] = None,
+) -> Optional[str]:
+    """Split-brain guard: is another discoverable Fixer already on this LAN?
+
+    Called during Fixer startup (before we bind our own beacon) to detect the
+    common footgun of accidentally starting two Fixers on the same LAN — e.g.
+    running ``kiroshi run --lan`` on a workstation while the persistent
+    ``kiroshi-fixer`` service is up on the coordinator host. Two Fixers means
+    two disjoint queues + two disjoint per-spindle disk budgets, so each
+    happily saturates the shared NAS assuming the other doesn't exist.
+
+    Returns the reachable existing-Fixer URL if one is discoverable, else
+    ``None`` (safe to proceed). Uses the same solicited-reply mechanism as
+    :func:`discover_fixer` so anything the runners would see, we see.
+    """
+    return discover_fixer(timeout=timeout, disc_port=disc_port)
+
+
 def discover_fixer(
     timeout: float = 5.0,
     disc_port: Optional[int] = None,

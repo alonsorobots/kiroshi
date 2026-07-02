@@ -1,0 +1,80 @@
+# .kilocodeignore template
+# Drop this file (renamed to ".kilocodeignore") in any project root to prevent
+# Kilo Code from reading large/expensive files into the context window.
+# Uses .gitignore syntax.
+
+# --- Dependencies / build output ---
+node_modules/
+vendor/
+.venv/
+venv/
+__pycache__/
+.next/
+dist/
+build/
+out/
+target/
+.gradle/
+.cache/
+
+# --- Lockfiles (huge, rarely useful in context) ---
+*.lock
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+poetry.lock
+Cargo.lock
+Gemfile.lock
+
+# --- Generated / minified ---
+*.min.js
+*.min.css
+*.bundle.js
+*.map
+generated/
+**/*.generated.*
+
+# --- Large data files (top cause of token spikes) ---
+*.csv
+*.tsv
+*.parquet
+*.arrow
+*.geojson
+*.ndjson
+*.sqlite
+*.db
+data/
+datasets/
+fixtures/
+snapshots/
+
+# --- Binary / media ---
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+*.ico
+*.pdf
+*.zip
+*.tar
+*.gz
+*.7z
+*.mp4
+*.mov
+*.mp3
+*.wav
+
+# --- Secrets / local-only ---
+.env
+.env.*
+*.pem
+*.key
+secrets/
+.local-notes/
+
+# --- IDE / OS ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

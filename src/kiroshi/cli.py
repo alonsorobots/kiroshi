@@ -70,6 +70,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     prun.add_argument("--port", type=int, default=cfg.fixer_port)
     prun.add_argument("--lan", action="store_true",
                       help="Bind 0.0.0.0 so other machines can join (generates a mesh token).")
+    prun.add_argument("--force-second-fixer", action="store_true",
+                      help="Skip the split-brain guard that refuses --lan when "
+                           "another Fixer is already discoverable. Only use when "
+                           "you deliberately want two isolated meshes on the same LAN.")
     prun.add_argument("--db", default=None,
                       help="Run job-store path (default: state-dir/run-<slug>.db).")
     prun.add_argument("--token", default=None, help="Mesh token (for --lan).")
@@ -155,6 +159,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     pf.add_argument("--reap-interval", type=float, default=15.0)
     pf.add_argument("--no-beacon", action="store_true",
                     help="Disable the UDP discovery beacon (runners must use an explicit --fixer).")
+    pf.add_argument("--force-second-fixer", action="store_true",
+                    help="Skip the split-brain guard that refuses to start when "
+                         "another Fixer is already discoverable on the LAN. Use "
+                         "ONLY when you deliberately want two isolated meshes on "
+                         "the same LAN (rare — usually you want one Fixer).")
     pf.add_argument("--token", default=None,
                     help="Mesh auth token (default: env KIROSHI_TOKEN, token file, or auto-generated).")
     pf.add_argument("--no-auth", action="store_true",
@@ -477,6 +486,27 @@ def _cmd_fixer(args) -> int:
         print("[fixer] bound to loopback (secure default). To let other machines "
               "join, restart with --host 0.0.0.0.", flush=True)
 
+    # Split-brain guard: refuse to spin up a discoverable Fixer if another
+    # one is already reachable on this LAN. Two Fixers → two disjoint queues
+    # + two disjoint per-spindle budgets → both saturate the shared NAS
+    # assuming the other doesn't exist. Skipped when we're not participating
+    # in LAN discovery anyway (--no-beacon or loopback bind).
+    beacon_would_broadcast = not args.no_beacon and bind_is_public
+    if beacon_would_broadcast and not args.force_second_fixer:
+        from .discovery import check_singleton_fixer
+
+        other = check_singleton_fixer(timeout=3.0)
+        if other:
+            print(f"[fixer] REFUSING to start: another Fixer is already "
+                  f"discoverable at {other}.\n"
+                  f"  Two Fixers on one LAN means two disjoint queues and two\n"
+                  f"  disjoint per-spindle budgets — both would happily saturate\n"
+                  f"  the shared NAS assuming the other doesn't exist.\n"
+                  f"  Fix: stop the other Fixer, or pass --force-second-fixer if\n"
+                  f"  you deliberately want two isolated meshes on the same LAN.",
+                  file=sys.stderr)
+            return 3
+
     store = JobStore(args.db, max_retries=args.max_retries)
     from .storage import load_topology
 
@@ -600,6 +630,7 @@ def _cmd_run(args) -> int:
         max_tasks_per_child=args.max_tasks_per_child,
         gc_between_tasks=args.gc_between_tasks,
         launch_command=_launch_command(),
+        force_second_fixer=getattr(args, "force_second_fixer", False),
     )
 
 

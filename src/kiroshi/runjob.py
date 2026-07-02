@@ -180,16 +180,34 @@ def run_job(
     gc_between_tasks: bool = False,
     launch_command: str = "",
     origin: Optional[dict[str, Any]] = None,
+    force_second_fixer: bool = False,
 ) -> int:
     import uvicorn
 
     from . import security
     from .config import current_host
     from .coordinator import create_app
-    from .discovery import BeaconBroadcaster
+    from .discovery import BeaconBroadcaster, check_singleton_fixer
     from .jobstore import JobStore
     from .tasks import module_of, resolve_enumerator, resolve_task
     from .worker import Runner
+
+    # Split-brain guard for `kiroshi run --lan`: refuse to broadcast a second
+    # discoverable Fixer on a LAN that already has one. See cli._cmd_fixer for
+    # the same guard on `kiroshi fixer`. When --lan is off we bind loopback and
+    # don't beacon, so this check is skipped (no cross-host contention possible).
+    if lan and not force_second_fixer:
+        other = check_singleton_fixer(timeout=3.0)
+        if other:
+            print(f"[run] REFUSING --lan: another Fixer is already "
+                  f"discoverable at {other}.\n"
+                  f"  Seed to it instead:\n"
+                  f"    kiroshi seed --fixer {other} ...\n"
+                  f"  Or drop --lan to run a private loopback-only Fixer here.\n"
+                  f"  (Pass --force-second-fixer only if you deliberately want\n"
+                  f"  two isolated meshes on the same LAN.)",
+                  file=sys.stderr)
+            return 3
 
     # --- make the task's data roots visible to the (spawned) pool workers ---
     if read_root:
