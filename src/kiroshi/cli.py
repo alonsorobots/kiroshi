@@ -232,6 +232,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     # ---- ps (list registered kiroshi processes) ----
     pp = sub.add_parser("ps", help="List locally-registered Kiroshi processes.")
     pp.add_argument("--json", action="store_true", help="Emit raw JSON.")
+    pp.add_argument("--all", action="store_true",
+                    help="Include stale entries (crashed processes whose "
+                         "manifest is still on disk). Default filters to live PIDs.")
 
     # ---- stop (request graceful drain of a registered process) ----
     pstop = sub.add_parser("stop", help="Ask a registered Fixer/Runner to drain + exit.")
@@ -243,6 +246,23 @@ def main(argv: Optional[list[str]] = None) -> int:
     ptray = sub.add_parser("tray", help="Run the system-tray UI (needs the 'tray' extra).")
     ptray.add_argument("--fixer", default=cfg.fixer_url, help="Fixer base URL, or 'auto'.")
     ptray.add_argument("--token", default=None, help="Mesh auth token.")
+
+    # ---- firewall (Windows: manage inbound rules for TCP fixer + UDP discovery) ----
+    pfw = sub.add_parser(
+        "firewall",
+        help="Manage Windows Firewall rules for Kiroshi's two inbound ports "
+             "(idempotent; opens TCP fixer + UDP discovery from `kiroshi.local.toml`).",
+    )
+    pfw.add_argument("action", choices=["install", "status", "remove"],
+                     help="install/remove need admin; status is read-only.")
+    pfw.add_argument("--fixer-port", type=int, default=None,
+                     help=f"Override the TCP Fixer port (default: [fixer].port = {cfg.fixer_port}).")
+    pfw.add_argument("--discovery-port", type=int, default=None,
+                     help="Override the UDP discovery port (default: 8788 or "
+                          "KIROSHI_DISCOVERY_PORT env).")
+    pfw.add_argument("--remote-ip", default=None,
+                     help="Scope rules to this remote IP/CIDR. Default: auto-detected "
+                          "LAN /24 for defense in depth; pass 'any' to allow all.")
 
     # ---- install (one-command setup: fixer service + tray autostart) ----
     pins = sub.add_parser("install",
@@ -392,6 +412,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         return _cmd_stop(args)
     if args.cmd == "tray":
         return _cmd_tray(args)
+    if args.cmd == "firewall":
+        return _cmd_firewall(args)
     if args.cmd == "install":
         return _cmd_install(args)
     if args.cmd == "uninstall":
@@ -744,17 +766,18 @@ def _cmd_requeue(args) -> int:
 def _cmd_ps(args) -> int:
     from .processreg import list_registered
 
-    procs = list_registered()
+    procs = list_registered(include_stale=bool(getattr(args, "all", False)))
     if args.json:
         print(json.dumps(procs, indent=2))
         return 0
     if not procs:
         print("no registered Kiroshi processes on this machine.")
         return 0
-    print(f"{'ROLE':<7} {'PID':>7}  {'HOST':<16} LAUNCH COMMAND")
+    print(f"{'ST':<3} {'ROLE':<7} {'PID':>7}  {'HOST':<16} LAUNCH COMMAND")
     for p in procs:
-        print(f"{p.get('role',''):<7} {p.get('pid',''):>7}  {p.get('host',''):<16} "
-              f"{p.get('launch_command','')}")
+        state = "  " if p.get("_alive", True) else "!!"
+        print(f"{state:<3} {p.get('role',''):<7} {p.get('pid',''):>7}  "
+              f"{p.get('host',''):<16} {p.get('launch_command','')}")
     return 0
 
 
@@ -894,6 +917,89 @@ def _cmd_tray(args) -> int:
               f"Install the tray extra:  pip install kiroshi[tray]")
         return 2
     return run_tray(fixer=args.fixer, token=args.token)
+
+
+def _cmd_firewall(args) -> int:
+    """Manage the two inbound firewall rules Kiroshi's Fixer needs.
+
+    Reads current config to derive the desired ports so re-running always
+    matches ``kiroshi.local.toml``; cleans up stale ``Kiroshi *`` rules from
+    previous experiments in the same shot. Write actions require admin;
+    ``status`` is read-only.
+    """
+    if sys.platform != "win32":
+        print("[firewall] this command is Windows-only (uses netsh).",
+              file=sys.stderr)
+        return 2
+
+    from . import firewall as fw
+    from .discovery import discovery_port
+
+    cfg = load_config()
+    fixer_port = args.fixer_port or cfg.fixer_port
+    disc_port = args.discovery_port or discovery_port()
+    remote_ip = args.remote_ip
+    if remote_ip is None:
+        auto = fw.pick_lan_subnet()
+        remote_ip = auto or "any"
+        if auto:
+            print(f"[firewall] auto-detected LAN subnet: {auto}")
+        else:
+            print("[firewall] no private /24 detected — falling back to remote_ip=any. "
+                  "Pass --remote-ip <cidr> to pin.", file=sys.stderr)
+
+    rules = fw.plan_rules(fixer_port, disc_port, remote_ip=remote_ip)
+    existing = fw.list_kiroshi_rules()
+
+    if args.action == "status":
+        print(fw.format_status(rules, existing))
+        return 0
+
+    if args.action == "install":
+        print(f"[firewall] desired rules ({len(rules)}):")
+        for r in rules:
+            print(f"  - {r.name}: {r.protocol} {r.port} remote={r.remote_ip} profiles={r.profiles}")
+        stale = [n for n in existing
+                 if n not in {r.name for r in rules}]
+        if stale:
+            print(f"[firewall] stale drift to remove ({len(stale)}):")
+            for n in stale:
+                print(f"  - {n}")
+        if not fw.is_admin():
+            print("\n[firewall] NOT elevated — cannot modify firewall rules.\n"
+                  "  Copy-paste this to re-run under UAC (you'll see one prompt):\n"
+                  f"    {fw.elevated_install_hint('firewall install')}\n",
+                  file=sys.stderr)
+            return 2
+        res = fw.apply_rules(rules)
+        for n in res.removed:
+            print(f"[firewall] removed: {n}")
+        for n in res.added:
+            print(f"[firewall] added:   {n}")
+        for e in res.errors:
+            print(f"[firewall] ERROR:   {e}", file=sys.stderr)
+        return 0 if res.ok else 1
+
+    if args.action == "remove":
+        if not existing:
+            print("[firewall] no Kiroshi-* rules installed; nothing to remove.")
+            return 0
+        if not fw.is_admin():
+            print("\n[firewall] NOT elevated — cannot modify firewall rules.\n"
+                  "  Copy-paste this to re-run under UAC:\n"
+                  f"    {fw.elevated_install_hint('firewall remove')}\n",
+                  file=sys.stderr)
+            return 2
+        errs = 0
+        for n in existing:
+            if fw.delete_rule(n):
+                print(f"[firewall] removed: {n}")
+            else:
+                print(f"[firewall] ERROR removing {n}", file=sys.stderr)
+                errs += 1
+        return 0 if errs == 0 else 1
+
+    return 2
 
 
 def _cmd_nas(args) -> int:
@@ -1062,6 +1168,31 @@ def _cmd_install(args) -> int:
             print(f"[install] started service '{name}'.")
         except Exception:  # noqa: BLE001
             print(f"[install] could not auto-start '{name}' — run: nssm start {name}")
+
+    # 3. Firewall — best-effort, we already required admin above. Rules idempotent.
+    if ok:
+        try:
+            from . import firewall as fw
+            from .discovery import discovery_port
+
+            subnet = fw.pick_lan_subnet() or "any"
+            rules = fw.plan_rules(args.port, discovery_port(), remote_ip=subnet)
+            if fw.is_admin():
+                res = fw.apply_rules(rules)
+                for n in res.removed:
+                    print(f"[install] firewall: removed stale rule {n}")
+                for n in res.added:
+                    print(f"[install] firewall: opened {n}")
+                for e in res.errors:
+                    print(f"[install] firewall WARNING: {e}", file=sys.stderr)
+                if res.ok:
+                    print(f"[install] firewall: TCP {args.port} + UDP {discovery_port()} "
+                          f"open for {subnet}.")
+            else:
+                print("[install] firewall: skipping (not elevated). "
+                      "Run later:  kiroshi firewall install", file=sys.stderr)
+        except Exception as e:  # noqa: BLE001
+            print(f"[install] firewall step failed (non-fatal): {e}", file=sys.stderr)
     return 0 if ok else 1
 
 

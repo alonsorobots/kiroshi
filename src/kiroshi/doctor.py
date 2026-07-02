@@ -205,8 +205,11 @@ def _check_fixer(rep: _Report, fixer_url: Optional[str], auto: bool,
     if auto or not fixer_url:
         url = discover_fixer(timeout=6.0)
         if not url:
-            rep.line(_FAIL, "fixer discovery", "no beacon heard in 6s. Is a Fixer "
-                     "running on this LAN? (kiroshi fixer)")
+            rep.line(_FAIL, "fixer discovery",
+                     "no beacon heard in 6s. Either no Fixer is running on this "
+                     "LAN (start it with: kiroshi fixer), OR the Fixer host is "
+                     "silently dropping UDP :8788 at the firewall. On the Fixer "
+                     "host, run (elevated): kiroshi firewall install")
             return
         rep.line(_OK, "fixer discovery", f"beacon -> {url}")
         fixer_url = url
@@ -223,7 +226,13 @@ def _check_fixer(rep: _Report, fixer_url: Optional[str], auto: bool,
                  f"(pending={d.get('pending')} leased={d.get('leased')} "
                  f"done={d.get('done')} failed={d.get('failed')})")
     except Exception as e:  # noqa: BLE001
-        rep.line(_FAIL, "fixer reachable", f"{fixer_url}: {e}")
+        emsg = str(e)
+        hint = ""
+        if "timed out" in emsg.lower() or "connectiontimeout" in emsg.lower().replace(" ", ""):
+            hint = ("  hint: TCP timeout usually means Windows Firewall is dropping "
+                    "inbound on the Fixer host. On that host, run (elevated): "
+                    "kiroshi firewall install")
+        rep.line(_FAIL, "fixer reachable", f"{fixer_url}: {e}" + (f"\n{hint}" if hint else ""))
 
 
 def run_doctor(
