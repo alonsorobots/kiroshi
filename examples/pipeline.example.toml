@@ -1,0 +1,94 @@
+# Kiroshi declarative pipeline — example.
+#
+# A pipeline is STAGES connected by typed EDGES. Run it with:
+#     kiroshi pipeline run pipeline.example.toml
+#     kiroshi pipeline validate pipeline.example.toml   # print the DAG, no I/O
+#
+# This example models a common 4-stage ML dataset pipeline:
+#   reduce  (source; seeded externally)   heavy per-item transform
+#     --each-->      resample   (downsample each reduced item)
+#     --quorum:5000--> codebook (build a global quantizer from a corpus sample)
+#   resample --each--> encode   (quantize each item), GATED on the codebook
+#
+# Edge kinds:
+#   each        downstream item X unlocks the instant upstream item X is done
+#   quorum:k    barrier — run the downstream command once >= k upstream done
+#   all         barrier — run once every upstream item is done
+#   artifact    gate — downstream stays blocked until the named file(s) exist
+#
+# All host/path values below are PLACEHOLDERS — replace with your own. Fixer
+# URLs point at localhost here; a real deployment uses one Fixer per stage
+# (or one Fixer with several groups) reachable on your LAN.
+
+[pipeline]
+token   = "REPLACE_WITH_MESH_TOKEN"
+poll_s  = 60
+
+# ---- stages -------------------------------------------------------------
+# "reduce" is the SOURCE: seeded/served by its own Fixer+runner already. The
+# pipeline only OBSERVES its done set — it needs no template/command.
+[stages.reduce]
+fixer = "http://127.0.0.1:8800"
+group = "reduce"
+
+# a map stage: one gig per upstream item, shaped from a template.
+[stages.resample]
+fixer = "http://127.0.0.1:8801"
+group = "resample"
+task  = "mypkg.tasks.resample:run"
+label = "downsample each reduced item"
+job_id_template = "{clip}"
+[stages.resample.spec]
+src_path   = "{clip}"
+dst_path   = "resampled/{clip}"
+read_root  = "//NAS/pipeline/reduced"        # <- your stage-1 output share
+write_root = "//NAS/pipeline"
+
+# a BARRIER/reduce stage: no gigs — a command that builds a global artifact.
+# It runs on whatever host the coordinator runs on, so point the command at a
+# machine that can read the corpus fast (e.g. ssh to the storage host).
+[stages.codebook]
+fixer = "http://127.0.0.1:8800"              # co-located; only 'produces' matters
+group = "codebook"
+command = [
+  "ssh", "user@BUILD_HOST",
+  "python3 /opt/mypkg/build_codebook.py --from-dir /data/pipeline/reduced --out /data/codebooks/codebook.npz",
+]
+produces = ["/data/codebooks/codebook.npz"]
+
+[stages.encode]
+fixer = "http://127.0.0.1:8802"
+group = "encode"
+task  = "mypkg.tasks.encode:run"
+label = "quantize each item with the codebook"
+job_id_template = "{clip}"
+[stages.encode.spec]
+src_path   = "{clip}"
+dst_path   = "encoded/{clip}"
+read_root  = "//NAS/pipeline/resampled"
+write_root = "//NAS/pipeline"
+codebook_path = "/data/codebooks/codebook.npz"
+
+# ---- edges --------------------------------------------------------------
+[[edges]]
+from = "reduce"
+to   = "resample"
+kind = "each"
+
+[[edges]]
+from = "reduce"
+to   = "codebook"
+kind = "quorum"
+k    = 5000
+
+[[edges]]
+from = "resample"
+to   = "encode"
+kind = "each"
+
+# encode is gated: no encode gig runs until the codebook artifact exists.
+[[edges]]
+from = "codebook"
+to   = "encode"
+kind = "artifact"
+artifact = ["/data/codebooks/codebook.npz"]

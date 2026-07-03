@@ -19,6 +19,7 @@ import argparse
 import json
 import os
 import sys
+import time
 import uuid
 from typing import Optional
 
@@ -119,11 +120,25 @@ def main(argv: Optional[list[str]] = None) -> int:
         "remote",
         help="Launch a Runner on another machine over SSH (interpreter-aware, "
              "durable, no shell-quoting pitfalls).")
-    prem.add_argument("remote_cmd", choices=["probe", "join"],
-                      help="probe: preflight only (report what's missing on the "
-                           "remote). join: preflight + durable launch.")
-    prem.add_argument("host", help="SSH host (alias in ~/.ssh/config or user@host). "
-                                   "Matched to [hosts.<Host>] in kiroshi.local.toml.")
+    prem.add_argument("remote_cmd", choices=["probe", "join", "sync"],
+                      help="probe: preflight only. join: preflight + durable launch. "
+                           "sync: git-pull the tracked repos on every [hosts.*] node "
+                           "and restart their runners (use --dry-run first).")
+    prem.add_argument("host", nargs="?", default=None,
+                      help="SSH host (alias or user@host) matched to [hosts.<Host>]. "
+                           "Required for probe/join; for 'sync' omit to iterate all hosts.")
+    prem.add_argument("--dry-run", action="store_true",
+                      help="[sync] print the per-host command plan without executing.")
+    prem.add_argument("--repos", default=None,
+                      help="[sync] comma-separated remote paths to git-pull "
+                           "(default: the kiroshi checkout on each host). "
+                           "Ex: '/opt/kiroshi,/opt/myrepo'.")
+    prem.add_argument("--reinstall", action="store_true",
+                      help="[sync] run 'pip install -e .' after pull "
+                           "(needed if pyproject/entry-points changed). Default: no.")
+    prem.add_argument("--restart", action="store_true",
+                      help="[sync] signal runners to exit so the auto-restart "
+                           "wrapper picks up the new code. Default: no (report only).")
     prem.add_argument("--task", default=None, help="Task 'module:function' to run.")
     prem.add_argument("--fixer", default=None,
                       help="Fixer URL the remote should pull from "
@@ -219,6 +234,35 @@ def main(argv: Optional[list[str]] = None) -> int:
     pt.add_argument("--fixer", default=cfg.fixer_url, help="Fixer base URL, or 'auto'.")
     pt.add_argument("--token", default=None, help="Mesh auth token.")
 
+    # ---- pipeline (declarative multi-stage DAG with typed edges) ----
+    ppipe = sub.add_parser(
+        "pipeline",
+        help="Run a declarative multi-stage pipeline (typed dependency edges).")
+    ppipe_sub = ppipe.add_subparsers(dest="pipe_cmd", required=True)
+    ppr = ppipe_sub.add_parser("run", help="Run the pipeline coordinator loop.")
+    ppr.add_argument("spec", help="Path to the pipeline .toml spec.")
+    ppr.add_argument("--once", action="store_true",
+                     help="Apply edges a single time and exit (no loop).")
+    ppr.add_argument("--token", default=None, help="Mesh auth token override.")
+    ppv = ppipe_sub.add_parser("validate", help="Load + validate a spec, print the DAG.")
+    ppv.add_argument("spec", help="Path to the pipeline .toml spec.")
+
+    # ---- capabilities (machine-readable feature map for agents) ----
+    pcap = sub.add_parser(
+        "capabilities",
+        help="List Kiroshi capabilities (what to use for a given task).")
+    pcap.add_argument("--json", dest="as_json", action="store_true",
+                      help="Emit the capability list as JSON (for LLM agents / MCP).")
+
+    # ---- mcp (Model Context Protocol server; optional extra) ----
+    pmcp = sub.add_parser(
+        "mcp",
+        help="Run the MCP server (exposes Kiroshi to LLM agents; needs [mcp] extra).")
+    pmcp.add_argument("--fixer", default=cfg.fixer_url,
+                      help="Default Fixer URL for tool calls that don't pass one.")
+    pmcp.add_argument("--token", default=None,
+                      help="Default mesh token for tool calls that don't pass one.")
+
     # ---- requeue ----
     pq = sub.add_parser("requeue", help="Return failed/stuck gigs to pending.")
     pq.add_argument("--fixer", default=cfg.fixer_url, help="Fixer base URL, or 'auto'.")
@@ -289,10 +333,17 @@ def main(argv: Optional[list[str]] = None) -> int:
                    help="Remove the Kiroshi Fixer service + tray autostart entry.")
 
     # ---- autostart (manage just the tray login-autostart) ----
-    pau = sub.add_parser("autostart",
-                         help="Manage tray auto-start on login (HKCU\\Run).")
+    pau = sub.add_parser(
+        "autostart",
+        help="Manage tray auto-start on login (HKCU\\Run or Scheduled Task).")
     pau.add_argument("action", choices=["on", "off", "status"],
                      help="on=register, off=unregister, status=show current.")
+    pau.add_argument(
+        "--mode", choices=["auto", "run", "scheduled"], default="auto",
+        help="'run' = HKCU\\...\\Run (logon-only, legacy). "
+             "'scheduled' = Task Scheduler with restart-on-failure "
+             "(recommended; self-heals within ~1 min of a crash). "
+             "'auto' (default) = scheduled on Win10+, falls back to run.")
 
     # ---- nas (storage topology tools) ----
     pnas = sub.add_parser("nas",
@@ -401,6 +452,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.cmd == "join":
         return _cmd_join(args)
     if args.cmd == "remote":
+        if getattr(args, "remote_cmd", None) == "sync":
+            return _cmd_remote_sync(args)
+        # sync doesn't require a host; probe/join do.
+        if not getattr(args, "host", None):
+            print("[remote] 'probe' and 'join' require a host argument.",
+                  file=sys.stderr)
+            return 2
         from .remote import run_remote
         return run_remote(args)
     if args.cmd == "fixer":
@@ -429,6 +487,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         return _cmd_uninstall(args)
     if args.cmd == "autostart":
         return _cmd_autostart(args)
+    if args.cmd == "pipeline":
+        return _cmd_pipeline(args)
+    if args.cmd == "capabilities":
+        return _cmd_capabilities(args)
+    if args.cmd == "mcp":
+        return _cmd_mcp(args)
     if args.cmd == "nas":
         return _cmd_nas(args)
     if args.cmd == "service":
@@ -777,6 +841,93 @@ def _cmd_status(args) -> int:
     return 0
 
 
+def _cmd_pipeline(args) -> int:
+    """Declarative multi-stage pipeline. Replaces ad-hoc cascade-seeder glue
+    with typed dependency edges (each / quorum / all / artifact)."""
+    from .pipeline import Pipeline, PipelineCoordinator
+
+    pipe = Pipeline.from_toml(args.spec)
+    if getattr(args, "token", None):
+        pipe.token = args.token
+
+    if args.pipe_cmd == "validate":
+        print(f"pipeline: {len(pipe.stages)} stages, {len(pipe.edges)} edges, "
+              f"poll={pipe.poll_s}s")
+        for name, s in pipe.stages.items():
+            extra = f" command={'yes' if s.command else 'no'}" if s.command else ""
+            print(f"  stage {name:12s} fixer={s.fixer} group={s.group}{extra}")
+        for e in pipe.edges:
+            tag = e.kind + (f":{e.k}" if e.kind == "quorum" else "")
+            gate = f" gate={e.artifact}" if e.artifact else ""
+            print(f"  edge  {e.upstream:12s} --{tag}--> {e.downstream}{gate}")
+        return 0
+
+    def log(m: str) -> None:
+        print(f"{time.strftime('%H:%M:%S')} {m}", flush=True)
+
+    coord = PipelineCoordinator(pipe, log=log)
+    if args.once:
+        coord.tick()
+        return 0
+    coord.run()
+    return 0
+
+
+def _cmd_remote_sync(args) -> int:
+    """kiroshi remote sync — git-pull tracked repos on every [hosts.*] node.
+    Dry-run by default is enforced at the operator level (must pass --dry-run
+    or explicitly opt into execution). The planner is unit-testable; this
+    handler is just a thin executor."""
+    from . import remote_sync
+
+    cfg = load_config()
+    hosts = cfg.hosts or {}
+    if not hosts:
+        print("[sync] no [hosts.*] in kiroshi config — nothing to sync.",
+              file=sys.stderr)
+        return 2
+
+    repos = tuple((args.repos or "").split(",")) if args.repos else remote_sync.DEFAULT_REPOS
+    repos = tuple(r.strip() for r in repos if r.strip())
+
+    plans = remote_sync.plan_sync(
+        hosts=hosts, repos=repos,
+        reinstall=args.reinstall, restart=args.restart,
+        local_hostnames=remote_sync.local_hostnames(),
+    )
+
+    # Dry-run: print the plan and stop. This is the intended first invocation
+    # so an operator can eyeball the exact commands before we ssh anywhere.
+    if args.dry_run:
+        print(remote_sync.render_plan(plans))
+        print()
+        print("[sync] DRY RUN — nothing was executed. Re-run without --dry-run to apply.")
+        return 0
+
+    failures = remote_sync.execute_plan(plans, dry_run=False)
+    if failures:
+        print(f"[sync] completed with {failures} failed step(s).", file=sys.stderr)
+        return 1
+    print("[sync] all hosts synced OK.")
+    return 0
+
+
+def _cmd_mcp(args) -> int:
+    """Run the MCP server on stdio so an LLM client (Claude Desktop, Cursor,
+    etc.) can enumerate + call Kiroshi tools without shelling out to the CLI.
+    Optional extra: 'pip install kiroshi[mcp]'."""
+    from . import mcp_server
+    return mcp_server.run_stdio(default_fixer=args.fixer, default_token=args.token)
+
+
+def _cmd_capabilities(args) -> int:
+    """Print the machine-readable capability map. Consumed by LLM agents +
+    the planned MCP server; ``--json`` emits the structured form."""
+    from . import capabilities as _cap
+    print(_cap.as_json() if getattr(args, "as_json", False) else _cap.as_table())
+    return 0
+
+
 def _cmd_requeue(args) -> int:
     import requests
 
@@ -1097,25 +1248,59 @@ def _cmd_nas(args) -> int:
 
 
 def _cmd_autostart(args) -> int:
+    """Manage tray autostart. Two mechanisms:
+      * run       — HKCU\\...\\Run. Logon-only; dies-stays-dead until next logon.
+      * scheduled — Task Scheduler with restart-on-failure. Self-heals within
+                    ~1 min after a crash. Recommended default.
+    ``--mode auto`` picks scheduled on Windows and falls back to run if that
+    path fails (unusual — Task Scheduler is available on every supported
+    Windows). ``status`` prints whichever mechanism is registered (both, if
+    both, so an operator can see + clean any stale duplicate)."""
     from . import autostart
 
+    mode = getattr(args, "mode", "auto")
+
     if args.action == "on":
+        if mode in ("scheduled", "auto"):
+            outcome = autostart.ensure_scheduled()
+            if outcome != "failed":
+                print(f"[autostart] scheduled: {outcome} — tray runs at logon "
+                      f"AND restarts within ~1 min if it dies.")
+                return 0
+            if mode == "scheduled":
+                print("[autostart] scheduled: FAILED (schtasks error).", file=sys.stderr)
+                return 1
+            # auto -> fall through to Run-key
+            print("[autostart] scheduled failed, falling back to HKCU\\Run.",
+                  file=sys.stderr)
         outcome = autostart.ensure_registered()
         if outcome == "failed":
-            print("[autostart] FAILED to write HKCU\\Run (registry error).", file=sys.stderr)
+            print("[autostart] run: FAILED to write HKCU\\Run.", file=sys.stderr)
             return 1
-        print(f"[autostart] {outcome} — tray will launch on login.")
+        print(f"[autostart] run: {outcome} — tray will launch on login.")
         return 0
+
     if args.action == "off":
-        outcome = autostart.unregister()
-        print(f"[autostart] {outcome}.")
+        outs = []
+        if mode in ("scheduled", "auto"):
+            outs.append(("scheduled", autostart.unregister_scheduled()))
+        if mode in ("run", "auto"):
+            outs.append(("run", autostart.unregister()))
+        for tag, outcome in outs:
+            print(f"[autostart] {tag}: {outcome}.")
         return 0
-    # status
+
+    # status — always show both so a stale HKCU\\Run entry doesn't hide behind
+    # a newer scheduled task.
     reg = autostart.current_registration()
-    if reg:
-        print(f"[autostart] registered: {reg}")
-    else:
+    sch = autostart.current_scheduled()
+    if reg is None and sch is None:
         print("[autostart] not registered (tray won't auto-start on login).")
+        return 0
+    if sch:
+        print(f"[autostart] scheduled: {sch} (restart-on-failure enabled)")
+    if reg:
+        print(f"[autostart] run: {reg}")
     return 0
 
 

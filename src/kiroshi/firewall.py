@@ -54,7 +54,7 @@ class FirewallRule:
     protocol: str  # "TCP" | "UDP"
     port: int
     profiles: str = "private,domain"
-    remote_ip: str = "any"  # e.g. "192.168.50.0/24" or "any"
+    remote_ip: str = "any"  # e.g. "192.168.1.0/24" or "any"
 
     def netsh_add_args(self) -> list[str]:
         return [
@@ -109,7 +109,7 @@ def pick_lan_subnet(ips: Optional[list[str]] = None) -> Optional[str]:
     """Return an RFC1918 ``/24`` covering the primary LAN NIC, or ``None``.
 
     Prefers the IP on this host's default route (via :func:`primary_route_ip`)
-    so a machine with both a real ethernet (``192.168.50.166``) and a WSL/
+    so a machine with both a real ethernet (``192.168.1.166``) and a WSL/
     Hyper-V virtual switch (``172.25.96.0/24``) picks the ethernet subnet
     instead of the useless virtual one. Falls back to scanning
     ``getaddrinfo(hostname)`` when the socket probe is unavailable

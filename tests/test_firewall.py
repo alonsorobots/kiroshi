@@ -67,13 +67,13 @@ def _extract_name(argv: list[str]) -> str:
 
 # ---------------------------------------------------------- planning tests
 def test_plan_rules_yields_exactly_two_rules_with_expected_ports():
-    rules = fw.plan_rules(8787, 8788, remote_ip="192.168.50.0/24")
+    rules = fw.plan_rules(8787, 8788, remote_ip="192.168.1.0/24")
     assert len(rules) == 2
     tcp = next(r for r in rules if r.protocol == "TCP")
     udp = next(r for r in rules if r.protocol == "UDP")
     assert tcp.name == fw.FIXER_RULE_NAME
     assert tcp.port == 8787
-    assert tcp.remote_ip == "192.168.50.0/24"
+    assert tcp.remote_ip == "192.168.1.0/24"
     assert udp.name == fw.DISCOVERY_RULE_NAME
     assert udp.port == 8788
 
@@ -98,7 +98,7 @@ def test_firewall_rule_netsh_add_args_contain_all_required_params():
 
 # ------------------------------------------------- subnet detection tests
 def test_pick_lan_subnet_returns_slash24_for_rfc1918_ip():
-    assert fw.pick_lan_subnet(["192.168.50.166"]) == "192.168.50.0/24"
+    assert fw.pick_lan_subnet(["192.168.1.166"]) == "192.168.1.0/24"
     assert fw.pick_lan_subnet(["10.0.5.7"]) == "10.0.5.0/24"
     assert fw.pick_lan_subnet(["172.16.100.1"]) == "172.16.100.0/24"
 
@@ -115,8 +115,8 @@ def test_pick_lan_subnet_prefers_real_lan_over_wsl_virtual_switch():
     """On a WSL-enabled Windows box, the WSL bridge shows up on 172.25.x.x
     while the real LAN NIC is on 192.168.x.x. Never pick the WSL subnet if a
     real LAN address exists."""
-    assert fw.pick_lan_subnet(["172.25.96.1", "192.168.50.166"]) \
-        == "192.168.50.0/24"
+    assert fw.pick_lan_subnet(["172.25.96.1", "192.168.1.166"]) \
+        == "192.168.1.0/24"
 
 
 def test_pick_lan_subnet_falls_back_to_virtual_range_if_no_real_lan():
@@ -137,7 +137,7 @@ def test_list_kiroshi_rules_filters_by_prefix_and_dedups():
 
 def test_apply_rules_creates_desired_rules_when_none_exist():
     fake = _FakeNetsh()
-    rules = fw.plan_rules(8787, 8788, remote_ip="192.168.50.0/24")
+    rules = fw.plan_rules(8787, 8788, remote_ip="192.168.1.0/24")
     res = fw.apply_rules(rules, runner=fake)
     assert res.ok
     assert set(res.added) == {fw.FIXER_RULE_NAME, fw.DISCOVERY_RULE_NAME}
@@ -195,7 +195,7 @@ def test_apply_rules_reports_errors_on_failed_add():
 
 
 def test_format_status_flags_missing_and_stale_rules():
-    rules = fw.plan_rules(8787, 8788, remote_ip="192.168.50.0/24")
+    rules = fw.plan_rules(8787, 8788, remote_ip="192.168.1.0/24")
     existing = [fw.FIXER_RULE_NAME, "Kiroshi Fixer 8800"]  # missing UDP, has stale
     out = fw.format_status(rules, existing)
     assert "OK " in out and fw.FIXER_RULE_NAME in out

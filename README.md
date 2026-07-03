@@ -29,7 +29,42 @@ or a Dask scheduler. Kiroshi is the missing middle:
 pip install -e .            # from source
 pip install -e ".[fast]"    # + orjson for faster JSON
 pip install -e ".[tray]"    # + system-tray UI (pystray + pillow)
+pip install -e ".[mcp]"     # + expose Kiroshi to LLM agents via MCP
 ```
+
+## What Kiroshi gives you
+
+- **Zero-broker work-stealing mesh** — a Fixer (coordinator + SQLite queue +
+  dashboard) hands gigs to Runners that pull over HTTP. Fast machines pull more.
+- **Resumable & self-healing** — output-existence is the source of truth; dead
+  runners' leases are reclaimed; kill/restart any part and it picks up where it
+  left off.
+- **Storage-topology aware** — per-disk read/write concurrency budgets so a
+  sharded NAS isn't over-saturated (`kiroshi nas probe`/`assess`/`benchmark`).
+- **Declarative multi-stage pipelines** — chain dependent stages with typed
+  edges (`each` / `quorum` / `all` / `artifact`) instead of hand-rolled glue
+  (`kiroshi pipeline`; see [`docs/PIPELINE.md`](docs/PIPELINE.md)).
+- **Resource governor** — mesh-wide slot budgeting for shared resources
+  (per-disk reads, parity writes, GPU/download budgets) from inside a task.
+- **Live advisories** — the Fixer emits structured warnings (NAS thrash,
+  throughput collapse, failure spikes) over `/advisories`.
+- **Operator UX** — a self-restarting system-tray lens (`kiroshi tray` +
+  `kiroshi autostart`), firewall/service installers, and `kiroshi doctor`
+  preflight.
+- **Agent-friendly** — a task-indexed [`AGENTS.md`](AGENTS.md),
+  `kiroshi capabilities --json`, and an optional MCP server
+  (`kiroshi mcp`) that exposes all of the above as typed tools to LLM clients.
+
+### Learn it fast
+
+- [`AGENTS.md`](AGENTS.md) — the task-indexed capability guide (also machine-
+  readable via `kiroshi capabilities --json`).
+- [`examples/hello_mesh.md`](examples/hello_mesh.md) — 5-minute walkthrough:
+  one-shot, ad-hoc LAN, and durable production.
+- [`examples/task_minimal.py`](examples/task_minimal.py) — idiomatic task
+  template (the `run`/`enumerate_gigs` ABI, crash-safe writes, idempotent skip).
+- [`examples/pipeline.example.toml`](examples/pipeline.example.toml) — a
+  4-stage pipeline with typed dependency edges.
 
 ## Quickstart — one command
 

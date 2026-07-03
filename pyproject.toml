@@ -34,6 +34,10 @@ tray = ["pystray>=0.19", "pillow>=10.0"]
 # explicit credentials, bypassing the Windows redirector (works over SSH /
 # services, where mapped drives + cmdkey cannot). See kiroshi/kfs.py.
 smb = ["smbprotocol>=1.12"]
+# Model Context Protocol server (`kiroshi mcp`) — exposes Kiroshi's capabilities
+# as typed tools/resources to MCP-compatible LLM agents. Optional so the core
+# install has no extra weight for headless nodes.
+mcp = ["mcp>=1.0"]
 dev = ["pytest>=8.0", "ruff>=0.4", "numpy>=1.24", "httpx>=0.27"]
 
 [project.scripts]

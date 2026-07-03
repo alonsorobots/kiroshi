@@ -30,9 +30,9 @@ def test_check_singleton_fixer_is_a_thin_wrapper_over_discover_fixer():
     from kiroshi import discovery
 
     with patch.object(discovery, "discover_fixer",
-                      return_value="http://192.168.50.166:8787") as m:
+                      return_value="http://192.168.1.166:8787") as m:
         got = discovery.check_singleton_fixer(timeout=1.5)
-    assert got == "http://192.168.50.166:8787"
+    assert got == "http://192.168.1.166:8787"
     m.assert_called_once()
     assert m.call_args.kwargs.get("timeout") == 1.5
 
@@ -90,12 +90,12 @@ def test_cmd_fixer_refuses_when_another_fixer_is_discoverable(capsys):
         _stub_fixer_deps(stack)
         stack.enter_context(patch(
             "kiroshi.discovery.check_singleton_fixer",
-            return_value="http://192.168.50.166:8787"))
+            return_value="http://192.168.1.166:8787"))
         rc = cli._cmd_fixer(args)
     assert rc == 3
     err = capsys.readouterr().err
     assert "REFUSING" in err
-    assert "http://192.168.50.166:8787" in err
+    assert "http://192.168.1.166:8787" in err
     assert "--force-second-fixer" in err
 
 
@@ -150,7 +150,7 @@ def test_run_job_lan_refuses_when_another_fixer_discoverable(capsys, tmp_path):
     from kiroshi import runjob
 
     with patch("kiroshi.discovery.check_singleton_fixer",
-               return_value="http://192.168.50.166:8787"):
+               return_value="http://192.168.1.166:8787"):
         rc = runjob.run_job(
             task_ref="examples.sleep_task:run",
             items=None, jobs=None,
@@ -161,7 +161,7 @@ def test_run_job_lan_refuses_when_another_fixer_discoverable(capsys, tmp_path):
     assert rc == 3
     err = capsys.readouterr().err
     assert "REFUSING --lan" in err
-    assert "192.168.50.166:8787" in err
+    assert "192.168.1.166:8787" in err
     assert "seed --fixer" in err  # actionable hint
 
 

@@ -139,7 +139,7 @@ def _fingerprint_local(syspath: list) -> dict:
     return fp
 
 
-def _lan_ip(hint: str = "192.168.50.69") -> str:
+def _lan_ip(hint: str = "192.168.1.1") -> str:
     """Best-effort primary LAN IPv4 of this machine (the Fixer host)."""
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
