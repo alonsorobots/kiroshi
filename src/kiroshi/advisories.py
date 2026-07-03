@@ -651,6 +651,7 @@ class AdvisoryDetector:
             detail=verdict.detail,
             suggested_action=verdict.hint,
             dashboard_url=self._dashboard_url(None),
+            fingerprint=fp,   # MUST match the fp used in _sustained/_resolve
         )
         self._active_bottleneck_fp = fp
         return [a for a in self._adv.list_active() if a.code == code]
