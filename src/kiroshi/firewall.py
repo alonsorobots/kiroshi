@@ -36,7 +36,7 @@ import socket
 import subprocess
 import sys
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from typing import Callable, Iterable, Optional
 
 RULE_PREFIX = "Kiroshi "
 FIXER_RULE_NAME = "Kiroshi Fixer HTTP"
@@ -154,16 +154,35 @@ def pick_lan_subnet(ips: Optional[list[str]] = None) -> Optional[str]:
 
 # ---------------------------------------------------------------- planning
 def plan_rules(
-    fixer_port: int,
+    fixer_ports: "int | Iterable[int]",
     discovery_port: int = 8788,
     remote_ip: str = "any",
 ) -> list[FirewallRule]:
-    """The desired set of Kiroshi-managed rules. Pure function; drives tests."""
-    return [
-        FirewallRule(FIXER_RULE_NAME, "TCP", int(fixer_port), remote_ip=remote_ip),
-        FirewallRule(DISCOVERY_RULE_NAME, "UDP", int(discovery_port),
-                     remote_ip=remote_ip),
-    ]
+    """The desired set of Kiroshi-managed rules. Pure function; drives tests.
+
+    ``fixer_ports`` may be a single port (int) or many (iterable). Passing the
+    full set of ports the mesh uses — e.g. the persistent service plus every
+    campaign Fixer (8787, 8800, 8801, 8802) — opens them all in one idempotent
+    shot, so you never silently close one campaign's port by opening another's.
+
+    Naming: a single port keeps the historical unsuffixed ``FIXER_RULE_NAME``
+    (backward compatible); multiple ports get per-port names
+    (``Kiroshi Fixer HTTP 8800``) so each is tracked + drift-cleaned
+    independently.
+    """
+    if isinstance(fixer_ports, int):
+        ports = [int(fixer_ports)]
+    else:
+        # dedup, preserve order
+        ports = list(dict.fromkeys(int(p) for p in fixer_ports))
+    single = len(ports) == 1
+    rules: list[FirewallRule] = []
+    for p in ports:
+        name = FIXER_RULE_NAME if single else f"{FIXER_RULE_NAME} {p}"
+        rules.append(FirewallRule(name, "TCP", p, remote_ip=remote_ip))
+    rules.append(FirewallRule(DISCOVERY_RULE_NAME, "UDP", int(discovery_port),
+                              remote_ip=remote_ip))
+    return rules
 
 
 # ------------------------------------------------------------------- admin

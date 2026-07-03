@@ -83,6 +83,34 @@ def test_plan_rules_defaults_remote_ip_any():
     assert all(r.remote_ip == "any" for r in rules)
 
 
+def test_plan_rules_multi_port_yields_per_port_suffixed_rules():
+    rules = fw.plan_rules([8787, 8800, 8801], 8788, remote_ip="192.168.1.0/24")
+    tcp = [r for r in rules if r.protocol == "TCP"]
+    udp = [r for r in rules if r.protocol == "UDP"]
+    assert len(tcp) == 3 and len(udp) == 1
+    names = {r.name: r.port for r in tcp}
+    assert names == {
+        f"{fw.FIXER_RULE_NAME} 8787": 8787,
+        f"{fw.FIXER_RULE_NAME} 8800": 8800,
+        f"{fw.FIXER_RULE_NAME} 8801": 8801,
+    }
+    assert all(r.remote_ip == "192.168.1.0/24" for r in rules)
+
+
+def test_plan_rules_multi_port_dedups_and_preserves_order():
+    rules = fw.plan_rules([8800, 8800, 8787], 8788)
+    tcp_ports = [r.port for r in rules if r.protocol == "TCP"]
+    assert tcp_ports == [8800, 8787]
+
+
+def test_plan_rules_single_element_list_keeps_unsuffixed_name():
+    # A one-element iterable must behave like the scalar form (back-compat).
+    rules = fw.plan_rules([8787], 8788)
+    tcp = next(r for r in rules if r.protocol == "TCP")
+    assert tcp.name == fw.FIXER_RULE_NAME
+    assert tcp.port == 8787
+
+
 def test_firewall_rule_netsh_add_args_contain_all_required_params():
     r = fw.FirewallRule("Kiroshi X", "TCP", 8787, remote_ip="10.0.0.0/24")
     args = r.netsh_add_args()

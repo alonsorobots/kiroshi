@@ -376,8 +376,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     pfw.add_argument("action", choices=["install", "status", "remove"],
                      help="install/remove need admin; status is read-only.")
-    pfw.add_argument("--fixer-port", type=int, default=None,
-                     help=f"Override the TCP Fixer port (default: [fixer].port = {cfg.fixer_port}).")
+    pfw.add_argument("--fixer-port", type=int, default=None, action="append",
+                     help="Override the TCP Fixer port(s) to open (repeatable). "
+                          f"Default: [fixer].ports or [fixer].port = {cfg.fixer_port}.")
     pfw.add_argument("--discovery-port", type=int, default=None,
                      help="Override the UDP discovery port (default: 8788 or "
                           "KIROSHI_DISCOVERY_PORT env).")
@@ -1403,7 +1404,7 @@ def _cmd_firewall(args) -> int:
     from .discovery import discovery_port
 
     cfg = load_config()
-    fixer_port = args.fixer_port or cfg.fixer_port
+    fixer_ports = args.fixer_port or cfg.fixer_ports or [cfg.fixer_port]
     disc_port = args.discovery_port or discovery_port()
     remote_ip = args.remote_ip
     if remote_ip is None:
@@ -1415,7 +1416,8 @@ def _cmd_firewall(args) -> int:
             print("[firewall] no private /24 detected — falling back to remote_ip=any. "
                   "Pass --remote-ip <cidr> to pin.", file=sys.stderr)
 
-    rules = fw.plan_rules(fixer_port, disc_port, remote_ip=remote_ip)
+    print(f"[firewall] fixer TCP ports: {', '.join(str(p) for p in fixer_ports)}")
+    rules = fw.plan_rules(fixer_ports, disc_port, remote_ip=remote_ip)
     existing = fw.list_kiroshi_rules()
 
     if args.action == "status":
