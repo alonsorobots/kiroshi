@@ -282,6 +282,74 @@ def build_server(default_fixer: Optional[str] = None,
         return {"recommended_concurrency": rec, "bias": bias,
                 "peak_mbps": peak_mbps, "peak_at_concurrency": peak_conc}
 
+    # ---- Process management tools (local-host only) ------------------
+    # These read the local process registry (``processreg``), NOT the Fixer
+    # HTTP API. They are only meaningful when the MCP server is co-located
+    # with the Kiroshi processes you want to inspect/stop. If you're driving
+    # a remote Fixer from your laptop, these describe YOUR laptop's processes.
+
+    @app.tool(description="Return failed/stuck gigs to pending (HTTP /requeue). "
+                          "States default to ['failed']; set reset_attempts=True "
+                          "to clear the retry counter.")
+    def requeue(states: list[str] = ["failed"], reset_attempts: bool = True,
+                fixer: Optional[str] = None,
+                token: Optional[str] = None) -> dict:
+        return _post(_fx(fixer), "/requeue", _tk(token),
+                     {"states": states, "reset_attempts": reset_attempts})
+
+    @app.tool(description="List Kiroshi processes registered ON THIS HOST "
+                          "(local only — reads the process manifest, not the "
+                          "Fixer API). Set include_stale=True to see crashed "
+                          "processes whose manifest file is still on disk.")
+    def ps(include_stale: bool = False) -> list[dict]:
+        from .processreg import list_registered
+        return list_registered(include_stale=include_stale)
+
+    @app.tool(description="Ask a LOCAL registered Fixer/Runner to drain+exit "
+                          "(local host only). Pass role ('fixer'/'runner') or "
+                          "pid. If multiple match and neither pid nor all=True "
+                          "is given, returns the list without stopping anything "
+                          "(safety guard against accidental mass-stop).")
+    def stop(role: Optional[str] = None, pid: Optional[int] = None,
+             all: bool = False) -> dict:
+        return _stop_impl(role, pid, all)
+
+    # keep the tool function body thin so the logic is unit-testable without
+    # needing to go through FastMCP's async tool-dispatch layer.
+
+
+def _stop_impl(role: Optional[str] = None, pid: Optional[int] = None,
+               all: bool = False) -> dict:
+    """Stop logic, extracted for direct unit testing.
+
+    Mirrors the CLI ``kiroshi stop`` safety guard: if multiple processes match
+    and neither ``pid`` nor ``all=True`` is given, returns an ambiguous result
+    WITHOUT stopping anything.
+    """
+    from .processreg import list_registered, request_stop
+    procs = list_registered()
+    targets = []
+    for p in procs:
+        if role and p.get("role") != role:
+            continue
+        if pid is not None and p.get("pid") != pid:
+            continue
+        targets.append(p)
+    if not targets:
+        return {"stopped": 0, "message": "no matching registered processes"}
+    if len(targets) > 1 and not all and pid is None:
+        return {"stopped": 0, "ambiguous": True,
+                "message": f"{len(targets)} processes match; "
+                           f"pass all=True or pid=<N> to confirm.",
+                "matches": [{"role": p.get("role"), "pid": p.get("pid"),
+                             "launch_command": p.get("launch_command", "")}
+                            for p in targets]}
+    stopped = 0
+    for p in targets:
+        if request_stop(p.get("role", ""), int(p.get("pid", 0))):
+            stopped += 1
+    return {"stopped": stopped}
+
     return app
 
 

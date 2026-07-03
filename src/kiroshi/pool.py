@@ -61,6 +61,26 @@ _GC_BETWEEN_TASKS = False
 
 def _init_worker(task_ref: str, extra_syspath: list[str]) -> None:
     global _TASK_FN
+    # Detach inherited stdout/stderr: spawn workers inherit the parent's handles,
+    # which may be a pipe (scheduled task / WMI) with no reader. Once the OS pipe
+    # buffer fills, the worker's print()/traceback writes block at the C level
+    # and the worker hangs silently. Redirect to devnull so worker output never
+    # blocks; the parent's _Tee already captures everything to a log file.
+    #
+    # CRITICAL: under a windowless parent (pythonw / scheduled task / service),
+    # spawned multiprocessing workers get sys.stdout = None (Python bpo-706263).
+    # Calling .isatty() on None raises AttributeError and kills every worker —
+    # so guard with `is not None` before any method call.
+    if sys.stdout is not None and not sys.stdout.isatty():
+        try:
+            sys.stdout = open(os.devnull, "w")
+        except OSError:
+            pass
+    if sys.stderr is not None and not sys.stderr.isatty():
+        try:
+            sys.stderr = open(os.devnull, "w")
+        except OSError:
+            pass
     for p in extra_syspath:
         if p and p not in sys.path:
             sys.path.insert(0, p)

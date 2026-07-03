@@ -53,7 +53,8 @@ def test_build_server_registers_expected_tools():
     # is still meaningful — building the server didn't raise — so accept that.
     if tool_names:
         must = {"status", "list_advisories", "seed_gigs", "export_metrics",
-                "validate_pipeline", "tick_pipeline", "search_jobs"}
+                "validate_pipeline", "tick_pipeline", "search_jobs",
+                "requeue", "ps", "stop"}
         missing = must - tool_names
         assert not missing, f"MCP server missing pillar tools: {missing}"
 

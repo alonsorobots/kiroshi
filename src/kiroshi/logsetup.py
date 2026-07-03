@@ -103,7 +103,19 @@ def _rotate(path: Path) -> None:
 
 
 def tee_process_output(role: str, host: Optional[str] = None) -> Optional[str]:
-    """Begin mirroring stdout+stderr to a per-process log file. Returns its path."""
+    """Begin mirroring stdout+stderr to a per-process log file. Returns its path.
+
+    When the process is launched **headless** (scheduled task, service, WMI — no
+    console / the inherited stdout is a pipe nobody reads), the OS pipe buffer
+    fills after ~4KB of output and the next ``write()`` **blocks at the C level**
+    — Python's try/except never fires because the call never returns. The runner
+    then hangs silently: heartbeat alive, zero gigs complete.
+
+    Fix: if the inherited stdout is not a TTY, drop the console side entirely
+    and write **only** to the log file. The log file is unbuffered-with-line-
+    buffering so nothing fills up, and the per-process log path is recorded in
+    the process registry for the tray / ``kiroshi ps`` to find.
+    """
     global _current_log_path
     host = host or socket.gethostname()
     safe_host = "".join(c if c.isalnum() or c in "-_" else "_" for c in host)
@@ -113,7 +125,14 @@ def tee_process_output(role: str, host: Optional[str] = None) -> Optional[str]:
         logfile = open(path, "a", encoding="utf-8", buffering=1)
     except OSError:
         return None
-    sys.stdout = _Tee(sys.stdout, logfile)  # type: ignore[assignment]
-    sys.stderr = _Tee(sys.stderr, logfile)  # type: ignore[assignment]
+    # Headless detection: if stdout is not a TTY (or is None — happens under
+    # pythonw / scheduled tasks where spawned processes get sys.stdout=None),
+    # the inherited handle is either a pipe nobody reads or absent entirely.
+    # A pipe with no reader blocks on write once its buffer fills; None has no
+    # .isatty() at all. In both cases, write ONLY to the log file.
+    _console_out = sys.stdout if (sys.stdout is not None and sys.stdout.isatty()) else None
+    _console_err = sys.stderr if (sys.stderr is not None and sys.stderr.isatty()) else None
+    sys.stdout = _Tee(_console_out, logfile)  # type: ignore[assignment]
+    sys.stderr = _Tee(_console_err, logfile)  # type: ignore[assignment]
     _current_log_path = str(path)
     return _current_log_path

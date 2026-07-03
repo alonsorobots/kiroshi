@@ -80,6 +80,32 @@ def disk_concurrency_map(disks: list[DiskConfig]) -> dict[str, int]:
     return {d.id: d.effective_concurrency for d in disks if d.id}
 
 
+def validate_disks(disks: list[DiskConfig]) -> list[str]:
+    """Return human-readable warnings for likely-misconfigured disk topologies.
+
+    Called at fixer boot (non-fatal) so a misconfiguration surfaces at startup
+    instead of as 129k cryptic runtime ``KIROSHI_READ_ROOT is not set`` errors.
+
+    The key case: a disk with ``match=""`` routes NOTHING (``match_disk`` returns
+    ``False`` for empty match — deliberately, so an unruled disk can't shadow
+    properly-routed ones by iteration order). A single-pool topology with an
+    empty match almost certainly wanted ``match="*"``.
+    """
+    warns: list[str] = []
+    for d in disks:
+        m = (d.match or "").strip()
+        if not m:
+            if len(disks) == 1:
+                warns.append(
+                    f"disk '{d.id}': empty match rule routes NOTHING. A single-pool "
+                    f"topology almost certainly wants match='*'.")
+            else:
+                warns.append(
+                    f"disk '{d.id}': empty match rule is inert (routes nothing). "
+                    f"Intentional placeholders are fine; otherwise set match='*'.")
+    return warns
+
+
 def has_parity(disks: list[DiskConfig]) -> bool:
     """True if any disk in the topology is parity-protected (triggers the global
     write semaphore). On a non-parity setup (all NVMe/SSD, or a RAID0 stripe),
@@ -151,10 +177,24 @@ def inject_roots(gigs: list[dict[str, Any]], disks: list[DiskConfig]) -> None:
     and writes to the cached share, without knowing the topology. In-place on the
     freshly-loaded lease copy (the stored spec is untouched). Inert if the gig has
     no disk or the disk declares no roots — the task falls back to the env roots.
+
+    If a gig arrives with ``disk=None`` (e.g. seeded under a misconfigured topology
+    whose match rule was later fixed), re-derive the disk on the fly so a config
+    fix takes effect without wiping + re-seeding the entire DB. Gigs that were
+    *intentionally* inert (no matching rule) stay inert — ``derive_disk`` returns
+    ``None`` and we skip them, exactly as before.
     """
     by_id = {d.id: d for d in disks}
     for g in gigs:
-        d = by_id.get(g.get("disk"))
+        did = g.get("disk")
+        if did is None and disks:
+            # Re-derive: the gig was seeded when no disk rule matched (or the
+            # topology has since changed). Only fires for untagged gigs —
+            # already-tagged gigs pay zero cost.
+            did = derive_disk(g.get("job_id", ""), g.get("spec") or {}, disks)
+            if did:
+                g["disk"] = did       # lease-copy only; stored row untouched
+        d = by_id.get(did)
         if d is None:
             continue
         spec = g.get("spec")

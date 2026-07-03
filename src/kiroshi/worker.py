@@ -237,6 +237,13 @@ class Runner:
     # --------------------------------------------------------------- loop
     def run(self) -> None:
         self._install_signal_handlers()
+        # Bind a process-tree-reap mechanism (Windows Job Object / POSIX setsid)
+        # so that if the runner is force-killed or crashes, the OS automatically
+        # reaps all spawned pool workers — no orphaned processes holding wrapper
+        # pipe handles, no stuck auto-restart loops. Must be before pool creation
+        # so spawned workers inherit the Job Object membership.
+        from .proctree import bind_job_object
+        bind_job_object()
         self._resolve_fixer()  # block until a Fixer is known (auto mode)
         if not self.quiet:
             print(

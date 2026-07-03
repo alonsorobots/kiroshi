@@ -141,9 +141,14 @@ def create_app(
     # per-disk budget, plain work-stealing). The mesh-global per-spindle budget is
     # derived here once; only the Fixer can enforce it across the whole fleet.
     app.state.disks = disks or []
-    from .storage import disk_concurrency_map
+    from .storage import disk_concurrency_map, validate_disks
 
     app.state.disk_concurrency = disk_concurrency_map(app.state.disks)
+
+    # Warn about likely-misconfigured disk topologies at boot so a bad match
+    # rule surfaces immediately instead of as 129k runtime "READ_ROOT not set".
+    for _w in validate_disks(app.state.disks):
+        print(f"[fixer][WARN] {_w}", flush=True)
 
     # --- Mesh resource governor (standalone resource-acquire service) ---
     # Extends the per-disk read budget to non-gig workloads + adds a global
