@@ -335,6 +335,11 @@ class AdvisoryDetector:
                 rstate = None
             if rstate is not None:
                 fired += self._detect_parity_pressure(rstate, stats)
+        # bottleneck classifier (P2) — fuses host resources + iowatcher + topology
+        try:
+            fired += self._detect_bottleneck(stats, io_snap if self._io else None)
+        except Exception:
+            logger.debug("bottleneck detector skipped (no data or error)")
         return fired
 
     # --------------------------------------------------------- sustain helper
@@ -535,6 +540,100 @@ class AdvisoryDetector:
             fingerprint=fp,
         ))
         return out
+
+    # --------------------------------------------------------- bottleneck (P2)
+
+    # Maps bottleneck verdict → advisory code + severity
+    _BOTTLENECK_CODES = {
+        "cpu_bound": ("host.cpu_bound", SEVERITY_WARN),
+        "mem_pressure": ("host.mem_pressure", SEVERITY_WARN),
+        "disk_at_ceiling": ("disk.at_ceiling", SEVERITY_WARN),
+        "nas_single_spindle": ("nas.single_spindle", SEVERITY_WARN),
+        "net_bound": ("net.bound", SEVERITY_INFO),
+        "gpu_bound": ("gpu.bound", SEVERITY_WARN),
+        "vram_pressure": ("gpu.vram_pressure", SEVERITY_CRITICAL),
+        "latency_bound": ("nas.latency_bound", SEVERITY_WARN),
+    }
+
+    def _detect_bottleneck(self, stats: dict[str, Any],
+                           io_snap: Optional[dict[str, Any]]) -> list[Advisory]:
+        """Fuse host resources + iowatcher + topology into a dominant-pressure
+        verdict via :func:`kiroshi.bottleneck.classify`, and fire an advisory
+        when the verdict is sustained for ``sustain_s``.
+
+        Fail-open: if psutil is unavailable or the sample is incomplete, this
+        detector silently skips (returns ``[]``)."""
+        try:
+            from .bottleneck import classify, ResourceSample, DiskPressure, Ceilings
+        except ImportError:
+            return []
+
+        # ---- build ResourceSample from available data ----
+        cpu_pct = 0.0
+        mem_used = 0.0
+        mem_total = 1.0
+        try:
+            import psutil
+            cpu_pct = psutil.cpu_percent(interval=None)
+            vm = psutil.virtual_memory()
+            mem_used = vm.used / 1e9
+            mem_total = vm.total / 1e9
+        except Exception:
+            pass
+
+        # disk pressures from iowatcher
+        disks: list[DiskPressure] = []
+        if io_snap and "disks" in io_snap:
+            for d in io_snap["disks"]:
+                did = d.get("disk_id") or d.get("id") or "unknown"
+                util = float(d.get("util_pct", 0))
+                mbps = float(d.get("read_mbps", 0)) + float(d.get("write_mbps", 0))
+                ceiling = 0.0   # bench ceiling not wired here yet; P2 stretch
+                inflight = self._inflight(did) if self._inflight else 0
+                disks.append(DiskPressure(did, util, mbps, ceiling, inflight))
+
+        # observed vs expected throughput from metrics ring
+        observed = 0.0
+        expected = 0.0
+        if self._metrics and len(self._metrics) > 0:
+            latest = self._metrics[-1] if hasattr(self._metrics, '__getitem__') else {}
+            observed = float(latest.get("rate", 0))
+
+        sample = ResourceSample(
+            cpu_pct=cpu_pct, cpu_cores=getattr(__import__('os'), 'cpu_count', lambda: 4)() or 4,
+            mem_used_gb=mem_used, mem_total_gb=mem_total,
+            disks=disks,
+            observed_gigs_per_s=observed, expected_gigs_per_s=expected,
+        )
+
+        verdict = classify(sample)
+        if verdict.verdict == "healthy" or verdict.verdict not in self._BOTTLENECK_CODES:
+            # resolve any previously-fired bottleneck advisory
+            self._resolve_bottleneck(verdict.verdict)
+            return []
+
+        code, severity = self._BOTTLENECK_CODES[verdict.verdict]
+        fp = f"bottleneck:{verdict.verdict}"
+        if not self._sustained(fp, True):
+            return []
+
+        self._adv.fire(
+            severity=severity,
+            code=code,
+            disk=verdict.dominant_resource.split(":", 1)[1]
+                 if ":" in verdict.dominant_resource else None,
+            detail=verdict.detail,
+            suggested_action=verdict.hint,
+            dashboard_url=self._dashboard_url(None),
+        )
+        return [a for a in self._adv.list_active() if a.code == code]
+
+    def _resolve_bottleneck(self, current_verdict: str) -> None:
+        """Resolve any active bottleneck advisory that no longer matches."""
+        for code, _ in self._BOTTLENECK_CODES.values():
+            fp = f"bottleneck:{code.split('.', 1)[-1]}"
+            # only resolve if it was previously active
+            self._sustained(fp, False)
 
 
 # --------------------------------------------------------------------------- webhook

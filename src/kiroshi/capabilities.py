@@ -164,6 +164,13 @@ CAPABILITIES: list[dict[str, Any]] = [
         "when_not": "Headless nodes where you don't care about per-gig attribution. Soft dep — works without psutil installed (just no proc summary).",
     },
     {
+        "name": "bottleneck",
+        "purpose": "Per-moment dominant-pressure classifier: fuses CPU/MEM/disk I/O + routing knowledge + bench ceilings to label the bottleneck (or latency_bound). Fires advisories on sustained breach.",
+        "command": "# automatic — wired into AdvisoryDetector.tick; fires host.cpu_bound / nas.single_spindle / nas.latency_bound / disk.at_ceiling / etc.",
+        "when_to_use": "When throughput is lower than expected and you need to know WHY — is it the disk, the routing, CPU, or round-trip latency? The latency_bound verdict catches the case where nothing is saturated but work is still slow (SMB metadata latency).",
+        "when_not": "NVMe-only nodes with no I/O contention concern. The classifier is a heuristic, not ground truth — it says 'dominant pressure', not 'THE critical path'.",
+    },
+    {
         "name": "mcp",
         "purpose": "Run the Model Context Protocol server — exposes Kiroshi's tools + docs to LLM agents (Claude Desktop, Cursor, custom clients) over stdio.",
         "command": "kiroshi mcp",

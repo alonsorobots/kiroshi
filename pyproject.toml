@@ -39,6 +39,7 @@ smb = ["smbprotocol>=1.12"]
 # install has no extra weight for headless nodes.
 mcp = ["mcp>=1.0"]
 profiler = ["psutil>=5.9"]
+gpu = ["pynvml>=11.0"]
 dev = ["pytest>=8.0", "ruff>=0.4", "numpy>=1.24", "httpx>=0.27"]
 
 [project.scripts]

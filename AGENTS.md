@@ -190,6 +190,11 @@ The codes an agent will actually see:
 | `nas.disk_saturation` | one disk pinned at capacity | route around it, or lower per-disk `concurrency` |
 | `nas.throughput_collapse` | fleet throughput dropped ≥95% | a share is disconnected; check `/runners` and `kfs.smb_diagnostics` |
 | `nas.parity_write_pressure` | writes queued behind parity | HDD array; stage hot data to NVMe |
+| `nas.single_spindle` | I/O concentrated on 1 disk while others idle | spread reads — check topology match patterns or shard plan |
+| `nas.latency_bound` | throughput low but no resource at ceiling | round-trip latency (SMB metadata) or lock contention — batch ops or stage to NVMe |
+| `disk.at_ceiling` | a disk at its benchmarked peak MB/s | this is the disk, not the code — stage to NVMe or spread |
+| `host.cpu_bound` | CPU ≥ 90% sustained | add workers/nodes or optimize the task |
+| `host.mem_pressure` | MEM ≥ 90% | reduce per-worker memory or add RAM |
 | `gig.failure_spike` | failed-rate spike | a systemic error; check `recent_errors` in `/status` |
 
 Severities: `SEVERITY_INFO`, `SEVERITY_WARN`, `SEVERITY_CRIT`. Every advisory
