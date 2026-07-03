@@ -31,8 +31,8 @@ Everything here is opt-in and fail-open:
   *current* fleet state, not persistent history.
 """
 from __future__ import annotations
-
 import logging
+import os
 import threading
 import time
 import uuid
@@ -321,6 +321,7 @@ class AdvisoryDetector:
         fired += self._detect_thrash(stats)
         fired += self._detect_throughput_collapse(stats)
         fired += self._detect_failure_spike(stats)
+        io_snap: Optional[dict[str, Any]] = None
         if self._io is not None:
             try:
                 io_snap = self._io()
@@ -564,7 +565,7 @@ class AdvisoryDetector:
         Fail-open: if psutil is unavailable or the sample is incomplete, this
         detector silently skips (returns ``[]``)."""
         try:
-            from .bottleneck import classify, ResourceSample, DiskPressure, Ceilings
+            from .bottleneck import classify, ResourceSample, DiskPressure
         except ImportError:
             return []
 
@@ -588,34 +589,59 @@ class AdvisoryDetector:
                 did = d.get("disk_id") or d.get("id") or "unknown"
                 util = float(d.get("util_pct", 0))
                 mbps = float(d.get("read_mbps", 0)) + float(d.get("write_mbps", 0))
-                ceiling = 0.0   # bench ceiling not wired here yet; P2 stretch
+                # TODO(roadmap P2): wire bench.py ceilings here so disk_at_ceiling
+                # uses measured peak MB/s instead of raw util_pct. Until then,
+                # ceiling=0 makes the classifier fall back to util_pct (fine for
+                # detecting saturation, less precise for "at ceiling vs headroom").
+                ceiling = 0.0
                 inflight = self._inflight(did) if self._inflight else 0
                 disks.append(DiskPressure(did, util, mbps, ceiling, inflight))
 
-        # observed vs expected throughput from metrics ring
+        # observed vs expected throughput from metrics ring.
+        # "expected" = rolling max of recent rate samples — a self-calibrating
+        # baseline that captures what this fleet was achieving before the
+        # slowdown. If current rate < 50% of that AND nothing is at its
+        # ceiling → latency_bound fires (the critical acceptance-gate case).
         observed = 0.0
         expected = 0.0
         if self._metrics and len(self._metrics) > 0:
-            latest = self._metrics[-1] if hasattr(self._metrics, '__getitem__') else {}
-            observed = float(latest.get("rate", 0))
+            rates = []
+            for m in self._metrics:
+                try:
+                    r = float(m.get("rate", 0))
+                    if r > 0:
+                        rates.append(r)
+                except Exception:
+                    pass
+            if rates:
+                observed = rates[-1]
+                # rolling max over the recent window = "what we were doing
+                # before the slowdown" (skip the last sample to avoid
+                # self-referencing a current dip as the ceiling)
+                historical = rates[:-1] if len(rates) > 1 else rates
+                expected = max(historical) if historical else 0.0
 
         sample = ResourceSample(
-            cpu_pct=cpu_pct, cpu_cores=getattr(__import__('os'), 'cpu_count', lambda: 4)() or 4,
+            cpu_pct=cpu_pct, cpu_cores=os.cpu_count() or 4,
             mem_used_gb=mem_used, mem_total_gb=mem_total,
             disks=disks,
             observed_gigs_per_s=observed, expected_gigs_per_s=expected,
         )
 
         verdict = classify(sample)
+        fp = f"bottleneck:{verdict.verdict}"
         if verdict.verdict == "healthy" or verdict.verdict not in self._BOTTLENECK_CODES:
-            # resolve any previously-fired bottleneck advisory
-            self._resolve_bottleneck(verdict.verdict)
+            # resolve the previously-active bottleneck fingerprint (if any)
+            self._resolve_bottleneck()
             return []
 
         code, severity = self._BOTTLENECK_CODES[verdict.verdict]
-        fp = f"bottleneck:{verdict.verdict}"
         if not self._sustained(fp, True):
             return []
+
+        # resolve a *different* previously-active bottleneck before firing the
+        # new one, so advisories don't accumulate across verdict transitions.
+        self._resolve_bottleneck(except_fp=fp)
 
         self._adv.fire(
             severity=severity,
@@ -626,14 +652,21 @@ class AdvisoryDetector:
             suggested_action=verdict.hint,
             dashboard_url=self._dashboard_url(None),
         )
+        self._active_bottleneck_fp = fp
         return [a for a in self._adv.list_active() if a.code == code]
 
-    def _resolve_bottleneck(self, current_verdict: str) -> None:
-        """Resolve any active bottleneck advisory that no longer matches."""
-        for code, _ in self._BOTTLENECK_CODES.values():
-            fp = f"bottleneck:{code.split('.', 1)[-1]}"
-            # only resolve if it was previously active
+    def _resolve_bottleneck(self, except_fp: Optional[str] = None) -> None:
+        """Resolve the currently-active bottleneck advisory, unless it matches
+        ``except_fp`` (the new verdict we're about to fire). Uses the
+        fingerprint tracked in ``self._active_bottleneck_fp`` rather than
+        iterating all codes — the old version guessed fingerprints from code
+        names and silently failed for multi-dot codes like
+        nas.single_spindle (verdict name) vs nas.single_spindle (advisory code).
+        """
+        fp = getattr(self, "_active_bottleneck_fp", None)
+        if fp and fp != except_fp:
             self._sustained(fp, False)
+            self._active_bottleneck_fp = None
 
 
 # --------------------------------------------------------------------------- webhook
