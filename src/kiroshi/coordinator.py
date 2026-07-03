@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import FastAPI, Request, Body
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -322,6 +322,12 @@ def create_app(
                 groups = {g["grp"]: g["done"]
                           for g in store.group_stats(limit=40)}
                 disk_done = store.disk_done_counts() if app.state.disks else {}
+                # Per-runner contribution per group so the job page can render
+                # a stacked-area "who is contributing what" chart and detect
+                # per-node plateaus (a computer that stopped making progress).
+                groups_by_runner = store.group_runner_done_counts(
+                    limit_groups=40
+                )
                 app.state.metrics.append({
                     "ts": s["ts"],
                     "rate": s.get("rate_per_s", 0.0),
@@ -330,6 +336,7 @@ def create_app(
                     "leased": s.get("leased", 0),
                     "failed": s.get("failed", 0),
                     "groups": groups,
+                    "groups_by_runner": groups_by_runner,
                     "disk_done": disk_done,
                 })
             except Exception:  # pragma: no cover
@@ -707,6 +714,17 @@ def create_app(
     @app.get("/ui/job", response_class=HTMLResponse)
     def ui_job() -> str:
         return _serve("job.html")
+
+    @app.get("/ui/advisory_notifier.js")
+    def ui_advisory_notifier() -> Response:
+        """Shared JS included by every dashboard page: polls /advisories and
+        raises a native Windows notification (plus in-page toast) whenever a
+        new NAS-contention/thrash/saturation/failure advisory fires. Keeping
+        it in one file means /, /ui/jobs, /ui/history, /ui/job all get the
+        popup behavior without duplication."""
+        f = _DASHBOARD.parent / "advisory_notifier.js"
+        body = f.read_text(encoding="utf-8") if f.is_file() else "/* missing */"
+        return Response(content=body, media_type="application/javascript")
 
     # ================================================================
     # Mesh resource governor: standalone resource-acquire service

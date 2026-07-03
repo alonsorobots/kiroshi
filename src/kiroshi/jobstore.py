@@ -476,6 +476,45 @@ class JobStore:
                 )
             }
 
+    def group_runner_done_counts(
+        self, limit_groups: int = 40
+    ) -> dict[str, dict[str, int]]:
+        """``{grp: {runner_id: done_count}}`` for the top ``limit_groups`` recently
+        active campaigns.
+
+        Used by the sampler so the job page can render a stacked area chart of
+        per-node contribution over time (which computer contributed how much,
+        at each sampled instant). ``runner_id`` may be ``""`` for gigs whose
+        completing runner was not recorded — those are grouped together.
+        """
+        with self._lock:
+            top = self._conn.execute(
+                """
+                SELECT j.grp AS grp
+                FROM jobs j
+                GROUP BY j.grp
+                ORDER BY COALESCE(MAX(j.completed_at),
+                                  MAX(j.leased_at),
+                                  MIN(j.created_at)) DESC
+                LIMIT ?
+                """,
+                (int(limit_groups),),
+            ).fetchall()
+            grps = [r["grp"] for r in top]
+            if not grps:
+                return {}
+            placeholders = ",".join("?" for _ in grps)
+            rows = self._conn.execute(
+                f"SELECT grp, COALESCE(runner_id,'') AS runner_id, "
+                f"COUNT(*) AS n FROM jobs WHERE state='done' "
+                f"AND grp IN ({placeholders}) GROUP BY grp, runner_id",
+                tuple(grps),
+            ).fetchall()
+        out: dict[str, dict[str, int]] = {g: {} for g in grps}
+        for r in rows:
+            out[r["grp"]][r["runner_id"] or ""] = int(r["n"])
+        return out
+
     def disk_inflight_count(self, disk: str) -> int:
         """Count of leased (in-flight) gigs on a specific disk — for the resource
         governor to share the per-disk read budget between gigs and external

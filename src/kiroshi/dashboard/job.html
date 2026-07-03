@@ -28,7 +28,17 @@
   .pill { position:relative; height:22px; background:#0a0f16; border:1px solid var(--line); border-radius:12px; overflow:hidden; }
   .pill > .fill { height:100%; background:linear-gradient(90deg,var(--teal),var(--magenta)); width:0%; transition:width .5s ease; }
   .pill > .lbl { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; font-size:11px; color:#04121a; font-weight:700; mix-blend-mode:screen; }
-  .curve { width:100%; height:200px; display:block; }
+  .curve { width:100%; height:240px; display:block; }
+  .legend { display:flex; flex-wrap:wrap; gap:10px; margin-top:10px; font-size:11px; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); }
+  .legend .sw { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:5px; vertical-align:middle; }
+  .legend .stalled { color:var(--magenta); font-weight:700; }
+  .alert-mask { position:fixed; inset:0; background:rgba(3,6,10,.72); display:none; align-items:center; justify-content:center; z-index:50; backdrop-filter:blur(4px); }
+  .alert-mask.on { display:flex; }
+  .alert-box { background:var(--panel); border:1px solid var(--magenta); border-radius:12px; padding:22px 26px; max-width:520px; box-shadow:0 0 30px rgba(255,46,136,.35); }
+  .alert-box h3 { margin:0 0 10px; color:var(--magenta); font-size:14px; letter-spacing:.25em; text-transform:uppercase; }
+  .alert-box p { margin:6px 0; color:var(--text); font-size:13px; }
+  .alert-box .who { color:var(--amber); font-weight:700; }
+  .alert-box .row { display:flex; gap:10px; margin-top:14px; justify-content:flex-end; }
   .cmd { font-family:ui-monospace,monospace; font-size:12px; color:var(--text); background:#0a0f16; border:1px solid var(--line); border-radius:6px; padding:8px 10px; word-break:break-all; margin-bottom:8px; }
   .btn { cursor:pointer; background:transparent; color:var(--amber); border:1px solid var(--line); border-radius:6px; padding:5px 11px; font-size:12px; letter-spacing:.08em; text-transform:uppercase; text-decoration:none; }
   .btn:hover { border-color:var(--amber); }
@@ -53,27 +63,41 @@
     </div>
     <div class="panel"><h2>Progress</h2><div class="pill"><div id="fill" class="fill"></div><div id="lbl" class="lbl"></div></div></div>
     <div class="panel">
-      <h2>Rate over time <span id="curveinfo" class="sub"></span></h2>
-      <svg id="curve" class="curve" viewBox="0 0 1000 200" preserveAspectRatio="none">
+      <h2>Progress projection <span id="curveinfo" class="sub"></span></h2>
+      <svg id="curve" class="curve" viewBox="0 0 1000 240" preserveAspectRatio="none">
         <defs>
-          <linearGradient id="grad" x1="0" y1="1" x2="0" y2="0">
-            <stop offset="0%" stop-color="#1ad1c8" stop-opacity="0.9"/>
-            <stop offset="55%" stop-color="#ffb648" stop-opacity="0.95"/>
-            <stop offset="100%" stop-color="#ff2e88" stop-opacity="1"/>
-          </linearGradient>
           <filter id="bloom" x="-20%" y="-20%" width="140%" height="140%">
             <feGaussianBlur stdDeviation="2.4" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
           </filter>
         </defs>
-        <polygon id="fillc" fill="url(#grad)" fill-opacity="0.14" points=""/>
-        <polyline id="line" fill="none" stroke="url(#grad)" stroke-width="2.5" filter="url(#bloom)" points=""/>
+        <!-- gridlines + axis -->
+        <g id="grid"></g>
+        <!-- one <polygon> per runner (stacked contributions) -->
+        <g id="stacks"></g>
+        <!-- aggregate progress curve on top -->
+        <polyline id="line" fill="none" stroke="#e7f6ff" stroke-width="2" filter="url(#bloom)" points=""/>
+        <!-- 'now' marker separating past from projected -->
+        <line id="nowline" x1="0" x2="0" y1="0" y2="240" stroke="#ffb648" stroke-dasharray="3,3" stroke-opacity="0.55"/>
+        <text id="nowlbl" x="0" y="14" fill="#ffb648" font-size="10" text-anchor="middle">now</text>
       </svg>
+      <div id="legend" class="legend"></div>
+    </div>
+    <div id="alertmask" class="alert-mask" role="alertdialog" aria-live="assertive">
+      <div class="alert-box">
+        <h3>⚠ progress plateau</h3>
+        <p id="alertmsg">Throughput has stalled.</p>
+        <p id="alertwho" class="who"></p>
+        <div class="row">
+          <button class="btn" id="alertsnooze" type="button">Snooze 5m</button>
+          <button class="btn" id="alertdismiss" type="button">Dismiss</button>
+        </div>
+      </div>
     </div>
     <div class="panel"><h2>Launch command(s)</h2><div id="cmds"></div>
       <a id="pagebtn" class="btn" style="display:none" target="_blank">▤ custom job page</a>
       <span id="times" class="sub"></span></div>
   </main>
-  <footer>rate = gigs completed per second for this job, sampled every 2s</footer>
+  <footer>x = time (job start → projected finish) · y = % complete · stack color = per-node contribution · alert fires when recent throughput &lt; 25% of baseline</footer>
 <script>
 (function(){const u=new URL(location.href);const t=u.searchParams.get("token");if(t){try{localStorage.setItem("kiroshi_token",t)}catch(e){}u.searchParams.delete("token");history.replaceState({},"",u.pathname+u.search)}})();
 function tok(){try{return localStorage.getItem("kiroshi_token")||""}catch(e){return""}}
@@ -82,17 +106,201 @@ function withTok(url){const t=tok();return t?url+(url.includes("?")?"&":"?")+"to
 function esc(s){return (s==null?"":String(s)).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}
 const JOB = new URLSearchParams(location.search).get("job") || "";
 document.getElementById("jobname").textContent = JOB || "(all)";function fmtEta(s){ if(s==null) return "—"; s=Math.round(s); const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),x=s%60; if(h)return h+"h "+m+"m"; if(m)return m+"m "+x+"s"; return x+"s"; }
-function renderCurve(series){
-  const W=1000,H=200,pad=8; const line=document.getElementById("line"),fill=document.getElementById("fillc"),info=document.getElementById("curveinfo");
-  if(series.length<2){ line.setAttribute("points","");fill.setAttribute("points","");info.textContent="warming up…"; return; }
-  const t0=series[0].t, t1=series[series.length-1].t, span=Math.max(1,t1-t0);
-  const maxR=Math.max(0.001,...series.map(s=>s.r));
-  const x=t=>pad+(W-2*pad)*(t-t0)/span, y=r=>(H-pad)-(H-2*pad)*(r/maxR);
-  const pts=series.map(s=>`${x(s.t).toFixed(1)},${y(s.r).toFixed(1)}`);
-  line.setAttribute("points",pts.join(" "));
-  fill.setAttribute("points",`${pad},${H-pad} ${pts.join(" ")} ${W-pad},${H-pad}`);
-  const cur=series[series.length-1].r; info.textContent=`now ${cur.toFixed(2)}/s · peak ${maxR.toFixed(2)}/s · last ${Math.round(span)}s`;
+// Palette used to color each runner (contributing computer). Cycled by index.
+const RUNNER_COLORS = ["#1ad1c8","#ff2e88","#ffb648","#4ade80","#a78bfa","#38bdf8","#f472b6","#facc15","#fb7185","#22d3ee"];
+const _runnerColorMap = {};
+function colorFor(rid){
+  if(!(rid in _runnerColorMap)){
+    _runnerColorMap[rid] = RUNNER_COLORS[Object.keys(_runnerColorMap).length % RUNNER_COLORS.length];
+  }
+  return _runnerColorMap[rid];
 }
+function shortId(rid){ if(!rid) return "(unassigned)"; return rid.length>18 ? rid.slice(0,10)+"…"+rid.slice(-4) : rid; }
+
+// Build a stacked area chart:
+//   X: t0 = job.first_created ...... t_now (measured) ... t_eta (projected)
+//   Y: 0% .. 100% of the total gigs.
+//   Stacks: one polygon per runner. Height at time t = share of that runner's
+//   done-count over the total, expressed in %-of-target. Aggregate curve is
+//   drawn on top so you can see "still making progress, but slower" when a
+//   runner (color) flattens out.
+function renderChart(ctx){
+  const W=1000,H=240,padL=8,padR=8,padT=14,padB=8;
+  const stacksG=document.getElementById("stacks");
+  const gridG=document.getElementById("grid");
+  const line=document.getElementById("line");
+  const info=document.getElementById("curveinfo");
+  const legend=document.getElementById("legend");
+  const nowLine=document.getElementById("nowline");
+  const nowLbl=document.getElementById("nowlbl");
+  stacksG.innerHTML=""; gridG.innerHTML=""; legend.innerHTML="";
+  line.setAttribute("points","");
+  if(!ctx.series.length || !ctx.total){ info.textContent="warming up…"; return; }
+  const t0=ctx.t0, tNow=ctx.tNow, tEnd=ctx.tEnd; const span=Math.max(1,tEnd-t0);
+  const x=t=>padL+(W-padL-padR)*(t-t0)/span;
+  const y=pct=>(H-padB)-(H-padT-padB)*(pct/100);
+  // horizontal % gridlines
+  [0,25,50,75,100].forEach(p=>{
+    const yy=y(p).toFixed(1);
+    gridG.insertAdjacentHTML("beforeend",`<line x1="${padL}" x2="${W-padR}" y1="${yy}" y2="${yy}" stroke="#1b2230" stroke-width="1"/><text x="${W-padR-2}" y="${(+yy-3).toFixed(1)}" fill="#6b7a8d" font-size="9" text-anchor="end">${p}%</text>`);
+  });
+  // stacked polygons per runner (past segment only; projected segment is a hollow band)
+  const runners=ctx.runners;
+  const pastPts=ctx.series;
+  // Precompute stacked pcts
+  const stacks={}; runners.forEach(r=>stacks[r]=[]);
+  pastPts.forEach(s=>{
+    let acc=0;
+    runners.forEach(r=>{
+      const p = 100 * ((s.perRunner[r]||0) / ctx.total);
+      acc += p;
+      stacks[r].push({t:s.t, top:acc});
+    });
+  });
+  runners.forEach((r,i)=>{
+    const pts=stacks[r];
+    if(!pts.length) return;
+    // area between previous stack top (i-1) and this stack top
+    const upper=pts.map(p=>`${x(p.t).toFixed(1)},${y(p.top).toFixed(1)}`);
+    // previous cumulative
+    const prev = i===0 ? pts.map(p=>`${x(p.t).toFixed(1)},${y(0).toFixed(1)}`)
+                       : stacks[runners[i-1]].map(p=>`${x(p.t).toFixed(1)},${y(p.top).toFixed(1)}`);
+    const poly = upper.concat(prev.slice().reverse()).join(" ");
+    const col=colorFor(r);
+    stacksG.insertAdjacentHTML("beforeend",
+      `<polygon points="${poly}" fill="${col}" fill-opacity="0.42" stroke="${col}" stroke-opacity="0.8" stroke-width="1"/>`);
+  });
+  // Aggregate curve (top of the stack)
+  const topRunner=runners[runners.length-1];
+  if(topRunner){
+    const pts=stacks[topRunner].map(p=>`${x(p.t).toFixed(1)},${y(p.top).toFixed(1)}`);
+    // extend to now + projection segment to (tEnd,100%)
+    const lastT=pastPts[pastPts.length-1].t;
+    const lastPct=stacks[topRunner][stacks[topRunner].length-1].top;
+    pts.push(`${x(lastT).toFixed(1)},${y(lastPct).toFixed(1)}`);
+    if(tEnd>lastT && lastPct<100){
+      pts.push(`${x(tEnd).toFixed(1)},${y(100).toFixed(1)}`);
+    }
+    line.setAttribute("points",pts.join(" "));
+  }
+  // 'now' marker
+  const nx=x(tNow).toFixed(1);
+  nowLine.setAttribute("x1",nx); nowLine.setAttribute("x2",nx);
+  nowLbl.setAttribute("x",nx);
+  // legend + stall marks
+  const stalled=ctx.stalledRunners||new Set();
+  runners.forEach(r=>{
+    const share=100*((pastPts[pastPts.length-1].perRunner[r]||0)/ctx.total);
+    const cls=stalled.has(r)?"stalled":"";
+    legend.insertAdjacentHTML("beforeend",
+      `<span class="${cls}"><span class="sw" style="background:${colorFor(r)}"></span>${esc(shortId(r))} · ${share.toFixed(1)}%${stalled.has(r)?" · stalled":""}</span>`);
+  });
+  const curPct=100*(ctx.done/ctx.total);
+  const startedStr=new Date(t0*1000).toLocaleTimeString();
+  const etaStr = tEnd>tNow ? `ETA ${new Date(tEnd*1000).toLocaleTimeString()}` : "eta —";
+  info.textContent=`${curPct.toFixed(1)}% · started ${startedStr} · ${etaStr}`;
+}
+
+// ---- Plateau detection & Windows notification -------------------------
+// We compare the *recent* rate (last ~30s) to a *baseline* rate (60..240s
+// ago). If the recent rate collapsed to <25% of baseline and progress is
+// not yet finished, we alert. We also do this per-runner so we can name
+// which computer stopped contributing.
+const PLATEAU={
+  minSeconds:120,        // don't alert until we have >=120s of history
+  recentWin:30,          // seconds
+  baseWin:[60,240],      // baseline: 60..240s ago
+  ratio:0.25,            // recent < 25% of baseline -> plateau
+  perRunnerMinShare:0.10,// only flag runners who used to do >=10% of throughput
+  snoozeSec:300,
+};
+let _plateauState={muteUntil:0, alerting:false};
+function _rateBetween(series, key, from, to){
+  // slope of cumulative done for 'key' between times from..to (seconds)
+  let a=null,b=null;
+  for(const s of series){
+    if(s.t>=from && a===null) a=s;
+    if(s.t<=to) b=s;
+  }
+  if(!a||!b||b.t<=a.t) return 0;
+  const av=key==="__total__"?a.done:(a.perRunner[key]||0);
+  const bv=key==="__total__"?b.done:(b.perRunner[key]||0);
+  return Math.max(0,(bv-av)/(b.t-a.t));
+}
+function detectPlateau(ctx){
+  if(!ctx.series.length) return null;
+  const tNow=ctx.tNow, t0=ctx.t0;
+  if(tNow-t0 < PLATEAU.minSeconds) return null;
+  if(ctx.done>=ctx.total) return null;
+  const recentFrom=tNow-PLATEAU.recentWin, recentTo=tNow;
+  const baseFrom=tNow-PLATEAU.baseWin[1], baseTo=tNow-PLATEAU.baseWin[0];
+  const rRecent=_rateBetween(ctx.series,"__total__",recentFrom,recentTo);
+  const rBase=_rateBetween(ctx.series,"__total__",baseFrom,baseTo);
+  const perRunnerStalls=[];
+  ctx.runners.forEach(r=>{
+    const rr=_rateBetween(ctx.series,r,recentFrom,recentTo);
+    const rb=_rateBetween(ctx.series,r,baseFrom,baseTo);
+    if(rb>0 && (rb/(rBase||rb))>=PLATEAU.perRunnerMinShare && rr < rb*PLATEAU.ratio){
+      perRunnerStalls.push({runner:r, wasShare:rb/(rBase||rb), recent:rr, base:rb});
+    }
+  });
+  const overallPlateau = rBase>0 && rRecent < rBase*PLATEAU.ratio;
+  if(!overallPlateau && !perRunnerStalls.length) return null;
+  return {rRecent,rBase,perRunnerStalls,overallPlateau};
+}
+async function ensureNotifPerm(){
+  if(!("Notification" in window)) return false;
+  if(Notification.permission==="granted") return true;
+  if(Notification.permission==="denied") return false;
+  try{ const p=await Notification.requestPermission(); return p==="granted"; }catch(e){ return false; }
+}
+function fireAlert(p, ctx){
+  const now=Date.now()/1000;
+  if(now<_plateauState.muteUntil) return;
+  if(_plateauState.alerting) return;
+  _plateauState.alerting=true;
+  const mask=document.getElementById("alertmask");
+  const msg=document.getElementById("alertmsg");
+  const who=document.getElementById("alertwho");
+  const jobLbl=document.getElementById("jobname").textContent||JOB;
+  let text;
+  if(p.overallPlateau){
+    text=`Overall throughput dropped from ${p.rBase.toFixed(2)}/s to ${p.rRecent.toFixed(2)}/s (last ${PLATEAU.recentWin}s).`;
+  } else {
+    text=`Overall progress continues, but one or more nodes stalled.`;
+  }
+  msg.textContent=text;
+  who.textContent = p.perRunnerStalls.length
+    ? "Not making progress anymore: " + p.perRunnerStalls.map(s=>shortId(s.runner)).join(", ")
+    : "";
+  mask.classList.add("on");
+  // Native Windows toast (via browser Notification API) when the tab is
+  // hidden -- otherwise the in-page modal already has focus.
+  if(document.hidden){
+    ensureNotifPerm().then(ok=>{
+      if(!ok) return;
+      const body = text + (who.textContent?"\n"+who.textContent:"");
+      try {
+        const n = new Notification(`KIROSHI: ${jobLbl} plateaued`, {
+          body, tag:"kiroshi-plateau-"+JOB, requireInteraction:true,
+        });
+        n.onclick=()=>{ window.focus(); n.close(); };
+      } catch(e){}
+    });
+  }
+}
+document.addEventListener("DOMContentLoaded",()=>{
+  ensureNotifPerm();
+  document.getElementById("alertdismiss").addEventListener("click",()=>{
+    document.getElementById("alertmask").classList.remove("on");
+    _plateauState.alerting=false;
+  });
+  document.getElementById("alertsnooze").addEventListener("click",()=>{
+    _plateauState.muteUntil=Date.now()/1000+PLATEAU.snoozeSec;
+    document.getElementById("alertmask").classList.remove("on");
+    _plateauState.alerting=false;
+  });
+});
 async function tick(){
   const live=document.getElementById("live");
   try{
@@ -117,17 +325,44 @@ async function tick(){
       const end=(g.done>=g.total&&g.last_completed)?new Date(g.last_completed*1000).toLocaleString():"—";
       document.getElementById("times").textContent=`started ${start} · ended ${end}`;
     }
-    // per-job rate from done-count deltas in the history ring buffer
-    const series=[]; let prev=null;
-    for(const s of hist){ const done=(s.groups&&s.groups[JOB]!=null)?s.groups[JOB]:(JOB===""? s.done : null); if(done==null) continue;
-      if(prev){ const dt=s.ts-prev.ts; if(dt>0) series.push({t:s.ts,r:Math.max(0,(done-prev.done)/dt)}); } prev={ts:s.ts,done}; }
-    renderCurve(series);
-    const rate=series.length?series[series.length-1].r:0;
+    // Build a series of {t, done, perRunner:{runner_id: done_count}} for THIS job
+    // out of the sampler ring buffer. `groups_by_runner` was added server-side
+    // specifically to enable per-node stacked contribution rendering.
+    const series=[];
+    for(const s of hist){
+      const done=(s.groups&&s.groups[JOB]!=null)?s.groups[JOB]:(JOB===""? s.done : null);
+      if(done==null) continue;
+      const per=(s.groups_by_runner&&s.groups_by_runner[JOB])||{};
+      series.push({t:s.ts, done, perRunner:per});
+    }
+    // Union of all runner_ids seen; sort by total contribution ascending so
+    // the biggest-contributor stack sits on top.
+    const runnerTotals={};
+    series.forEach(s=>{ for(const [k,v] of Object.entries(s.perRunner||{})) runnerTotals[k]=Math.max(runnerTotals[k]||0,v); });
+    const runners=Object.keys(runnerTotals).sort((a,b)=>runnerTotals[a]-runnerTotals[b]);
+    // Rate from last two samples (matches the old "Rate /s" card semantics).
+    let rate=0;
+    if(series.length>=2){ const a=series[series.length-2],b=series[series.length-1]; const dt=b.t-a.t; if(dt>0) rate=Math.max(0,(b.done-a.done)/dt); }
     document.getElementById("rate").textContent=rate.toFixed(2);
-    if(g){ const remain=g.total-g.done; document.getElementById("eta").textContent=(rate>0&&remain>0)?fmtEta(remain/rate):(remain<=0?"done":"—"); }
+    const nowTs = series.length? series[series.length-1].t : (Date.now()/1000);
+    let t0 = (g && g.first_created) ? g.first_created : (series.length? series[0].t : nowTs);
+    const total = g ? g.total : 0;
+    const done  = g ? g.done  : (series.length? series[series.length-1].done : 0);
+    const remain = total - done;
+    const etaSec = (rate>0 && remain>0) ? (remain/rate) : null;
+    document.getElementById("eta").textContent = etaSec!=null ? fmtEta(etaSec) : (remain<=0?"done":"—");
+    // If we don't have a good prediction yet, project 5 min ahead just to
+    // give the chart a horizontal scale to grow into.
+    const tEnd = etaSec!=null ? nowTs+etaSec : nowTs+300;
+    const ctx={series, runners, t0, tNow:nowTs, tEnd, total, done, stalledRunners:new Set()};
+    const plateau = total>0 ? detectPlateau(ctx) : null;
+    if(plateau) plateau.perRunnerStalls.forEach(s=>ctx.stalledRunners.add(s.runner));
+    renderChart(ctx);
+    if(plateau) fireAlert(plateau, ctx);
   }catch(e){ live.classList.remove("live"); }
 }
 tick(); setInterval(tick,2000);
 </script>
+<script src="/ui/advisory_notifier.js"></script>
 </body>
 </html>
