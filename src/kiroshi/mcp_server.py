@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -219,17 +220,32 @@ def build_server(default_fixer: Optional[str] = None,
             {"from": src_root, "to": dst_root, "pattern": pattern}))
         if fixer and gigs:
             _post(_fx(fixer), "/seed", _tk(token),
-                  {"gigs": gigs, "group": f"stage-{int(__import__('time').time())}",
+                  {"gigs": gigs, "group": f"stage-{int(time.time())}",
                    "label": f"stage: {src_root} -> {dst_root}"})
         return {"gig_count": len(gigs), "fixer": fixer,
                 "task": "kiroshi.staging:run"}
 
-    @app.tool(description="Measure TRUE throughput of a campaign from output "
-                          "file mtimes (not wall-clock). Requires filesystem "
-                          "access to the output directory.")
-    def bench_rate(output_dir: str, pattern: str = "*",
-                   recursive: bool = True) -> dict:
+    @app.tool(description="Measure TRUE throughput of a campaign. Either pass "
+                          "output_dir (from file mtimes; needs FS access) OR "
+                          "fixer+group (from /jobs completed_at over HTTP).")
+    def bench_rate(output_dir: Optional[str] = None, pattern: str = "*",
+                   recursive: bool = True,
+                   fixer: Optional[str] = None, group: Optional[str] = None,
+                   token: Optional[str] = None) -> dict:
         from . import bench as _bench
+        if fixer and group:
+            rows = _get(_fx(fixer), "/jobs", _tk(token),
+                        state="done", limit=2000, grp=group).get("jobs", [])
+            times = [r["completed_at"] for r in rows if r.get("completed_at")]
+            if not times:
+                return {"count": 0, "span_s": 0.0, "items_per_s": 0.0}
+            span = max(0.0, max(times) - min(times))
+            n = len(times)
+            return {"count": n, "span_s": span,
+                    "items_per_s": (n / span) if span > 0 else 0.0,
+                    "sampled": n >= 2000}
+        if not output_dir:
+            raise ValueError("bench_rate needs output_dir OR fixer+group")
         rate = _bench.rate_from_dir(output_dir, pattern=pattern,
                                     recursive=recursive)
         return {"count": rate.count, "span_s": rate.span_s,

@@ -264,6 +264,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                      help="Destination root (same path types).")
     pst.add_argument("--pattern", default="*",
                      help="Filename glob filter (default: all files).")
+    pst.add_argument("--by", choices=["file", "shard"], default="file",
+                     help="Granularity: 'file' = one gig per file (default); "
+                          "'shard' = one gig per top-level dir (not implemented yet).")
     pst.add_argument("--fixer", default=None,
                      help="If set, seed gigs to this Fixer for mesh execution. "
                           "If omitted, runs in-process like 'kiroshi run'.")
@@ -974,14 +977,24 @@ def _cmd_bench(args) -> int:
 
     if args.bench_cmd == "rate":
         if args.fixer:
-            # HTTP mode: derive true throughput from per-gig completed_at over /jobs
+            # HTTP mode: derive true throughput from per-gig completed_at over
+            # /jobs. NOTE: /jobs is hard-capped at 2000 rows (most-recent-first),
+            # so for campaigns > 2000 done gigs this is a SAMPLE of the tail, not
+            # the whole run — we say so in the output. For a total count use
+            # /status; for the full mtime-based rate use --dir on the outputs.
+            LIMIT = 2000
             import requests
-            params = {"state": "done", "limit": 2000, "grp": args.group or ""}
+            params = {"state": "done", "limit": LIMIT, "grp": args.group or ""}
             if args.token:
                 params["token"] = args.token
-            r = requests.get(f"{args.fixer.rstrip('/')}/jobs",
-                             params=params, timeout=30)
-            r.raise_for_status()
+            try:
+                r = requests.get(f"{args.fixer.rstrip('/')}/jobs",
+                                 params=params, timeout=30)
+                r.raise_for_status()
+            except requests.RequestException as exc:
+                print(f"[bench rate] FAILED to reach {args.fixer}: {exc}",
+                      file=sys.stderr)
+                return 1
             rows = r.json().get("jobs", [])
             times = [row["completed_at"] for row in rows
                      if row.get("completed_at")]
@@ -989,13 +1002,16 @@ def _cmd_bench(args) -> int:
                 print(f"[bench rate] no completed gigs found for group "
                       f"{args.group!r} on {args.fixer}.")
                 return 0
-            t0, t1 = min(times), max(times)
-            span = max(0.0, t1 - t0)
-            rate = span / len(times) if len(times) > 0 and span > 0 else 0.0
-            print(f"[bench rate] group={args.group}  fixer={args.fixer}")
-            print(f"  {len(times)} completed gigs, span={span:.1f}s, "
-                  f"true rate={len(times)/span:.2f} gigs/s" if span > 0
-                  else f"  {len(times)} completed gigs, span=0s, rate=n/a")
+            span = max(0.0, max(times) - min(times))
+            n = len(times)
+            sampled = " (SAMPLE: most-recent 2000 gigs — use --dir for whole run)" \
+                if n >= LIMIT else ""
+            print(f"[bench rate] group={args.group}  fixer={args.fixer}{sampled}")
+            if span > 0:
+                print(f"  {n} completed gigs, span={span:.1f}s, "
+                      f"true rate={n / span:.2f} gigs/s")
+            else:
+                print(f"  {n} completed gigs, span=0s, rate=n/a")
             return 0
         if not args.dir:
             print("[bench rate] --dir or --fixer+--group is required.",
@@ -1038,6 +1054,10 @@ def _cmd_bench(args) -> int:
         print(f"  peak: {peak_mbps:.1f} MB/s at concurrency {peak_conc}")
         print(f"  suggested: concurrency {rec} "
               f"(paste into [[storage.disk]] concurrency = {rec})")
+        # By design this PRINTS rather than patching kiroshi.local.toml: a
+        # surgical TOML edit that preserves comments + other keys is easy to get
+        # wrong, and topology changes deserve a human eyeball. A future --write
+        # could patch it safely (round-trip via tomlkit) if that's ever wanted.
         return 0
 
     print(f"[bench] unknown subcommand {args.bench_cmd!r}", file=sys.stderr)
@@ -1054,6 +1074,14 @@ def _cmd_stage(args) -> int:
         operator starts a runner bound to kiroshi.staging:run separately.
     """
     from .staging import enumerate_gigs
+
+    if getattr(args, "by", "file") == "shard":
+        # TODO(roadmap A1): per-shard gigs (one gig copies a whole top-level dir)
+        # for fewer, larger transfers on sharded NAS layouts. Until then, --by
+        # file is the only granularity.
+        print("[stage] --by shard is not implemented yet; use --by file "
+              "(one gig per file). See ROADMAP.", file=sys.stderr)
+        return 2
 
     task_args = ["--from", args.src_root, "--to", args.dst_root]
     if args.pattern and args.pattern != "*":
