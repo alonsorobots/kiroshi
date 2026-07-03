@@ -89,9 +89,16 @@ CAPABILITIES: list[dict[str, Any]] = [
     {
         "name": "nas.benchmark",
         "purpose": "Measure per-disk read throughput at increasing concurrency.",
-        "command": "kiroshi nas benchmark --root <dir>",
-        "when_to_use": "Tune per-disk concurrency caps in the topology.",
-        "when_not": "—",
+        "command": "kiroshi nas benchmark --root <dir> --concurrency 1,2,4,8,16",
+        "when_to_use": "Find a disk's I/O knee before setting its topology concurrency. Feed the results to 'kiroshi bench calibrate'.",
+        "when_not": "Don't guess concurrency — measure it. But benchmark on the SAME workload class you'll run in production.",
+    },
+    {
+        "name": "bench",
+        "purpose": "True throughput reporting (from output mtimes, not wall-clock) + concurrency calibration from throughput samples.",
+        "command": "kiroshi bench rate --dir <outputs>  |  kiroshi bench calibrate --samples '1=50,2=95,4=140,8=150'",
+        "when_to_use": "rate: get honest end-to-end throughput of a completed/running campaign. calibrate: turn nas-benchmark samples into a per-disk concurrency recommendation (paste into topology).",
+        "when_not": "rate needs filesystem access to the outputs (can't do it over HTTP yet). calibrate needs representative samples — don't calibrate on a cold cache.",
     },
     {
         "name": "nas.shard",

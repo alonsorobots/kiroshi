@@ -276,6 +276,25 @@ def main(argv: Optional[list[str]] = None) -> int:
     pst.add_argument("--gig-timeout", type=int, default=300,
                      help="Per-gig timeout in seconds (local mode only).")
 
+    # ---- bench (true throughput + concurrency calibration) ----
+    pb = sub.add_parser(
+        "bench",
+        help="Measure true throughput (from output mtimes) + calibrate concurrency.")
+    pb_sub = pb.add_subparsers(dest="bench_cmd", required=True)
+    pbr = pb_sub.add_parser("rate", help="Report TRUE throughput of a completed/running campaign.")
+    pbr.add_argument("--dir", default=None,
+                     help="Output directory to scan (uses file mtimes).")
+    pbr.add_argument("--pattern", default="*",
+                     help="Filename glob (default: all).")
+    pbr.add_argument("--no-recursive", action="store_true",
+                     help="Only scan the top level (no subdirectories).")
+    pbc = pb_sub.add_parser("calibrate", help="Suggest per-disk concurrency from throughput samples.")
+    pbc.add_argument("--samples", default=None,
+                     help="Comma-separated 'conc=MBps' pairs, e.g. '1=50,2=95,4=140,8=150,16=130'.")
+    pbc.add_argument("--bias", choices=["conservative", "balanced", "aggressive"],
+                     default="balanced",
+                     help="conservative=stay below knee; balanced=at knee; aggressive=push past knee (default).")
+
     # ---- mcp (Model Context Protocol server; optional extra) ----
     pmcp = sub.add_parser(
         "mcp",
@@ -517,6 +536,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         return _cmd_mcp(args)
     if args.cmd == "stage":
         return _cmd_stage(args)
+    if args.cmd == "bench":
+        return _cmd_bench(args)
     if args.cmd == "nas":
         return _cmd_nas(args)
     if args.cmd == "service":
@@ -934,6 +955,62 @@ def _cmd_remote_sync(args) -> int:
         return 1
     print("[sync] all hosts synced OK.")
     return 0
+
+
+def _cmd_bench(args) -> int:
+    """kiroshi bench — measure true throughput + calibrate concurrency.
+
+    Subcommands:
+      rate       — report TRUE throughput from output-file mtimes (not wall-clock)
+      calibrate  — suggest per-disk concurrency from throughput-vs-concurrency samples
+    """
+    from . import bench
+
+    if args.bench_cmd == "rate":
+        if not args.dir:
+            print("[bench rate] --dir is required.", file=sys.stderr)
+            return 2
+        rate = bench.rate_from_dir(
+            args.dir, pattern=args.pattern,
+            recursive=not args.no_recursive)
+        print(f"[bench rate] {rate}")
+        print(f"  dir={args.dir}  pattern={args.pattern}"
+              f"  recursive={not args.no_recursive}")
+        if rate.count > 0:
+            print(f"  {rate.count} files, span={rate.span_s:.1f}s, "
+                  f"true rate={rate.items_per_s:.2f} files/s")
+        else:
+            print("  no files found matching the pattern.")
+        return 0
+
+    if args.bench_cmd == "calibrate":
+        if not args.samples:
+            print("[bench calibrate] --samples is required, e.g. "
+                  "--samples '1=50,2=95,4=140,8=150,16=130'", file=sys.stderr)
+            return 2
+        pairs = []
+        for token in args.samples.split(","):
+            token = token.strip()
+            if "=" not in token:
+                continue
+            conc_s, mbps_s = token.split("=", 1)
+            pairs.append((int(conc_s.strip()), float(mbps_s.strip())))
+        if not pairs:
+            print("[bench calibrate] could not parse any conc=MBps pairs.",
+                  file=sys.stderr)
+            return 2
+        rec = bench.suggest_concurrency(pairs, bias=args.bias)
+        print(f"[bench calibrate] recommended concurrency = {rec} "
+              f"(bias={args.bias})")
+        print(f"  samples: {pairs}")
+        peak_conc, peak_mbps = max(pairs, key=lambda s: s[1])
+        print(f"  peak: {peak_mbps:.1f} MB/s at concurrency {peak_conc}")
+        print(f"  suggested: concurrency {rec} "
+              f"(paste into [[storage.disk]] concurrency = {rec})")
+        return 0
+
+    print(f"[bench] unknown subcommand {args.bench_cmd!r}", file=sys.stderr)
+    return 2
 
 
 def _cmd_stage(args) -> int:

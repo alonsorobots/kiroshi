@@ -59,3 +59,46 @@ def rate_from_dir(root: os.PathLike[str] | str, pattern: str = "*", recursive: b
         return TrueRate(0.0, 0.0, 0)
     globber = root.rglob if recursive else root.glob
     return rate_from_files(p for p in globber(pattern) if p.is_file())
+
+
+# ---- concurrency calibration -------------------------------------------
+
+# Bias thresholds: fraction of peak throughput at which we consider the knee
+# "reached". conservative stays below the knee (fewer slots, less contention);
+# aggressive pushes to the peak; balanced is the default middle ground.
+_BIAS_THRESHOLDS = {
+    "conservative": 0.85,
+    "balanced": 0.90,
+    "aggressive": 1.0,
+}
+
+
+def suggest_concurrency(
+    samples: list[tuple[int, float]],
+    bias: str = "balanced",
+) -> int:
+    """Pick a per-disk ``concurrency`` from throughput-vs-concurrency samples.
+
+    ``samples`` is a list of ``(concurrency, throughput_Mbps)`` pairs — e.g.
+    measured by ``kiroshi nas benchmark`` or observed during a campaign. The
+    function finds the **knee**: the lowest concurrency where throughput
+    reaches a fraction of the peak, determined by ``bias``:
+
+      * ``conservative`` — 90% of peak (stays below the saturation cliff)
+      * ``balanced``     — 95% of peak (at the knee; recommended default)
+      * ``aggressive``   — 100% of peak (pushes to max throughput, risks thrash)
+
+    If throughput *declines* past a point (oversaturation), the conservative
+    and balanced biases naturally back off because the peak is before the
+    decline. If all samples are monotonically rising (no knee found), returns
+    the highest tested concurrency.
+    """
+    if not samples:
+        return 4                        # safe default
+    samples = sorted(samples, key=lambda s: s[0])    # sort by concurrency
+    max_mbps = max(s[1] for s in samples)
+    threshold = max_mbps * _BIAS_THRESHOLDS.get(bias, 0.95)
+    for conc, mbps in samples:
+        if mbps >= threshold:
+            return conc
+    return samples[-1][0]               # monotonically rising — push to max tested
