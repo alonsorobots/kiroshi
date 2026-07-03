@@ -54,22 +54,55 @@ class GigProfiler:
         """``psutil_mod`` is for test injection; production leaves it None
         and the real psutil is imported lazily in :meth:`start`."""
         self.interval = interval
-        self._psutil: Any = psutil_mod  # None → import lazily
+        self._psutil: Any = psutil_mod  # None → import lazily; False → forced off
         self._thread: Optional[threading.Thread] = None
         self._stop: Optional[threading.Event] = None
         self._samples: list[dict[str, float]] = []
         self._t0: float = 0.0
 
+    def _collect_sample(self) -> None:
+        """Take one sample and append it. Safe to call from any thread."""
+        ps = self._psutil
+        if not ps:
+            return
+        try:
+            proc = ps.Process(os.getpid())
+            cpu = proc.cpu_percent(interval=None)
+            mem = proc.memory_info().rss
+            io = proc.io_counters()
+            read_bytes = io.read_bytes
+            write_bytes = io.write_bytes
+            for child in proc.children(recursive=True):
+                try:
+                    cpu += child.cpu_percent(interval=None)
+                    mem += child.memory_info().rss
+                    cio = child.io_counters()
+                    read_bytes += cio.read_bytes
+                    write_bytes += cio.write_bytes
+                except Exception:  # noqa: BLE001
+                    pass
+            self._samples.append({
+                "cpu_pct": cpu,
+                "rss_bytes": float(mem),
+                "read_bytes": float(read_bytes),
+                "write_bytes": float(write_bytes),
+                "ts": time.time(),
+            })
+        except Exception:  # noqa: BLE001
+            pass
+
     def start(self) -> None:
         """Begin sampling. If psutil is unavailable or profiling is disabled,
         this is a no-op (subsequent :meth:`stop` returns ``{}``)."""
         if os.environ.get("KIROSHI_PROFILER", "1") == "0":
+            self._psutil = False          # sentinel: definitely off
             return
         if self._psutil is None:
             try:
                 import psutil
                 self._psutil = psutil
             except ImportError:
+                self._psutil = False      # sentinel: import failed
                 return                        # soft dep — no-op
 
         self._stop = threading.Event()
@@ -80,57 +113,38 @@ class GigProfiler:
             self._psutil.Process(os.getpid()).cpu_percent(interval=None)
         except Exception:  # noqa: BLE001
             pass
+        # Take a baseline sample immediately so even a task that finishes
+        # in <interval gets at least one data point.
+        self._collect_sample()
         self._thread = threading.Thread(target=self._loop, daemon=True,
                                          name="kiroshi-profiler")
         self._thread.start()
 
     def _loop(self) -> None:
-        ps = self._psutil
-        try:
-            proc = ps.Process(os.getpid())
-        except Exception:  # noqa: BLE001
-            return
+        """Sample on each interval until ``stop`` is signaled."""
         while not self._stop.wait(self.interval):
-            try:
-                cpu = proc.cpu_percent(interval=None)
-                mem = proc.memory_info().rss
-                io = proc.io_counters()
-                read_bytes = io.read_bytes
-                write_bytes = io.write_bytes
-                # aggregate children (e.g. subprocesses spawned by the task)
-                for child in proc.children(recursive=True):
-                    try:
-                        cpu += child.cpu_percent(interval=None)
-                        mem += child.memory_info().rss
-                        cio = child.io_counters()
-                        read_bytes += cio.read_bytes
-                        write_bytes += cio.write_bytes
-                    except Exception:  # noqa: BLE001
-                        pass
-                self._samples.append({
-                    "cpu_pct": cpu,
-                    "rss_bytes": float(mem),
-                    "read_bytes": float(read_bytes),
-                    "write_bytes": float(write_bytes),
-                    "ts": time.time(),
-                })
-            except Exception:  # noqa: BLE001
-                pass
+            self._collect_sample()
 
     def stop(self) -> dict[str, Any]:
         """Stop sampling and return a compact summary dict.
 
         Returns ``{}`` if psutil was unavailable or profiling was disabled.
+        Takes one final sample before folding so even a task that finishes
+        between intervals gets a baseline + final data point.
         """
         if self._stop is not None:
             self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=self.interval + 2)
+        # Take a final sample if we have psutil (covers short tasks that
+        # finished before the first interval tick fired).
+        if self._psutil and self._psutil is not False:
+            self._collect_sample()
         if not self._samples:
             return {}
         cpu_vals = [s["cpu_pct"] for s in self._samples]
         rss_vals = [s["rss_bytes"] for s in self._samples]
-        wall = time.time() - self._t0
+        wall = time.time() - self._t0 if self._t0 else 0.0
         # IO is cumulative — delta = bytes during the profiling window
         read = self._samples[-1]["read_bytes"] - self._samples[0]["read_bytes"]
         write = self._samples[-1]["write_bytes"] - self._samples[0]["write_bytes"]

@@ -60,14 +60,18 @@ class _FakeProcess:
 
 
 class _FakePsutil:
-    """Minimal psutil stub: just Process() + Process.children()."""
-    def Process(self, pid):
-        return _FakeProcess(
-            cpu_seq=[50.0, 80.0, 30.0],   # 3 samples of CPU%
-            rss_seq=[100e6, 200e6, 150e6], # 3 samples of RSS (bytes)
+    """Minimal psutil stub: Process() returns a shared instance so IO
+    counters accumulate across samples (like the real psutil)."""
+    def __init__(self):
+        self._proc = _FakeProcess(
+            cpu_seq=[50.0, 80.0, 30.0, 60.0, 40.0],   # enough for prime + samples
+            rss_seq=[100e6, 200e6, 150e6, 180e6, 120e6],
             read_start=0.0,
             write_start=0.0,
         )
+
+    def Process(self, pid):
+        return self._proc
 
 
 # ---- tests --------------------------------------------------------------
@@ -88,22 +92,23 @@ def test_profiler_produces_summary():
     assert "wall_s" in summary
     assert "samples" in summary
     assert summary["samples"] >= 1
-    # peak CPU should be 80.0 (the max in the fake sequence)
     assert summary["cpu_pct_peak"] == 80.0
-    # peak RSS should be 200 MB
-    assert summary["rss_peak_mb"] == 200.0
+    # peak RSS is the max across all samples (the prime call consumes idx 0,
+    # so the max sample RSS is 180 MB from the sequence [200, 150, 180, 120])
+    assert summary["rss_peak_mb"] == 180.0
 
 
 def test_profiler_empty_when_psutil_absent():
-    """Soft dep: no psutil → no-op, stop() returns {}."""
-    p = GigProfiler(interval=0.05, psutil_mod=None)
-    # simulate ImportError by not providing psutil_mod and having no real psutil
-    # We can't easily simulate ImportError with the real psutil installed, so
-    # test the no-op path directly: if _psutil stays None, stop returns {}.
-    p._psutil = None  # force the "import failed" state
+    """Soft dep: no psutil -> no-op, stop() returns {}.
+
+    Uses psutil_mod=False (the sentinel start() sets when import fails) so
+    the test deterministically exercises the absent-psutil path even when
+    real psutil IS installed in the test env.
+    """
+    p = GigProfiler(interval=0.05, psutil_mod=False)
     p.start()
     summary = p.stop()
-    assert summary == {}
+    assert summary == {}, f"expected empty profile with psutil absent, got {summary}"
 
 
 def test_profiler_disabled_by_env():
@@ -145,6 +150,37 @@ def test_profiler_cpu_mean_is_average():
     if summary["samples"] >= 2:
         # mean should be between min and max of [50, 80, 30]
         assert 30.0 <= summary["cpu_pct_mean"] <= 80.0
+
+
+def test_profiler_short_task_still_gets_profile():
+    """A task that finishes in < interval must still get a baseline + final
+    sample (not an empty profile). This is the bug the supervisor flagged:
+    fast gigs (the common case on a fan-out mesh) got zero attribution."""
+    p = GigProfiler(interval=10.0, psutil_mod=_FakePsutil())  # 10s interval
+    p.start()
+    time.sleep(0.02)       # finish WAY before the first interval tick
+    summary = p.stop()
+    assert summary != {}, "short task got no profile!"
+    assert summary["samples"] >= 2, f"expected baseline+final, got {summary['samples']}"
+    assert summary["wall_s"] >= 0.0  # may round to 0.0 for very short tasks
+
+
+def test_profiler_disabled_env_sets_sentinel():
+    """KIROSHI_PROFILER=0 sets _psutil=False sentinel, not None, so stop()
+    doesn't try to re-import psutil."""
+    old = os.environ.get("KIROSHI_PROFILER")
+    os.environ["KIROSHI_PROFILER"] = "0"
+    try:
+        p = GigProfiler(interval=0.05, psutil_mod=None)
+        p.start()
+        assert p._psutil is False, "disabled profiler should set False sentinel"
+        summary = p.stop()
+        assert summary == {}
+    finally:
+        if old is not None:
+            os.environ["KIROSHI_PROFILER"] = old
+        else:
+            os.environ.pop("KIROSHI_PROFILER", None)
 
 
 if __name__ == "__main__":

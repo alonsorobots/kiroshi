@@ -1087,9 +1087,7 @@ def _cmd_bench(args) -> int:
 def _cmd_jobs(args) -> int:
     """Search/list jobs by regex on job_id or error, filtered by state/group."""
     import requests
-    fixer = args.fixer
-    if fixer == "auto":
-        fixer = _resolve_fixer_arg(args.fixer)
+    fixer = _resolve_fixer_arg(args.fixer)
     params: dict[str, Any] = {"limit": min(max(args.limit, 1), 2000)}
     if args.state:
         params["state"] = args.state
