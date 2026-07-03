@@ -208,6 +208,45 @@ def build_server(default_fixer: Optional[str] = None,
         coord.tick()
         return {"log": log_lines}
 
+    @app.tool(description="Stage (copy) a dataset between storage tiers with "
+                          "mesh I/O budgeting. Returns the enumerated gig count; "
+                          "use 'seed_gigs' or 'kiroshi runner' to execute them.")
+    def stage_data(src_root: str, dst_root: str, pattern: str = "*",
+                   fixer: Optional[str] = None,
+                   token: Optional[str] = None) -> dict:
+        from .staging import enumerate_gigs
+        gigs = list(enumerate_gigs(
+            {"from": src_root, "to": dst_root, "pattern": pattern}))
+        if fixer and gigs:
+            _post(_fx(fixer), "/seed", _tk(token),
+                  {"gigs": gigs, "group": f"stage-{int(__import__('time').time())}",
+                   "label": f"stage: {src_root} -> {dst_root}"})
+        return {"gig_count": len(gigs), "fixer": fixer,
+                "task": "kiroshi.staging:run"}
+
+    @app.tool(description="Measure TRUE throughput of a campaign from output "
+                          "file mtimes (not wall-clock). Requires filesystem "
+                          "access to the output directory.")
+    def bench_rate(output_dir: str, pattern: str = "*",
+                   recursive: bool = True) -> dict:
+        from . import bench as _bench
+        rate = _bench.rate_from_dir(output_dir, pattern=pattern,
+                                    recursive=recursive)
+        return {"count": rate.count, "span_s": rate.span_s,
+                "items_per_s": rate.items_per_s}
+
+    @app.tool(description="Suggest per-disk concurrency from throughput-vs-"
+                          "concurrency samples. Pass a list of [concurrency, "
+                          "mbps] pairs; returns the recommended concurrency.")
+    def bench_calibrate(samples: list[list[float]],
+                        bias: str = "balanced") -> dict:
+        from . import bench as _bench
+        pairs = [(int(s[0]), float(s[1])) for s in samples]
+        rec = _bench.suggest_concurrency(pairs, bias=bias)
+        peak_conc, peak_mbps = max(pairs, key=lambda s: s[1])
+        return {"recommended_concurrency": rec, "bias": bias,
+                "peak_mbps": peak_mbps, "peak_at_concurrency": peak_conc}
+
     return app
 
 

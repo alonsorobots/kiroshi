@@ -284,10 +284,16 @@ def main(argv: Optional[list[str]] = None) -> int:
     pbr = pb_sub.add_parser("rate", help="Report TRUE throughput of a completed/running campaign.")
     pbr.add_argument("--dir", default=None,
                      help="Output directory to scan (uses file mtimes).")
+    pbr.add_argument("--fixer", default=None,
+                     help="Fixer URL — use with --group to derive throughput from "
+                          "per-gig completed_at timestamps over HTTP (no FS access needed).")
+    pbr.add_argument("--group", default=None,
+                     help="Campaign slug (with --fixer). Filters /jobs to this group.")
     pbr.add_argument("--pattern", default="*",
-                     help="Filename glob (default: all).")
+                     help="Filename glob (with --dir only; default: all).")
     pbr.add_argument("--no-recursive", action="store_true",
-                     help="Only scan the top level (no subdirectories).")
+                     help="Only scan the top level (with --dir only).")
+    pbr.add_argument("--token", default=None, help="Mesh auth token (with --fixer).")
     pbc = pb_sub.add_parser("calibrate", help="Suggest per-disk concurrency from throughput samples.")
     pbc.add_argument("--samples", default=None,
                      help="Comma-separated 'conc=MBps' pairs, e.g. '1=50,2=95,4=140,8=150,16=130'.")
@@ -967,8 +973,33 @@ def _cmd_bench(args) -> int:
     from . import bench
 
     if args.bench_cmd == "rate":
+        if args.fixer:
+            # HTTP mode: derive true throughput from per-gig completed_at over /jobs
+            import requests
+            params = {"state": "done", "limit": 2000, "grp": args.group or ""}
+            if args.token:
+                params["token"] = args.token
+            r = requests.get(f"{args.fixer.rstrip('/')}/jobs",
+                             params=params, timeout=30)
+            r.raise_for_status()
+            rows = r.json().get("jobs", [])
+            times = [row["completed_at"] for row in rows
+                     if row.get("completed_at")]
+            if not times:
+                print(f"[bench rate] no completed gigs found for group "
+                      f"{args.group!r} on {args.fixer}.")
+                return 0
+            t0, t1 = min(times), max(times)
+            span = max(0.0, t1 - t0)
+            rate = span / len(times) if len(times) > 0 and span > 0 else 0.0
+            print(f"[bench rate] group={args.group}  fixer={args.fixer}")
+            print(f"  {len(times)} completed gigs, span={span:.1f}s, "
+                  f"true rate={len(times)/span:.2f} gigs/s" if span > 0
+                  else f"  {len(times)} completed gigs, span=0s, rate=n/a")
+            return 0
         if not args.dir:
-            print("[bench rate] --dir is required.", file=sys.stderr)
+            print("[bench rate] --dir or --fixer+--group is required.",
+                  file=sys.stderr)
             return 2
         rate = bench.rate_from_dir(
             args.dir, pattern=args.pattern,
@@ -1042,9 +1073,14 @@ def _cmd_stage(args) -> int:
         payload = {"gigs": gigs, "group": group,
                    "label": f"stage: {args.src_root} -> {args.dst_root}"}
         params = {"token": args.token} if args.token else {}
-        r = requests.post(f"{args.fixer.rstrip('/')}/seed",
-                          params=params, json=payload, timeout=60)
-        r.raise_for_status()
+        try:
+            r = requests.post(f"{args.fixer.rstrip('/')}/seed",
+                              params=params, json=payload, timeout=60)
+            r.raise_for_status()
+        except requests.RequestException as exc:
+            print(f"[stage] FAILED to seed to {args.fixer}: {exc}",
+                  file=sys.stderr)
+            return 1
         print(f"[stage] seeded {len(gigs)} gigs to {args.fixer} (group={group}).")
         print(f"  Start a runner:  kiroshi runner --fixer {args.fixer} "
               f"--task kiroshi.staging:run --workers N "

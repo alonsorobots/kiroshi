@@ -91,6 +91,44 @@ kinds (`each` / `quorum:k` / `all` / `artifact`).
 
 ---
 
+## Staging data between storage tiers
+
+Before a compute stage can run fast, you often need to copy a dataset from a
+slow tier (HDD array) to a fast tier (NVMe cache). `kiroshi stage` does this
+as a budgeted, resumable mesh job — replacing hand-rolled parallel rsync:
+
+```
+# local (in-process, like 'kiroshi run'):
+kiroshi stage --from //NAS/array/data --to //NAS/cache/data --workers 8
+
+# mesh (seed gigs; a runner distributes the copies):
+kiroshi stage --from //NAS/array/data --to //NAS/cache/data \
+              --fixer http://coordinator:8800 --group warm-cache
+kiroshi runner --fixer http://coordinator:8800 --task kiroshi.staging:run --workers 16
+```
+
+Files already copied (same size) are skipped — kill and restart is free.
+
+## Measuring + calibrating throughput
+
+Don't guess per-disk `concurrency` — measure it:
+
+```
+# 1. benchmark a disk at increasing concurrency:
+kiroshi nas benchmark --root //NAS/disk1 --concurrency 1,2,4,8,16
+
+# 2. turn the results into a recommendation:
+kiroshi bench calibrate --samples '1=50,2=95,4=140,8=150,16=130' --bias balanced
+#   -> recommended concurrency = 4 (paste into [[storage.disk]])
+
+# 3. after a campaign, report TRUE end-to-end throughput:
+kiroshi bench rate --dir //NAS/cache/outputs --pattern '*.npz'
+#   or over HTTP (no FS access needed):
+kiroshi bench rate --fixer http://coordinator:8800 --group my-campaign --token <TOKEN>
+```
+
+---
+
 ## Where to go next
 
 - **`AGENTS.md`** — task-indexed capability map (this doc's parent).

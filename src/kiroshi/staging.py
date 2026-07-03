@@ -30,6 +30,7 @@ coordination (the work still runs, just without contention protection).
 """
 from __future__ import annotations
 
+import fnmatch
 import logging
 import os
 import shutil
@@ -37,8 +38,10 @@ import tempfile
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Generator, Optional
+from typing import Any, Generator, Iterator, Optional
 
+from . import kfs
+from . import paths as kpaths
 from .resource import ResourceClient
 
 logger = logging.getLogger(__name__)
@@ -141,12 +144,6 @@ def _null_ctx():
 # handles retry, resume (skip-if-exists), per-disk budgeting via ResourceClient,
 # and true-throughput reporting via bench.rate_from_dir.
 
-import fnmatch
-from typing import Any, Iterator
-
-from . import kfs
-from . import paths as kpaths
-
 
 def enumerate_gigs(args: dict[str, Any]) -> Iterator[dict[str, Any]]:
     """Walk ``args["from"]`` and yield one copy gig per file.
@@ -224,7 +221,11 @@ def run(spec: dict[str, Any]) -> dict[str, Any]:
         except OSError:
             pass  # size check failed — re-copy to be safe
 
-    # I/O budget (fail-open)
+    # I/O budget (fail-open): use proper context managers so __enter__ runs
+    # the POST /resource/acquire and __exit__ runs the release. The old code
+    # called acquire() bare (which only constructs the slot object) and then
+    # __exit__ manually — which released nothing because __enter__ was never
+    # called, silently disabling the mesh budget.
     fixer = os.environ.get("KIROSHI_FIXER")
     token = os.environ.get("KIROSHI_TOKEN")
     client = None
@@ -235,22 +236,14 @@ def run(spec: dict[str, Any]) -> dict[str, Any]:
             client = None
 
     src_disk = spec.get("disk")           # optional; topology router may set it
-    read_slot = client.acquire(disk=src_disk, mode="read") if client else None
-    write_slot = client.acquire(mode="write") if client else None
-    try:
+    read_cm = client.acquire(disk=src_disk, mode="read") if client else _null_ctx()
+    write_cm = client.acquire(mode="write") if client else _null_ctx()
+    with read_cm, write_cm:
         try:
             n = _copy_file(src, dst)
         except FileNotFoundError:
             parent = dst.rsplit("/", 1)[0].rsplit("\\", 1)[0]
             kfs.makedirs(parent, exist_ok=True)
             n = _copy_file(src, dst)
-    finally:
-        # slots are context-managed but we acquired them bare; release explicitly
-        for slot in (read_slot, write_slot):
-            if slot is not None:
-                try:
-                    slot.__exit__(None, None, None)
-                except Exception:  # noqa: BLE001
-                    pass
 
     return {"status": "ok", "metrics": {"bytes": n}}

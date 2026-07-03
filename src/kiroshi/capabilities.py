@@ -95,10 +95,10 @@ CAPABILITIES: list[dict[str, Any]] = [
     },
     {
         "name": "bench",
-        "purpose": "True throughput reporting (from output mtimes, not wall-clock) + concurrency calibration from throughput samples.",
-        "command": "kiroshi bench rate --dir <outputs>  |  kiroshi bench calibrate --samples '1=50,2=95,4=140,8=150'",
-        "when_to_use": "rate: get honest end-to-end throughput of a completed/running campaign. calibrate: turn nas-benchmark samples into a per-disk concurrency recommendation (paste into topology).",
-        "when_not": "rate needs filesystem access to the outputs (can't do it over HTTP yet). calibrate needs representative samples — don't calibrate on a cold cache.",
+        "purpose": "True throughput reporting (from output mtimes or per-gig completed_at over HTTP) + concurrency calibration from samples.",
+        "command": "kiroshi bench rate --dir <outputs> | --fixer <url> --group <slug>  |  kiroshi bench calibrate --samples '1=50,2=95,4=140,8=150'",
+        "when_to_use": "rate --dir: honest throughput from output-file mtimes (FS access). rate --fixer: same, from /jobs completed_at (no FS access). calibrate: turn nas-benchmark samples into a per-disk concurrency recommendation.",
+        "when_not": "calibrate needs representative samples — don't calibrate on a cold cache. rate --fixer needs the Fixer reachable + a valid group.",
     },
     {
         "name": "nas.shard",
