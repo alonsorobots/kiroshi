@@ -25,8 +25,18 @@ token   = "REPLACE_WITH_MESH_TOKEN"
 poll_s  = 60
 
 # ---- stages -------------------------------------------------------------
-# "reduce" is the SOURCE: seeded/served by its own Fixer+runner already. The
-# pipeline only OBSERVES its done set — it needs no template/command.
+# "warm_cache" is a STAGING source: copy the canonical dataset from a slow
+# tier (HDD array) to a fast tier (NVMe cache) before compute starts. Seed it
+# with:  kiroshi stage --fixer http://127.0.0.1:8800 --from //array/data \
+#          --to //cache/data --group warm-cache
+# The pipeline's 'all' edge below makes 'reduce' wait until every file is
+# staged. (Use 'each' instead to pipeline staging + compute per-item.)
+[stages.warm_cache]
+fixer = "http://127.0.0.1:8800"
+group = "warm-cache"
+task = "kiroshi.staging:run"
+
+# "reduce" is a downstream compute stage that reads the staged data.
 [stages.reduce]
 fixer = "http://127.0.0.1:8800"
 group = "reduce"
@@ -70,6 +80,11 @@ write_root = "//NAS/pipeline"
 codebook_path = "/data/codebooks/codebook.npz"
 
 # ---- edges --------------------------------------------------------------
+[[edges]]
+from = "warm_cache"
+to   = "reduce"
+kind = "all"                             # wait for ALL files staged before compute
+
 [[edges]]
 from = "reduce"
 to   = "resample"
