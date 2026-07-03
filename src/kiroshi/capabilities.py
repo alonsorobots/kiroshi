@@ -45,6 +45,13 @@ CAPABILITIES: list[dict[str, Any]] = [
         "when_not": "Don't hand-roll per-gig POSTs; the CLI batches + dedups.",
     },
     {
+        "name": "stage",
+        "purpose": "Copy a dataset between storage tiers with mesh I/O budgeting + resume. Replaces hand-rolled parallel rsync.",
+        "command": "kiroshi stage --from <src-root> --to <dst-root> [--pattern glob] [--fixer <url>]",
+        "when_to_use": "Tier promotion (HDD->NVMe), remote fetch, or cross-node prefetch before a compute stage. Shares the mesh I/O budget via ResourceClient; skips already-copied files (resumable).",
+        "when_not": "Single-file copies inside a task — use kfs directly. Don't use for compute (it's a data-movement verb, not a transform).",
+    },
+    {
         "name": "pipeline",
         "purpose": "Declarative multi-stage pipeline with typed dependency edges.",
         "command": "kiroshi pipeline run spec.toml   # or: validate spec.toml",

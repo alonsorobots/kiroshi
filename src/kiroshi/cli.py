@@ -254,6 +254,28 @@ def main(argv: Optional[list[str]] = None) -> int:
     pcap.add_argument("--json", dest="as_json", action="store_true",
                       help="Emit the capability list as JSON (for LLM agents / MCP).")
 
+    # ---- stage (budgeted, resumable data movement) ----
+    pst = sub.add_parser(
+        "stage",
+        help="Stage (copy) a dataset between storage tiers with mesh I/O budgeting.")
+    pst.add_argument("--from", dest="src_root", required=True,
+                     help="Source root (local, UNC, or mapped drive).")
+    pst.add_argument("--to", dest="dst_root", required=True,
+                     help="Destination root (same path types).")
+    pst.add_argument("--pattern", default="*",
+                     help="Filename glob filter (default: all files).")
+    pst.add_argument("--fixer", default=None,
+                     help="If set, seed gigs to this Fixer for mesh execution. "
+                          "If omitted, runs in-process like 'kiroshi run'.")
+    pst.add_argument("--workers", type=int, default=0,
+                     help="Local worker processes (default: cpu_count). "
+                          "Mesh mode: start a runner separately.")
+    pst.add_argument("--group", default=None,
+                     help="Campaign slug (mesh mode only). Default: 'stage-<timestamp>'.")
+    pst.add_argument("--token", default=None, help="Mesh auth token.")
+    pst.add_argument("--gig-timeout", type=int, default=300,
+                     help="Per-gig timeout in seconds (local mode only).")
+
     # ---- mcp (Model Context Protocol server; optional extra) ----
     pmcp = sub.add_parser(
         "mcp",
@@ -493,6 +515,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         return _cmd_capabilities(args)
     if args.cmd == "mcp":
         return _cmd_mcp(args)
+    if args.cmd == "stage":
+        return _cmd_stage(args)
     if args.cmd == "nas":
         return _cmd_nas(args)
     if args.cmd == "service":
@@ -910,6 +934,59 @@ def _cmd_remote_sync(args) -> int:
         return 1
     print("[sync] all hosts synced OK.")
     return 0
+
+
+def _cmd_stage(args) -> int:
+    """Stage (copy) a dataset between storage tiers with mesh I/O budgeting.
+
+    Two execution paths:
+      * local (no --fixer): reuses the in-process run_job pipeline with
+        kiroshi.staging:run + enumerate_gigs (same as 'kiroshi run --enumerate').
+      * mesh (--fixer): enumerates gigs locally, seeds them to the Fixer; the
+        operator starts a runner bound to kiroshi.staging:run separately.
+    """
+    from .staging import enumerate_gigs
+
+    task_args = ["--from", args.src_root, "--to", args.dst_root]
+    if args.pattern and args.pattern != "*":
+        task_args += ["--pattern", args.pattern]
+
+    if args.fixer:
+        # mesh mode: enumerate + seed
+        gigs = list(enumerate_gigs({
+            "from": args.src_root, "to": args.dst_root,
+            "pattern": args.pattern,
+        }))
+        if not gigs:
+            print("[stage] no files found to stage.", file=sys.stderr)
+            return 1
+        group = args.group or f"stage-{int(time.time())}"
+        import requests
+        payload = {"gigs": gigs, "group": group,
+                   "label": f"stage: {args.src_root} -> {args.dst_root}"}
+        params = {"token": args.token} if args.token else {}
+        r = requests.post(f"{args.fixer.rstrip('/')}/seed",
+                          params=params, json=payload, timeout=60)
+        r.raise_for_status()
+        print(f"[stage] seeded {len(gigs)} gigs to {args.fixer} (group={group}).")
+        print(f"  Start a runner:  kiroshi runner --fixer {args.fixer} "
+              f"--task kiroshi.staging:run --workers N "
+              f"--syspath <kiroshi-src> --syspath <kiroshi-src>/src")
+        return 0
+
+    # local mode: reuse run_job
+    from .runjob import run_job
+    return run_job(
+        "kiroshi.staging:run",
+        enumerate_=True,
+        task_args=task_args,
+        read_root=args.src_root,
+        write_root=args.dst_root,
+        workers=args.workers,
+        gig_timeout=float(args.gig_timeout),
+        token=args.token,
+        syspath=None,
+    )
 
 
 def _cmd_mcp(args) -> int:

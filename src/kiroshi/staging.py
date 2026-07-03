@@ -134,3 +134,123 @@ def bulk_download(url: str, dest: str, client: Optional[ResourceClient] = None,
 def _null_ctx():
     """No-op context manager for when no ResourceClient is available."""
     yield None
+
+
+# ---- mesh-task ABI (run + enumerate_gigs) --------------------------------
+# These let the staging copy be distributed as normal Kiroshi gigs — the mesh
+# handles retry, resume (skip-if-exists), per-disk budgeting via ResourceClient,
+# and true-throughput reporting via bench.rate_from_dir.
+
+import fnmatch
+from typing import Any, Iterator
+
+from . import kfs
+from . import paths as kpaths
+
+
+def enumerate_gigs(args: dict[str, Any]) -> Iterator[dict[str, Any]]:
+    """Walk ``args["from"]`` and yield one copy gig per file.
+
+    Each gig copies ``<from>/<rel>`` → ``<to>/<rel>``. The ``read_root`` and
+    ``write_root`` are embedded in the spec so mesh runners (which may have
+    different env vars) resolve paths correctly.
+
+    ``args["pattern"]`` (default ``"*"``) filters filenames. ``args["by"]``
+    (``"file"`` default, ``"shard"`` future) controls granularity.
+    """
+    src_root = str(args["from"]).rstrip("/\\")
+    dst_root = str(args["to"]).rstrip("/\\")
+    pattern = args.get("pattern") or "*"
+    sep = "\\" if kfs.is_unc(src_root) else os.sep
+
+    def _rel(full: str) -> str:
+        f = str(full).replace("\\", "/").rstrip("/")
+        b = src_root.replace("\\", "/").rstrip("/")
+        return f[len(b):].lstrip("/") if f.startswith(b) else f
+
+    for dirpath, _dirs, files in kfs.walk(src_root):
+        for fn in files:
+            if not fnmatch.fnmatch(fn, pattern):
+                continue
+            full = str(dirpath).rstrip("/\\") + sep + fn
+            rel = _rel(full)
+            yield {
+                "job_id": rel,
+                "spec": {
+                    "src_path": rel,
+                    "dst_path": rel,          # same rel under dst_root
+                    "read_root":  src_root,
+                    "write_root": dst_root,
+                },
+            }
+
+
+def _copy_file(src: str, dst: str) -> int:
+    """Stream-copy ``src`` → ``dst`` crash-safely via kfs. Returns bytes copied."""
+    with kfs.open(src, "rb") as fin, kfs.atomic_write(dst) as fout:
+        buf = fin.read(1 << 20)     # 1 MiB chunks
+        total = 0
+        while buf:
+            fout.write(buf)
+            total += len(buf)
+            buf = fin.read(1 << 20)
+    return total
+
+
+def run(spec: dict[str, Any]) -> dict[str, Any]:
+    """Mesh task: copy one file ``src→dst`` with I/O-budget coordination.
+
+    Idempotent (skip if dst exists with same byte count). Acquires a read slot
+    on the source disk and a write slot for the dest via ResourceClient
+    (fail-open if the Fixer is unreachable). Parent dirs are created lazily.
+    """
+    read_root = kpaths.gig_read_root(spec) or os.environ.get("KIROSHI_READ_ROOT")
+    write_root = kpaths.gig_write_root(spec) or os.environ.get("KIROSHI_WRITE_ROOT")
+    if not read_root or not write_root:
+        raise RuntimeError(
+            "staging.run: spec has no read_root/write_root and "
+            "KIROSHI_READ_ROOT/KIROSHI_WRITE_ROOT are unset")
+    src = kpaths.confined_join(read_root, spec["src_path"])
+    dst = kpaths.confined_join(write_root, spec["dst_path"])
+
+    # idempotent skip
+    if kfs.exists(dst):
+        try:
+            src_sz = os.path.getsize(src) if kfs.exists(src) else -1
+            dst_sz = os.path.getsize(dst)
+            if src_sz == dst_sz and src_sz >= 0:
+                return {"status": "skipped", "metrics": {"reason": "exists",
+                        "bytes": dst_sz}}
+        except OSError:
+            pass  # size check failed — re-copy to be safe
+
+    # I/O budget (fail-open)
+    fixer = os.environ.get("KIROSHI_FIXER")
+    token = os.environ.get("KIROSHI_TOKEN")
+    client = None
+    if fixer:
+        try:
+            client = ResourceClient(fixer, token)
+        except Exception:  # noqa: BLE001
+            client = None
+
+    src_disk = spec.get("disk")           # optional; topology router may set it
+    read_slot = client.acquire(disk=src_disk, mode="read") if client else None
+    write_slot = client.acquire(mode="write") if client else None
+    try:
+        try:
+            n = _copy_file(src, dst)
+        except FileNotFoundError:
+            parent = dst.rsplit("/", 1)[0].rsplit("\\", 1)[0]
+            kfs.makedirs(parent, exist_ok=True)
+            n = _copy_file(src, dst)
+    finally:
+        # slots are context-managed but we acquired them bare; release explicitly
+        for slot in (read_slot, write_slot):
+            if slot is not None:
+                try:
+                    slot.__exit__(None, None, None)
+                except Exception:  # noqa: BLE001
+                    pass
+
+    return {"status": "ok", "metrics": {"bytes": n}}
