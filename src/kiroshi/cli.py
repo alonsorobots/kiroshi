@@ -277,7 +277,25 @@ def main(argv: Optional[list[str]] = None) -> int:
                      help="Campaign slug (mesh mode only). Default: 'stage-<timestamp>'.")
     pst.add_argument("--token", default=None, help="Mesh auth token.")
     pst.add_argument("--gig-timeout", type=int, default=300,
-                     help="Per-gig timeout in seconds (local mode only).")
+                      help="Per-gig timeout in seconds (local mode only).")
+
+    # ---- jobs (search/list jobs by regex) ----
+    pj = sub.add_parser(
+        "jobs",
+        help="Search/list jobs by regex on job_id or error, filtered by state/group.")
+    pj.add_argument("--fixer", default=cfg.fixer_url, help="Fixer base URL, or 'auto'.")
+    pj.add_argument("--grep", default=None,
+                    help="Regex to match against job_id (default) or error (--field error).")
+    pj.add_argument("--field", choices=["job_id", "error"], default="job_id",
+                    help="Which column --grep matches (default: job_id).")
+    pj.add_argument("--state", default=None,
+                    help="Comma-separated states to filter (e.g. 'failed,leased').")
+    pj.add_argument("--group", default=None, help="Campaign slug filter.")
+    pj.add_argument("--limit", type=int, default=200,
+                    help="Max rows to return (server caps at 2000).")
+    pj.add_argument("--token", default=None, help="Mesh auth token.")
+    pj.add_argument("--json", dest="as_json", action="store_true",
+                    help="Emit rows as JSON (for LLM agents / piping).")
 
     # ---- bench (true throughput + concurrency calibration) ----
     pb = sub.add_parser(
@@ -545,6 +563,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         return _cmd_mcp(args)
     if args.cmd == "stage":
         return _cmd_stage(args)
+    if args.cmd == "jobs":
+        return _cmd_jobs(args)
     if args.cmd == "bench":
         return _cmd_bench(args)
     if args.cmd == "nas":
@@ -1062,6 +1082,55 @@ def _cmd_bench(args) -> int:
 
     print(f"[bench] unknown subcommand {args.bench_cmd!r}", file=sys.stderr)
     return 2
+
+
+def _cmd_jobs(args) -> int:
+    """Search/list jobs by regex on job_id or error, filtered by state/group."""
+    import requests
+    fixer = args.fixer
+    if fixer == "auto":
+        fixer = _resolve_fixer_arg(args.fixer)
+    params: dict[str, Any] = {"limit": min(max(args.limit, 1), 2000)}
+    if args.state:
+        params["state"] = args.state
+    if args.group:
+        params["grp"] = args.group
+    if args.grep:
+        if args.field == "error":
+            params["error_re"] = args.grep
+        else:
+            params["job_id_re"] = args.grep
+    if args.token:
+        params["token"] = args.token
+    try:
+        r = requests.get(f"{fixer.rstrip('/')}/jobs", params=params, timeout=30)
+        r.raise_for_status()
+    except requests.RequestException as exc:
+        print(f"[jobs] FAILED to reach {fixer}: {exc}", file=sys.stderr)
+        return 1
+    body = r.json()
+    if "error" in body:
+        print(f"[jobs] {body['error']}", file=sys.stderr)
+        return 1
+    rows = body.get("jobs", [])
+    if not rows:
+        print("[jobs] no matching jobs found.")
+        return 0
+    if args.as_json:
+        print(json.dumps(rows, indent=2, default=str))
+        return 0
+    # compact table
+    print(f"{'JOB_ID':40s} {'STATE':10s} {'ATT':>3s} {'DISK':8s} ERROR")
+    print("-" * 80)
+    for row in rows:
+        jid = (row.get("job_id") or "")[:40]
+        state = row.get("state", "")[:10]
+        att = str(row.get("attempts", ""))
+        disk = str(row.get("disk") or "")[:8]
+        err = (row.get("error") or "")[:40]
+        print(f"{jid:40s} {state:10s} {att:>3s} {disk:8s} {err}")
+    print(f"\n{len(rows)} job(s) shown.")
+    return 0
 
 
 def _cmd_stage(args) -> int:

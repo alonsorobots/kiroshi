@@ -171,6 +171,25 @@ def build_server(default_fixer: Optional[str] = None,
         return _post(_fx(fixer), "/seed", _tk(token),
                      {"gigs": gigs, "group": group, "label": label})
 
+    @app.tool(description="Search jobs by regex on job_id (default) or error, "
+                          "filtered by state/group. Returns matching job rows "
+                          "(job_id, state, attempts, error, metrics, etc.).")
+    def search_jobs(regex: str = "", field: str = "job_id",
+                    state: str = "", group: str = "", limit: int = 200,
+                    fixer: Optional[str] = None,
+                    token: Optional[str] = None) -> dict:
+        params = {"limit": min(max(limit, 1), 2000)}
+        if state:
+            params["state"] = state
+        if group:
+            params["grp"] = group
+        if regex:
+            if field == "error":
+                params["error_re"] = regex
+            else:
+                params["job_id_re"] = regex
+        return _get(_fx(fixer), "/jobs", _tk(token), **params)
+
     @app.tool(description="Return a lightweight rows list for one campaign — "
                           "the fastest way to know which items a stage has "
                           "finished. state defaults to 'done'.")

@@ -66,6 +66,7 @@ kiroshi seed --fixer http://coordinator:8800 \
 # 4. Watch (browser or CLI):
 #   Dashboard:  http://coordinator:8800/?token=<MESH_TOKEN>
 #   CLI:        kiroshi status --fixer http://coordinator:8800
+#   Search:     kiroshi jobs --fixer http://coordinator:8800 --grep 'PermissionError' --field error --state failed
 #   Alerts:     curl "http://coordinator:8800/advisories?token=<TOKEN>"
 ```
 

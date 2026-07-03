@@ -66,6 +66,13 @@ CAPABILITIES: list[dict[str, Any]] = [
         "when_not": "Counts only — not a substitute for /advisories when diagnosing a stall.",
     },
     {
+        "name": "jobs",
+        "purpose": "Search/list jobs by regex on job_id or error, filtered by state/group. Server-side filtered (no 100k-row download).",
+        "command": "kiroshi jobs --fixer <url> --grep <regex> [--field job_id|error] [--state failed] [--group <slug>]",
+        "when_to_use": "Find specific gigs on a large campaign without listing all of them — e.g. 'every failed gig whose error mentions PermissionError' or 'every job_id under shard_03/.*P08'.",
+        "when_not": "For aggregate counts use 'kiroshi status'; for bulk metrics export use /metrics/export.",
+    },
+    {
         "name": "requeue",
         "purpose": "Return failed/stuck gigs to pending (respects max-retries).",
         "command": "kiroshi requeue --fixer <url> --state failed",

@@ -10,14 +10,13 @@ Gig states: ``pending`` -> ``leased`` -> ``done`` | ``failed``.
 - ``reap`` returns expired leases to the pool (self-heal when a Runner dies).
 """
 from __future__ import annotations
-
+import re
 import sqlite3
 import threading
 import time
 import uuid
 from dataclasses import dataclass
 from typing import Any, Optional
-
 from . import jsonio
 
 
@@ -47,6 +46,11 @@ class JobStore:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.execute("PRAGMA busy_timeout=5000")
+        # Register a REGEXP function so WHERE job_id REGEXP ? works in-DB
+        # (lets /jobs filter server-side without shipping 100k rows to grep).
+        self._conn.create_function(
+            "regexp", 2,
+            lambda pat, val: 1 if val is not None and re.search(pat, val) else 0)
         self._init_schema()
 
     def _init_schema(self) -> None:
@@ -531,16 +535,23 @@ class JobStore:
 
     def list_jobs(self, states: Optional[tuple[str, ...]] = None,
                   limit: int = 200, newest_first: bool = True,
-                  grp: Optional[str] = None) -> list[dict[str, Any]]:
+                  grp: Optional[str] = None,
+                  job_id_re: Optional[str] = None,
+                  error_re: Optional[str] = None) -> list[dict[str, Any]]:
         """Return job rows (for the /jobs + /history views). Newest by activity.
 
         ``grp`` optionally filters to one campaign (the ``grp`` column set at
         seed time). Without it, rows from every campaign are mixed (the existing
         behavior for the dashboard).
+
+        ``job_id_re`` / ``error_re`` optionally apply a regex filter **server-side**
+        via the registered REGEXP function (so a 100k-gig campaign doesn't ship
+        all rows to the client to grep). Patterns are validated with
+        ``re.compile`` before the query runs — a bad pattern raises ``re.error``
+        which the caller should catch and report cleanly.
         """
         cols = ", ".join(self._LIST_COLS)
         order = "DESC" if newest_first else "ASC"
-        # sort by most-recent activity timestamp
         order_expr = ("COALESCE(completed_at, leased_at, created_at) " + order)
         params: list[Any] = []
         clauses: list[str] = []
@@ -550,6 +561,14 @@ class JobStore:
         if grp:
             clauses.append("grp = ?")
             params.append(grp)
+        if job_id_re is not None:
+            re.compile(job_id_re)           # validate before query (raises re.error)
+            clauses.append("job_id REGEXP ?")
+            params.append(job_id_re)
+        if error_re is not None:
+            re.compile(error_re)
+            clauses.append("error REGEXP ?")
+            params.append(error_re)
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
         params.append(int(limit))
         with self._lock:

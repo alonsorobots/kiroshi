@@ -33,6 +33,7 @@ the staggering is first-class instead of hand-rolled.
 | Enqueue gigs | `kiroshi seed --fixer <url> --jobs gigs.jsonl --group <slug> --label "<desc>"` | Dedups by `job_id`. Use `--group` to name a campaign (dashboard + `/metrics/export` filter on it). |
 | Stage data between tiers | `kiroshi stage --from <src> --to <dst> [--pattern glob] [--fixer <url>]` | Budgeted, resumable parallel copy (HDD→NVMe, remote fetch, prefetch). Shares the mesh I/O budget via ResourceClient; skips already-copied files. Local mode (no `--fixer`) runs in-process like `kiroshi run`; mesh mode seeds gigs for a `kiroshi.staging:run` runner. |
 | Snapshot | `kiroshi status --fixer <url>` | Counts only. For per-gig detail use HTTP `/jobs` or `/metrics/export`. |
+| Search jobs by regex | `kiroshi jobs --fixer <url> --grep '<regex>' [--field job_id\|error] [--state failed] [--group <slug>]` | Server-side regex filter (no 100k-row download). Find specific gigs on large campaigns — e.g. `--grep 'PermissionError' --field error --state failed`. `--json` for machine output. |
 | Return stuck/failed gigs to pending | `kiroshi requeue --fixer <url> --state failed` | Bumps attempts; respects max-retries. Use after fixing a systemic error so failed gigs re-run. |
 | **Multi-stage dependent work** | `kiroshi pipeline run spec.toml` | **USE THIS** instead of hand-rolling a cascade-seeder. Declares stages + typed edges (`each` / `quorum:k` / `all` / `artifact`). See `docs/PIPELINE.md` + `examples/pipeline.example.toml`. |
 | Discover Kiroshi's own features | `kiroshi capabilities [--json]` | Task-indexed capability map. `--json` for LLM agents / MCP consumption. Same content as this doc, but machine-readable and version-accurate at runtime. |
@@ -59,7 +60,7 @@ Hit these directly from a task or orchestration script (token-gated via `?token=
 - `GET /runners` → registered runners + heartbeats (authoritative for "is my runner alive" — more reliable than `Get-CimInstance` cross-session).
 - `GET /advisories` → structured warnings (`nas.throughput_collapse`, `nas.disk_saturation`, `gig.failure_spike`, …). Poll this to detect problems.
 - `GET /storage` → the loaded topology (disks, roots, budgets).
-- `GET /jobs?grp=<g>&state=done&limit=2000` → dashboard-shaped job rows.
+- `GET /jobs?grp=<g>&state=done&limit=2000` → dashboard-shaped job rows. **Now supports `job_id_re` + `error_re`** regex params for server-side filtering.
 - `POST /requeue` (body: `{state}`) → return failed/leased gigs to pending.
 - `GET /task/meta?task=<module:fn>` → task's declared metadata (docstring, expected spec keys). Introspect BEFORE seeding to know what to put in `spec`.
 - `GET /task/source?task=<module:fn>` → the task's source. Useful when an agent needs to reason about behavior without the local checkout.

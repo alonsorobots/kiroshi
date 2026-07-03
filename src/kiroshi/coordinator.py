@@ -7,7 +7,7 @@ background reaper that returns dead Runners' leases to the pool (self-heal).
 Serves the live Kiroshi dashboard at ``/`` and a JSON snapshot at ``/status``.
 """
 from __future__ import annotations
-
+import re
 import threading
 import time
 from collections import deque
@@ -466,9 +466,19 @@ def create_app(
 
     @app.get("/jobs")
     def jobs(state: Optional[str] = None, limit: int = 200,
-             grp: Optional[str] = None) -> dict[str, Any]:
+             grp: Optional[str] = None,
+             job_id_re: Optional[str] = None,
+             error_re: Optional[str] = None) -> dict[str, Any]:
         states = tuple(s.strip() for s in state.split(",")) if state else None
-        rows = store.list_jobs(states=states, limit=min(max(limit, 1), 2000), grp=grp)
+        try:
+            rows = store.list_jobs(
+                states=states, limit=min(max(limit, 1), 2000), grp=grp,
+                job_id_re=job_id_re, error_re=error_re)
+        except re.error as exc:
+            from fastapi.responses import JSONResponse
+            return JSONResponse(
+                status_code=400,
+                content={"error": f"bad regex: {exc}", "jobs": []})
         return {"jobs": _attach_launch(rows), "runners": _runner_index(), "ts": time.time()}
 
     @app.get("/metrics/export")
