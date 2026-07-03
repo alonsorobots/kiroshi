@@ -38,6 +38,7 @@ smb = ["smbprotocol>=1.12"]
 # as typed tools/resources to MCP-compatible LLM agents. Optional so the core
 # install has no extra weight for headless nodes.
 mcp = ["mcp>=1.0"]
+profiler = ["psutil>=5.9"]
 dev = ["pytest>=8.0", "ruff>=0.4", "numpy>=1.24", "httpx>=0.27"]
 
 [project.scripts]

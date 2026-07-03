@@ -71,8 +71,11 @@ def _init_worker(task_ref: str, extra_syspath: list[str]) -> None:
 
 def _run_one(payload: tuple[str, dict, int, float]) -> dict[str, Any]:
     job_id, spec, retries, backoff = payload
+    from .profiler import GigProfiler
     last_err: Optional[BaseException] = None
     for attempt in range(retries + 1):
+        profiler = GigProfiler()
+        profiler.start()
         try:
             result = _TASK_FN(spec) or {}  # type: ignore[misc]
             out = {
@@ -81,8 +84,13 @@ def _run_one(payload: tuple[str, dict, int, float]) -> dict[str, Any]:
                 "metrics": result.get("metrics", {}),
                 "error": None,
             }
+            # attach the per-gig resource profile (empty dict if psutil absent)
+            proc_profile = profiler.stop()
+            if proc_profile:
+                out["metrics"]["proc"] = proc_profile
             return out
         except Exception as e:  # noqa: BLE001 - report everything
+            profiler.stop()             # always stop, even on failure
             last_err = e
             if attempt < retries:
                 time.sleep(backoff * (2 ** attempt))

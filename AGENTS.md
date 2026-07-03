@@ -171,6 +171,14 @@ resources the built-in per-disk topology doesn't already cover.
 - `--heartbeat SECONDS`  → lease-renewal cadence (default OK for most)
 - `--retries N`  → per-gig retry budget (default 3)
 
+**Per-gig resource profiling** (automatic, needs `pip install kiroshi[profiler]`):
+
+- Each completed gig carries a `metrics.proc` summary: `cpu_pct_mean`,
+  `cpu_pct_peak`, `rss_peak_mb`, `read_mb`, `write_mb`, `wall_s`, `samples`.
+- Visible in `/job/{id}` and `/jobs` — answers *"what did this gig actually use?"*
+- Disable with `KIROSHI_PROFILER=0` env var. Soft dep — works without psutil
+  (just no proc summary).
+
 ## Advisories — the specific codes to watch for
 
 `GET /advisories` returns `{active: [{code, disk, severity, detail, ...}]}`.

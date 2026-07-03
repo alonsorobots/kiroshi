@@ -157,6 +157,13 @@ CAPABILITIES: list[dict[str, Any]] = [
         "when_not": "Anything covered by the built-in per-disk topology (which is auto-applied by the leaser) — don't re-implement that. Use for resources the topology doesn't know about.",
     },
     {
+        "name": "profiler",
+        "purpose": "Per-gig CPU/MEM/IO attribution via psutil. Each completed gig carries a compact proc summary in its metrics.",
+        "command": "# automatic — wired into the runner's pool._run_one; needs 'pip install kiroshi[profiler]'",
+        "when_to_use": "Understand what each job consumed (peak CPU, RSS, bytes read/written, wall time). Appears in /jobs and /job/{id} metrics.proc. Disable with KIROSHI_PROFILER=0.",
+        "when_not": "Headless nodes where you don't care about per-gig attribution. Soft dep — works without psutil installed (just no proc summary).",
+    },
+    {
         "name": "mcp",
         "purpose": "Run the Model Context Protocol server — exposes Kiroshi's tools + docs to LLM agents (Claude Desktop, Cursor, custom clients) over stdio.",
         "command": "kiroshi mcp",
