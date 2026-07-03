@@ -115,6 +115,7 @@ def create_app(
     advisory_sample_interval_s: float = 10.0,
     advisory_sustain_s: float = 60.0,
     advisory_webhook_interval_s: float = 2.0,
+    fair_share: bool = False,
 ) -> FastAPI:
     app = FastAPI(title="Kiroshi Fixer", version="0.0.1")
     app.state.store = store
@@ -144,6 +145,13 @@ def create_app(
     from .storage import disk_concurrency_map, validate_disks
 
     app.state.disk_concurrency = disk_concurrency_map(app.state.disks)
+
+    # Fair-share leasing (opt-in). When on, each host's in-flight gigs are capped
+    # at its slice of the fleet-wide budget, weighted by the live worker count of
+    # its active runners — so a fast poller can't hoard the whole disk budget and
+    # starve slower hosts. Inert (behaves exactly as before) unless enabled AND a
+    # per-disk budget exists to divide.
+    app.state.fair_share = fair_share
 
     # Warn about likely-misconfigured disk topologies at boot so a bad match
     # rule surfaces immediately instead of as 129k runtime "READ_ROOT not set".
@@ -550,12 +558,42 @@ def create_app(
             return base
         return {d: max(0, cap - slot_reads.get(d, 0)) for d, cap in base.items()}
 
+    def _host_share(host: str, budget: Optional[dict[str, int]]) -> Optional[int]:
+        """Fair-share in-flight ceiling for ``host`` (or None => uncapped).
+
+        Weight = sum of ``workers`` across this host's *live* runners (seen within
+        the lease TTL). The ceiling is this host's proportional slice of the total
+        per-disk budget, rounded up, with a floor of 1 so every host always makes
+        progress. Auto-adapts as runners join/leave; no static config needed.
+        """
+        if not app.state.fair_share or not budget:
+            return None
+        total_budget = sum(budget.values())
+        if total_budget <= 0:
+            return None
+        now = time.time()
+        fresh = app.state.lease_ttl
+        weights: dict[str, float] = {}
+        for r in app.state.runners.values():
+            if now - r.get("last_seen", 0) > fresh:
+                continue  # stale runner — don't reserve budget for it
+            h = (r.get("host") or "?")
+            weights[h] = weights.get(h, 0.0) + max(0, int(r.get("workers") or 0))
+        total_w = sum(weights.values())
+        my_w = weights.get(host, 0.0)
+        if total_w <= 0 or my_w <= 0:
+            return None  # unknown weights — don't cap (fail open)
+        import math
+        return max(1, math.ceil(my_w / total_w * total_budget))
+
     @app.post("/lease")
     def lease(req: LeaseReq) -> dict[str, Any]:
         _touch_runner(req.runner_id, req.host)
         ttl = _effective_ttl(req.heartbeat_interval)
+        budget = _effective_disk_budget()
         res = store.lease(req.runner_id, req.host, req.capacity, ttl,
-                          disk_concurrency=_effective_disk_budget())
+                          disk_concurrency=budget,
+                          host_share=_host_share(req.host, budget))
         # Dual-path routing (N3): stamp each gig's spec with its disk's read/write
         # roots so the task reads the direct spindle share / writes the cached share.
         # Inert without a topology (gig has no disk -> spec roots unset -> env fallback).

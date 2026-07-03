@@ -188,7 +188,8 @@ class JobStore:
 
     # --------------------------------------------------------------- lease
     def lease(self, runner_id: str, host: str, capacity: int, ttl: float,
-              disk_concurrency: Optional[dict[str, int]] = None) -> LeaseResult:
+              disk_concurrency: Optional[dict[str, int]] = None,
+              host_share: Optional[int] = None) -> LeaseResult:
         """Lease up to ``capacity`` pending gigs atomically.
 
         With ``disk_concurrency`` (the mesh-global per-spindle budget, only the
@@ -199,10 +200,29 @@ class JobStore:
         only because the ledger is central. Disks not in the map (and ``None``) are
         uncapped. Without ``disk_concurrency`` the selection is plain "first N
         pending" (the inert default).
+
+        ``host_share`` (optional) is a **fair-share ceiling**: the maximum number
+        of gigs this ``host`` may hold in-flight across the whole fleet at once.
+        It solves disk-budget *hoarding* — without it, the first host to poll can
+        drain the entire per-disk budget before slower hosts get a look-in,
+        serializing a mesh that should run in parallel. The Fixer sets it
+        proportional to each host's live worker weight. ``None`` => inert.
         """
         now = time.time()
         lease_id = uuid.uuid4().hex
         with self._lock:
+            # Fair-share ceiling: never let this host exceed its slice of the
+            # fleet-wide in-flight budget. Applied uniformly to both the plain
+            # and disk-aware paths by shrinking the effective capacity up-front.
+            if host_share is not None:
+                host_inflight = self._conn.execute(
+                    "SELECT COUNT(*) AS c FROM jobs WHERE state='leased' AND host=?",
+                    (host,),
+                ).fetchone()["c"]
+                capacity = min(capacity, max(0, host_share - host_inflight))
+                if capacity <= 0:
+                    return LeaseResult(lease_id=None, gigs=[])
+
             if not disk_concurrency:
                 cur = self._conn.execute(
                     "SELECT job_id, spec, disk FROM jobs WHERE state='pending' "

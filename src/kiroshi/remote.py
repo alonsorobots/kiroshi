@@ -177,6 +177,7 @@ for sp in CFG.get("syspath", []):
 task = CFG.get("task") or ""
 mod = task.split(":")[0].replace("/", ".") if task else ""
 R["task"] = None
+R["task_selftest"] = None
 if mod:
     try:
         ok = importlib.util.find_spec(mod) is not None
@@ -184,6 +185,36 @@ if mod:
     except Exception as e:
         R["task"] = False
         R["task_error"] = f"{e.__class__.__name__}: {e}"
+    # Deep check: import the module (catches top-level import errors that
+    # find_spec misses) and run its selftest() if it has one. selftest()
+    # exercises LAZY imports + core compute on THIS interpreter — the failure
+    # mode find_spec is blind to (a dep imported inside run(), a missing
+    # repo-relative asset, a broken .pyd). Time-bounded; compute-only by design.
+    if R["task"]:
+        import threading as _th
+        _st_box = {}
+        def _run_selftest():
+            try:
+                import importlib as _il
+                m = _il.import_module(mod)
+                fn = getattr(m, "selftest", None)
+                if fn is None or not callable(fn):
+                    _st_box["result"] = "absent"
+                    return
+                fn()
+                _st_box["result"] = "ok"
+            except Exception as e:  # noqa: BLE001
+                _st_box["result"] = "fail"
+                _st_box["error"] = f"{e.__class__.__name__}: {e}"
+        _st_t = _th.Thread(target=_run_selftest, daemon=True)
+        _st_t.start()
+        _st_t.join(timeout=30)
+        if _st_t.is_alive():
+            R["task_selftest"] = "timeout"
+        else:
+            R["task_selftest"] = _st_box.get("result")
+            if _st_box.get("error"):
+                R["task_selftest_error"] = _st_box["error"]
 
 # fixer reachable + token accepted?
 fx = CFG.get("fixer")
@@ -446,6 +477,17 @@ def _print_preflight(host: str, r: dict, local_fp: Optional[dict] = None) -> boo
     else:
         line("task importable", bool(r.get("task")),
              r.get("task_error") or "found")
+        st = r.get("task_selftest")
+        if st == "ok":
+            line("task selftest", True, "fixture passed (lazy imports + compute)")
+        elif st == "absent":
+            print("  [ -- ] task selftest: task defines no selftest() hook")
+        elif st == "timeout":
+            warn("task selftest", False, "timed out (>30s) — skipped, not blocking")
+        elif st == "fail":
+            line("task selftest", False,
+                 (r.get("task_selftest_error") or "failed")
+                 + " — a runtime/lazy dep is missing on this node")
     fx = r.get("fixer")
     line("fixer reachable + authed", fx == 200,
          "HTTP 200" if fx == 200 else str(fx))
@@ -490,7 +532,18 @@ def _print_preflight(host: str, r: dict, local_fp: Optional[dict] = None) -> boo
              (" (different env managers — don't hardcode paths!)" if r_int != l_int else ""))
 
     # --- real I/O probe: did kfs actually read + write the NAS roots? --------
+    #
+    # Authority rule: this preflight runs over SSH (a *network* logon). The
+    # Windows SMB redirector CANNOT authenticate a UNC share from a network
+    # logon, so an os-level / redirector probe here FALSE-FAILS even though the
+    # runner's Scheduled Task (an *interactive* logon with cached creds) will
+    # read/write fine. Therefore a NAS probe failure is only a HARD block when
+    # KIROSHI_NAS_USER is set — smbprotocol authenticates explicitly and is
+    # context-proof, so its result is authoritative in every logon type.
+    # Without creds, redirector-bound failures are advisory (warn), not blocks.
     io = r.get("io") or {}
+    smb_authoritative = bool(io.get("smb_creds_env"))
+    nas_check = line if smb_authoritative else warn
     if io.get("timeout"):
         print("  [WARN] NAS I/O probe timed out (>12s). The OS SMB redirector "
               "hangs in a network-logon (SSH) context — this does NOT necessarily "
@@ -498,27 +551,32 @@ def _print_preflight(host: str, r: dict, local_fp: Optional[dict] = None) -> boo
               "signal to configure direct SMB (KIROSHI_NAS_USER/PASS) for "
               "context-proof access.")
     elif io.get("error"):
-        line("kfs available", False, io["error"])
+        nas_check("kfs available", False, io["error"])
     else:
-        backend = ("direct-SMB" if io.get("smb_creds_env")
+        backend = ("direct-SMB" if smb_authoritative
                    else ("OS-redirector (logon-bound!)" if io.get("is_unc") else "local-fs"))
         rd, wr = io.get("read"), io.get("write")
         if rd is not None:
-            line(f"NAS read probe ({backend})", bool(rd.get("ok")),
-                 rd.get("err", ""))
+            nas_check(f"NAS read probe ({backend})", bool(rd.get("ok")),
+                      rd.get("err", ""))
         if wr is not None:
-            line(f"NAS write probe ({backend})", bool(wr.get("ok")),
-                 wr.get("err", ""))
-        if io.get("is_unc") and not io.get("smb_creds_env"):
+            nas_check(f"NAS write probe ({backend})", bool(wr.get("ok")),
+                      wr.get("err", ""))
+        if io.get("is_unc") and not smb_authoritative:
             print("  [WARN] using the OS SMB redirector (no KIROSHI_NAS_USER set); "
                   "this probe ran over SSH (network logon) and may differ from the "
                   "Scheduled Task (interactive) context. Set machine-scoped NAS "
                   "creds for context-proof, higher-throughput direct SMB.")
 
-    for key in ("read_root", "write_root"):
-        if key in r:
-            d = r[key]
-            line(f"{key} visible", bool(d.get("exists")), d.get("path", ""))
+    # The os.path.isdir "visible" check has the SAME network-logon blind spot as
+    # above, and is redundant with the kfs probe — keep it advisory only, and
+    # skip it entirely when smbprotocol already gave an authoritative answer.
+    if not smb_authoritative:
+        for key in ("read_root", "write_root"):
+            if key in r:
+                d = r[key]
+                warn(f"{key} visible (redirector)", bool(d.get("exists")),
+                     d.get("path", ""))
     line("schtasks available", bool(r.get("schtasks")))
 
     # --- storage perf advisory: FUSE vs direct, parity warning ---
@@ -528,7 +586,7 @@ def _print_preflight(host: str, r: dict, local_fp: Optional[dict] = None) -> boo
         for d in topo:
             if d.direct_path and d.read:
                 # Warn if the read_root uses FUSE (user share) instead of direct
-                rr = eff.get("read_root") or ""
+                rr = (r.get("read_root") or {}).get("path") or ""
                 if rr and "/mnt/user" in rr.replace("\\", "/") and d.direct_path not in rr:
                     print(f"  [WARN] read_root uses FUSE ({rr}) — disk {d.id} has a "
                           f"direct_path ({d.direct_path}) that bypasses Shfs. "

@@ -172,6 +172,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     pf.add_argument("--max-retries", type=int, default=3)
     pf.add_argument("--lease-ttl", type=float, default=120.0)
     pf.add_argument("--reap-interval", type=float, default=15.0)
+    pf.add_argument("--fair-share", dest="fair_share", action="store_true",
+                    default=cfg.fair_share,
+                    help="Cap each host's in-flight gigs at its live-worker slice "
+                         "of the per-disk budget, so a fast poller can't hoard the "
+                         "budget and starve slower hosts. Default from "
+                         "[fixer].fair_share (off).")
     pf.add_argument("--no-beacon", action="store_true",
                     help="Disable the UDP discovery beacon (runners must use an explicit --fixer).")
     pf.add_argument("--force-second-fixer", action="store_true",
@@ -656,6 +662,7 @@ def _cmd_fixer(args) -> int:
         pages_dir=args.pages_dir,
         token=token,
         disks=load_topology(),
+        fair_share=args.fair_share,
     )
     beacon = None
     if not args.no_beacon:

@@ -30,7 +30,15 @@ except ModuleNotFoundError:  # pragma: no cover
         tomllib = None  # type: ignore
 
 DEFAULT_PORT = 8787
-DEFAULT_CAPACITY = 200
+# ``capacity`` = how many gigs a Runner leases at once. AUTO_CAPACITY (the
+# default) auto-sizes it to ``workers + CAPACITY_BUFFER``: enough to keep every
+# worker fed plus a small prefetch that hides lease round-trip latency, but NOT
+# so large that one Runner drains the whole queue / per-disk budget in a single
+# lease and starves the rest of the mesh (the old flat 200 did exactly that).
+# A positive value in config is honored verbatim (explicit override).
+AUTO_CAPACITY = -1
+CAPACITY_BUFFER = 4
+DEFAULT_CAPACITY = AUTO_CAPACITY
 
 
 def current_host() -> str:
@@ -43,10 +51,16 @@ class HostConfig:
     name: str = "_DEFAULT"
     python: Optional[str] = None
     workers: int = field(default_factory=lambda: os.cpu_count() or 4)
-    capacity: int = DEFAULT_CAPACITY
+    capacity: int = AUTO_CAPACITY
     read_root: Optional[str] = None
     write_root: Optional[str] = None
     extra: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        # Auto-size capacity from workers unless an explicit positive value was
+        # given. Keeps a Runner from hoarding the queue while still prefetching.
+        if self.capacity is None or self.capacity < 0:
+            self.capacity = max(1, int(self.workers)) + CAPACITY_BUFFER
 
 
 @dataclass
@@ -57,6 +71,10 @@ class MeshConfig:
     # Drives `kiroshi firewall install` so opening one port never closes another.
     # Defaults to [fixer_port] when [fixer].ports is absent.
     fixer_ports: list = field(default_factory=list)
+    # Fair-share leasing: cap each host's in-flight gigs at its live-worker slice
+    # of the per-disk budget so no single fast poller hoards it. From
+    # [fixer].fair_share; off by default (behaves as plain work-stealing).
+    fair_share: bool = False
     read_root: Optional[str] = None
     write_root: Optional[str] = None
     hosts: dict[str, HostConfig] = field(default_factory=dict)
@@ -111,6 +129,7 @@ def load_config(path: Optional[str] = None) -> MeshConfig:
         cfg.fixer_port = int(fixer.get("port", cfg.fixer_port))
         if fixer.get("ports"):
             cfg.fixer_ports = [int(p) for p in fixer["ports"]]
+        cfg.fair_share = bool(fixer.get("fair_share", cfg.fair_share))
         paths = data.get("paths", {})
         cfg.read_root = paths.get("read_root", cfg.read_root)
         cfg.write_root = paths.get("write_root", cfg.write_root)
