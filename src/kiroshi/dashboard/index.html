@@ -127,12 +127,12 @@
     <div class="panel">
       <h2>Recent failures</h2>
       <table>
-        <thead><tr><th>Gig</th><th>Host</th><th>Error</th></tr></thead>
+        <thead><tr><th>Sub-job</th><th>Host</th><th>Error</th></tr></thead>
         <tbody id="errors"><tr><td class="muted" colspan="3">none</td></tr></tbody>
       </table>
     </div>
   </main>
-  <footer>a fixer hands gigs to runners // kiroshi optics watch the fleet</footer>
+  <footer>a coordinator hands sub-jobs to runners // kiroshi optics watch the fleet</footer>
 
 <script>
 // --- auth: accept ?token= once, persist to localStorage, then strip from URL ---
@@ -148,8 +148,8 @@
 function authToken() {
   try { return localStorage.getItem("kiroshi_token") || ""; } catch (e) { return ""; }
 }
-// Escape untrusted strings before putting them in innerHTML. job_id, host and
-// error text are attacker-influenceable (anyone who can seed a gig, or a rogue
+// Escape untrusted strings before putting them in innerHTML. subjob_id, host and
+// error text are attacker-influenceable (anyone who can seed a sub-job, or a rogue
 // runner), so rendering them raw would be a stored-XSS token-theft vector.
 function esc(s){return (s==null?"":String(s)).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
 async function authedFetch(url, opts) {
@@ -211,7 +211,7 @@ async function tick() {
     const errs = document.getElementById("errors");
     if (d.recent_errors && d.recent_errors.length) {
       errs.innerHTML = d.recent_errors.map(e =>
-        `<tr><td>${esc(e.job_id)}</td><td>${esc(e.host||"?")}</td><td class="err">${esc((e.error||"").slice(0,120))}</td></tr>`
+        `<tr><td>${esc(e.subjob_id)}</td><td>${esc(e.host||"?")}</td><td class="err">${esc((e.error||"").slice(0,120))}</td></tr>`
       ).join("");
     } else {
       errs.innerHTML = `<tr><td class="muted" colspan="3">none</td></tr>`;

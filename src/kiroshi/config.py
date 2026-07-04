@@ -10,7 +10,7 @@ committed files. This module loads, in priority order:
     4. ``./kiroshi.toml``
 
 Environment overrides always win for connection + path values:
-    KIROSHI_FIXER_HOST, KIROSHI_FIXER_PORT, KIROSHI_READ_ROOT, KIROSHI_WRITE_ROOT
+    KIROSHI_COORDINATOR_HOST, KIROSHI_COORDINATOR_PORT, KIROSHI_READ_ROOT, KIROSHI_WRITE_ROOT
 """
 from __future__ import annotations
 
@@ -187,8 +187,8 @@ def load_config(path: Optional[str] = None) -> MeshConfig:
             ))
 
     # Environment overrides (highest priority for connection + roots)
-    cfg.fixer_host = os.environ.get("KIROSHI_FIXER_HOST", cfg.fixer_host)
-    cfg.fixer_port = int(os.environ.get("KIROSHI_FIXER_PORT", cfg.fixer_port))
+    cfg.fixer_host = os.environ.get("KIROSHI_COORDINATOR_HOST", cfg.fixer_host)
+    cfg.fixer_port = int(os.environ.get("KIROSHI_COORDINATOR_PORT", cfg.fixer_port))
     cfg.read_root = os.environ.get("KIROSHI_READ_ROOT", cfg.read_root)
     cfg.write_root = os.environ.get("KIROSHI_WRITE_ROOT", cfg.write_root)
 

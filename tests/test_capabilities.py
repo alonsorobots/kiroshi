@@ -20,7 +20,7 @@ REQUIRED_KEYS = {"name", "purpose", "command", "when_to_use", "when_not"}
 # Names that MUST be present so an agent can discover the pillars of Kiroshi
 # without reading the source. Add here (and to CAPABILITIES) as we ship new
 # top-level features. Missing = broken discoverability.
-MUST_INCLUDE = {"fixer", "runner", "seed", "pipeline", "status", "requeue",
+MUST_INCLUDE = {"coordinator", "runner", "seed", "pipeline", "status", "requeue",
                 "nas.assess", "advisories"}
 
 

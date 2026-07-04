@@ -14,7 +14,7 @@ Start via:
 
 Design principles:
 
-  * **Thin over existing HTTP.** Every tool is a wrapper around a Fixer
+  * **Thin over existing HTTP.** Every tool is a wrapper around a coordinator
     endpoint already exercised by the CLI and dashboard — no new server
     surface, no auth surface. If ``kiroshi status`` works, so does the
     ``status`` MCP tool. This keeps the security posture identical.
@@ -22,7 +22,7 @@ Design principles:
     capability map, is exposed as a resource.** So an agent connecting cold
     reads ``kiroshi://agents.md`` + ``kiroshi://capabilities.json`` and
     knows what to do — no source-diving.
-  * **No hidden state.** Fixer URLs + tokens are tool arguments (or read
+  * **No hidden state.** coordinator URLs + tokens are tool arguments (or read
     from the local ``kiroshi.local.toml`` when the agent doesn't pass
     them). Nothing is silently pinned.
 
@@ -129,18 +129,18 @@ def build_server(default_fixer: Optional[str] = None,
         return _read_text(DOCS_PIPELINE)
 
     # ---- Tools (thin wrappers over existing HTTP) --------------------
-    _auto_cache: dict[str, str] = {}  # discovered fixer URL, resolved once
+    _auto_cache: dict[str, str] = {}  # discovered coordinator URL, resolved once
 
     def _fx(fixer: Optional[str]) -> str:
-        """Resolve the Fixer URL for a tool call.
+        """Resolve the coordinator URL for a tool call.
 
-        Order: explicit per-call ``fixer`` -> server default -> ``KIROSHI_FIXER``
+        Order: explicit per-call ``fixer`` -> server default -> ``KIROSHI_COORDINATOR``
         env -> LAN beacon discovery. An empty value or the literal ``"auto"``
         forces discovery, so one config (``--fixer auto``) is portable across
         every node and survives host/port/campaign changes without hardcoding an
         address. Discovery is lazy (first use) + cached, so IDEs that launch the
         MCP server at startup don't pay a UDP round-trip until a tool is called."""
-        for cand in (fixer, default_fixer, os.environ.get("KIROSHI_FIXER")):
+        for cand in (fixer, default_fixer, os.environ.get("KIROSHI_COORDINATOR")):
             c = (cand or "").strip()
             if c and c.lower() != "auto":
                 return c
@@ -151,21 +151,21 @@ def build_server(default_fixer: Optional[str] = None,
         url = discover_fixer(timeout=6.0)
         if not url:
             raise ValueError(
-                "no fixer URL: LAN discovery heard no beacon. Pass "
-                "--fixer http://HOST:PORT, set KIROSHI_FIXER, or start a Fixer.")
+                "no coordinator URL: LAN discovery heard no beacon. Pass "
+                "--fixer http://HOST:PORT, set KIROSHI_COORDINATOR, or start a coordinator.")
         _auto_cache["url"] = url
         return url
 
     def _tk(token: Optional[str]) -> Optional[str]:
         return token or default_token or os.environ.get("KIROSHI_TOKEN")
 
-    @app.tool(description="Get a fleet /status snapshot from a Fixer "
+    @app.tool(description="Get a fleet /status snapshot from a coordinator "
                           "(counts, rate, ETA, per-disk in-flight).")
     def status(fixer: Optional[str] = None,
                token: Optional[str] = None) -> dict:
         return _get(_fx(fixer), "/status", _tk(token))
 
-    @app.tool(description="List currently-active Fixer advisories (NAS "
+    @app.tool(description="List currently-active coordinator advisories (NAS "
                           "throughput collapse, gig failure spike, etc.).")
     def list_advisories(fixer: Optional[str] = None,
                         token: Optional[str] = None) -> dict:
@@ -183,7 +183,7 @@ def build_server(default_fixer: Optional[str] = None,
                     token: Optional[str] = None) -> dict:
         return _get(_fx(fixer), "/storage", _tk(token))
 
-    @app.tool(description="Enqueue gigs into a Fixer. `gigs` is a list of "
+    @app.tool(description="Enqueue gigs into a coordinator. `gigs` is a list of "
                           "{subjob_id, spec}; duplicates by subjob_id are ignored.")
     def seed_gigs(gigs: list[dict], job: str, label: str = "",
                   fixer: Optional[str] = None,
@@ -302,7 +302,7 @@ def build_server(default_fixer: Optional[str] = None,
         return {"recommended_concurrency": rec, "bias": bias,
                 "peak_mbps": peak_mbps, "peak_at_concurrency": peak_conc}
 
-    # ---- Observability / scheduling (thin over Fixer HTTP) -----------
+    # ---- Observability / scheduling (thin over coordinator HTTP) -----------
     # Decision-log tools for debugging node starvation / underutilization.
 
     @app.tool(description="Recent lease DECISIONS (why each host got N gigs): "
@@ -363,20 +363,20 @@ def build_server(default_fixer: Optional[str] = None,
                      {"states": states, "reset_attempts": reset_attempts})
 
     # ---- Process management tools (local-host only) ------------------
-    # These read the local process registry (``processreg``), NOT the Fixer
+    # These read the local process registry (``processreg``), NOT the coordinator
     # HTTP API. Only meaningful when the MCP server is co-located with the
-    # Kiroshi processes to inspect/stop; driving a remote Fixer from a laptop,
+    # Kiroshi processes to inspect/stop; driving a remote coordinator from a laptop,
     # these describe YOUR laptop's processes.
 
     @app.tool(description="List Kiroshi processes registered ON THIS HOST "
                           "(local only — reads the process manifest, not the "
-                          "Fixer API). Set include_stale=True to see crashed "
+                          "coordinator API). Set include_stale=True to see crashed "
                           "processes whose manifest file is still on disk.")
     def ps(include_stale: bool = False) -> list[dict]:
         from .processreg import list_registered
         return list_registered(include_stale=include_stale)
 
-    @app.tool(description="Ask a LOCAL registered Fixer/Runner to drain+exit "
+    @app.tool(description="Ask a LOCAL registered coordinator/Runner to drain+exit "
                           "(local host only). Pass role ('fixer'/'runner') or "
                           "pid. If multiple match and neither pid nor all=True "
                           "is given, returns the list without stopping anything "
@@ -432,7 +432,7 @@ def _format_summary(subjob_id: str, job: Optional[dict],
         parts.append(f"Campaign {subjob_id!r}: {done}/{total} done ({pct:.0f}%), "
                      f"{failed} failed, {pending} pending, {leased} in-flight.")
     else:
-        parts.append(f"No campaign matched {subjob_id!r} in the Fixer's groups.")
+        parts.append(f"No campaign matched {subjob_id!r} in the coordinator's groups.")
     if isinstance(status, dict) and status.get("rate_per_s") is not None:
         parts.append(f"Fleet throughput ~{status.get('rate_per_s')}/s.")
     if advisories:

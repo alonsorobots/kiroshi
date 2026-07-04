@@ -119,7 +119,7 @@ function shortId(rid){ if(!rid) return "(unassigned)"; return rid.length>18 ? ri
 
 // Build a stacked area chart:
 //   X: t0 = job.first_created ...... t_now (measured) ... t_eta (projected)
-//   Y: 0% .. 100% of the total gigs.
+//   Y: 0% .. 100% of the total sub-jobs.
 //   Stacks: one polygon per runner. Height at time t = share of that runner's
 //   done-count over the total, expressed in %-of-target. Aggregate curve is
 //   drawn on top so you can see "still making progress, but slower" when a
@@ -307,9 +307,9 @@ async function tick(){
     const [gr,mh]=await Promise.all([aFetch("/groups"),aFetch("/metrics/history")]);
     const groups=(await gr.json()).groups||[]; const hist=(await mh.json()).samples||[];
     live.classList.add("live");
-    const g=groups.find(x=>x.grp===JOB)|| (JOB===""?null:null);
+    const g=groups.find(x=>x.job===JOB)|| (JOB===""?null:null);
     if(g){
-      document.getElementById("jobname").textContent=g.label||g.grp||JOB;
+      document.getElementById("jobname").textContent=g.label||g.job||JOB;
       const pct=g.total?(100*g.done/g.total):0;
       document.getElementById("pct").textContent=pct.toFixed(1)+"%";
       document.getElementById("done").textContent=g.done;

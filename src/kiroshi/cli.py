@@ -98,7 +98,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     # ---- join (add this machine to a running mesh) ----
     pjoin = sub.add_parser(
         "join", help="Join this machine to a running mesh as a Runner.")
-    pjoin.add_argument("--fixer", default="auto", help="Fixer URL or 'auto' (default).")
+    pjoin.add_argument("--coordinator", "--fixer", dest="fixer", default="auto", help="Coordinator URL or 'auto' (default).")
     pjoin.add_argument("--task", default=None,
                        help="Task 'module:function' (default: the Fixer's served task).")
     pjoin.add_argument("--token", default=None, help="Mesh token (the join code).")
@@ -140,7 +140,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                       help="[sync] signal runners to exit so the auto-restart "
                            "wrapper picks up the new code. Default: no (report only).")
     prem.add_argument("--task", default=None, help="Task 'module:function' to run.")
-    prem.add_argument("--fixer", default=None,
+    prem.add_argument("--coordinator", "--fixer", dest="fixer", default=None,
                       help="Fixer URL the remote should pull from "
                            "(default: http://<this-LAN-ip>:<fixer_port>).")
     prem.add_argument("--workers", type=int, default=0,
@@ -163,7 +163,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                       help="Skip waiting for the runner to appear in the fixer.")
 
     # ---- fixer ----
-    pf = sub.add_parser("fixer", help="Run the coordinator (Fixer) + dashboard.")
+    pf = sub.add_parser("fixer", help="Run the coordinator + dashboard.",
+                        aliases=["coordinator"], description="Run the coordinator + dashboard.")
     pf.add_argument("--db", default="kiroshi.db", help="SQLite job-store path (gitignored).")
     pf.add_argument("--host", default="127.0.0.1",
                     help="Bind address. Defaults to loopback (secure). Pass "
@@ -194,7 +195,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     # ---- runner ----
     pr = sub.add_parser("runner", help="Run a worker node (Runner).")
-    pr.add_argument("--fixer", default=cfg.fixer_url,
+    pr.add_argument("--coordinator", "--fixer", dest="fixer", default=cfg.fixer_url,
                     help="Fixer base URL, or 'auto' to discover it on the LAN.")
     pr.add_argument("--task", required=True, help="Task as 'module:function'.")
     pr.add_argument("--workers", type=int, default=cfg.host().workers)
@@ -217,7 +218,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     # ---- seed ----
     ps = sub.add_parser("seed", help="Enqueue gigs into the Fixer.")
-    ps.add_argument("--fixer", default=cfg.fixer_url, help="Fixer base URL, or 'auto'.")
+    ps.add_argument("--coordinator", "--fixer", dest="fixer", default=cfg.fixer_url, help="Fixer base URL, or 'auto'.")
     ps.add_argument("--jobs", default=None,
                     help="JSONL file; each line {\"subjob_id\":..., \"spec\":{...}}.")
     ps.add_argument("--demo", type=int, default=0, help="Seed N demo sleep gigs.")
@@ -237,7 +238,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     # ---- status ----
     pt = sub.add_parser("status", help="Print a /status snapshot.")
-    pt.add_argument("--fixer", default=cfg.fixer_url, help="Fixer base URL, or 'auto'.")
+    pt.add_argument("--coordinator", "--fixer", dest="fixer", default=cfg.fixer_url, help="Fixer base URL, or 'auto'.")
     pt.add_argument("--token", default=None, help="Mesh auth token.")
 
     # ---- pipeline (declarative multi-stage DAG with typed edges) ----
@@ -273,7 +274,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     pst.add_argument("--by", choices=["file", "shard"], default="file",
                      help="Granularity: 'file' = one gig per file (default); "
                           "'shard' = one gig per top-level dir (not implemented yet).")
-    pst.add_argument("--fixer", default=None,
+    pst.add_argument("--coordinator", "--fixer", dest="fixer", default=None,
                      help="If set, seed gigs to this Fixer for mesh execution. "
                           "If omitted, runs in-process like 'kiroshi run'.")
     pst.add_argument("--workers", type=int, default=0,
@@ -289,7 +290,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     pj = sub.add_parser(
         "jobs",
         help="Search/list jobs by regex on subjob_id or error, filtered by state/job.")
-    pj.add_argument("--fixer", default=cfg.fixer_url, help="Fixer base URL, or 'auto'.")
+    pj.add_argument("--coordinator", "--fixer", dest="fixer", default=cfg.fixer_url, help="Fixer base URL, or 'auto'.")
     pj.add_argument("--grep", default=None,
                     help="Regex to match against subjob_id (default) or error (--field error).")
     pj.add_argument("--field", choices=["subjob_id", "error"], default="subjob_id",
@@ -311,7 +312,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     pbr = pb_sub.add_parser("rate", help="Report TRUE throughput of a completed/running campaign.")
     pbr.add_argument("--dir", default=None,
                      help="Output directory to scan (uses file mtimes).")
-    pbr.add_argument("--fixer", default=None,
+    pbr.add_argument("--coordinator", "--fixer", dest="fixer", default=None,
                      help="Fixer URL — use with --job to derive throughput from "
                           "per-gig completed_at timestamps over HTTP (no FS access needed).")
     pbr.add_argument("--job", default=None,
@@ -332,7 +333,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     pmcp = sub.add_parser(
         "mcp",
         help="Run the MCP server (exposes Kiroshi to LLM agents; needs [mcp] extra).")
-    pmcp.add_argument("--fixer", default="auto",
+    pmcp.add_argument("--coordinator", "--fixer", dest="fixer", default="auto",
                       help="Default Fixer URL for tool calls that don't pass one. "
                            "'auto' (default) discovers it on the LAN — portable "
                            "across nodes/ports; env KIROSHI_FIXER overrides.")
@@ -348,7 +349,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     # ---- requeue ----
     pq = sub.add_parser("requeue", help="Return failed/stuck gigs to pending.")
-    pq.add_argument("--fixer", default=cfg.fixer_url, help="Fixer base URL, or 'auto'.")
+    pq.add_argument("--coordinator", "--fixer", dest="fixer", default=cfg.fixer_url, help="Fixer base URL, or 'auto'.")
     pq.add_argument("--state", action="append", choices=["failed", "leased", "done"],
                     help="Gig state(s) to requeue (repeatable; default: failed).")
     pq.add_argument("--keep-attempts", action="store_true",
@@ -357,7 +358,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     # ---- doctor ----
     pd = sub.add_parser("doctor", help="Preflight checks for this machine + env.")
-    pd.add_argument("--fixer", default=cfg.fixer_url, help="Fixer base URL, or 'auto'.")
+    pd.add_argument("--coordinator", "--fixer", dest="fixer", default=cfg.fixer_url, help="Fixer base URL, or 'auto'.")
     pd.add_argument("--task", default=None, help="Task 'module:function' to import-test.")
     pd.add_argument("--syspath", action="append", default=None,
                     help="Extra sys.path entries for the task import (repeatable).")
@@ -383,7 +384,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     # A tray is a GLOBAL lens on the whole mesh, so it defaults to LAN discovery
     # (the persistent beaconing Fixer) rather than cfg.fixer_url — which may point
     # at a specific campaign port and would pin the icon to a single campaign.
-    ptray.add_argument("--fixer", default="auto", help="Fixer base URL, or 'auto' (default: discover).")
+    ptray.add_argument("--coordinator", "--fixer", dest="fixer", default="auto", help="Fixer base URL, or 'auto' (default: discover).")
     ptray.add_argument("--token", default=None, help="Mesh auth token.")
 
     # ---- firewall (Windows: manage inbound rules for TCP fixer + UDP discovery) ----
@@ -504,7 +505,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     psvc.add_argument("--port", type=int, default=cfg.fixer_port, help="(fixer) bind port.")
     psvc.add_argument("--pages-dir", default=None, help="(fixer) custom views dir.")
     # runner params
-    psvc.add_argument("--fixer", default="auto", help="(runner) Fixer URL or 'auto'.")
+    psvc.add_argument("--coordinator", "--fixer", dest="fixer", default="auto", help="(runner) Fixer URL or 'auto'.")
     psvc.add_argument("--task", default=None, help="(runner) task 'module:function'.")
     psvc.add_argument("--workers", type=int, default=0, help="(runner) worker count.")
     psvc.add_argument("--syspath", action="append", default=None,
