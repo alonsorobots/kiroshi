@@ -152,11 +152,39 @@ def match_disk(haystack: str, match: str) -> bool:
     return match in haystack
 
 
+def _norm_share(path: object) -> str:
+    """Comparable share form: forward slashes, lower-case, no trailing sep."""
+    return str(path).replace("\\", "/").rstrip("/").lower() if path else ""
+
+
+def _disk_by_root_share(spec: dict[str, Any],
+                        disks: list[DiskConfig]) -> Optional[str]:
+    """Resolve a disk when the sub-job's ``read_root``/``write_root`` is a declared
+    share of that disk (``read`` / ``write`` / ``direct_path``), even though no
+    ``match`` rule hit. This lets the per-spindle budget apply from the folders a
+    job declares — no shard token required. Purely a *resolution* helper; it never
+    rewrites the spec (dual-path fill stays in ``inject_roots``, which only fills
+    absent roots)."""
+    for key in ("read_root", "write_root"):
+        r = _norm_share(spec.get(key))
+        if not r:
+            continue
+        for d in disks:
+            for share in (d.read, d.write, d.direct_path):
+                s = _norm_share(share)
+                if s and (r == s or r.startswith(s + "/")):
+                    return d.id
+    return None
+
+
 def derive_disk(subjob_id: str, spec: dict[str, Any],
                 disks: list[DiskConfig]) -> Optional[str]:
     """Resolve which physical disk a sub-job's input lives on, or ``None`` if no rule
     matches (uncapped / inert). Matches against the subjob_id and common path fields in
-    the spec, so it works whether the shard is in the subjob_id or in a ``src_path``."""
+    the spec, so it works whether the shard is in the subjob_id or in a ``src_path``.
+    Falls back to the declared ``read_root``/``write_root`` share when no ``match``
+    rule hits, so a job that declares its folders is budgeted even without a shard
+    token."""
     if not disks:
         return None
     candidates = [subjob_id]
@@ -168,7 +196,7 @@ def derive_disk(subjob_id: str, spec: dict[str, Any],
     for d in disks:
         if match_disk(hay, d.match):
             return d.id
-    return None
+    return _disk_by_root_share(spec, disks)
 
 
 def inject_roots(gigs: list[dict[str, Any]], disks: list[DiskConfig]) -> None:

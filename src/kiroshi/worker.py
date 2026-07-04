@@ -56,7 +56,7 @@ class Runner:
         coordinator_url: str,
         task_ref: str,
         workers: int = 0,
-        capacity: int = 100,
+        capacity: int = 0,
         runner_id: Optional[str] = None,
         host: Optional[str] = None,
         poll_interval: float = 2.0,
@@ -90,7 +90,14 @@ class Runner:
         # a single coordinator can host many jobs. None => lease any job (legacy).
         self.job = job
         self.workers = workers or (os.cpu_count() or 4)
-        self.capacity = capacity
+        # capacity <= 0 is the "auto" sentinel: size it to workers + buffer so a
+        # runner keeps every core fed without hoarding the disk budget. This
+        # matches HostConfig's auto (workers + CAPACITY_BUFFER); previously the
+        # constructor hardcoded 100, so `join`/`remote join` (which don't pass a
+        # capacity) over-leased vs a tuned `kiroshi runner`.
+        from .config import CAPACITY_BUFFER
+        self.capacity = capacity if capacity and capacity > 0 \
+            else self.workers + CAPACITY_BUFFER
         self.runner_id = runner_id or f"{socket.gethostname()}-{uuid.uuid4().hex[:6]}"
         self.host = host or socket.gethostname()
         self.poll_interval = poll_interval

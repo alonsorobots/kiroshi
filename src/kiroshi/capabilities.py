@@ -123,10 +123,17 @@ CAPABILITIES: list[dict[str, Any]] = [
     },
     {
         "name": "doctor",
-        "purpose": "Preflight checks for this machine + env (python, deps, disk, firewall, config).",
+        "purpose": "Preflight checks for this machine + env (python, deps, disk, firewall, config) + storage-class advice for the resolved read/write roots.",
         "command": "kiroshi doctor",
         "when_to_use": "On a new node before joining the mesh.",
         "when_not": "—",
+    },
+    {
+        "name": "advise-io",
+        "purpose": "Path-aware storage-class classifier (no benchmarking): NVMe vs HDD, direct-share-unused, parity-write, missing SMB creds. Also powers the fail-closed I/O gate on seed/run/seed_gigs.",
+        "command": "# MCP: advise_io(read_root, write_root, sample_src, sample_dst)  |  gate is automatic on seed/run/seed_gigs; ack a trade-off with --io-ack TOKEN (CLI) or io_ack=['TOKEN'] (MCP); KIROSHI_IO_GATE=0 disables",
+        "when_to_use": "advise_io: the 'am I on the fast path?' check before a NAS job. The GATE runs automatically at creation — a slow trade-off (parity_write / no_direct_share / no_smb_creds / unclassified_nas) is REFUSED until you fix the path or pass the matching io_ack token. Kiroshi never mutates your declared paths; it fills blanks and enforces.",
+        "when_not": "Local-only work, demo jobs, an already-fast path, or no [[storage.disk]] topology — the gate can't judge those, so it passes silently.",
     },
     {
         "name": "tray",
@@ -146,7 +153,7 @@ CAPABILITIES: list[dict[str, Any]] = [
         "name": "kfs",
         "purpose": "FS abstraction for tasks (local, UNC/SMB, mapped drives). API: exists, open, walk, atomic_write, makedirs, remove, backend + SMB creds helpers.",
         "command": "# in a task:  from kiroshi import kfs;  kfs.atomic_write(dst) as fh: fh.write(...)",
-        "when_to_use": "Every I/O call in a task. atomic_write gives crash-safe writes; walk streams a huge NAS tree without materializing; SMB creds come from env (KIROSHI_SMB_USER/PASS/AUTH/ENCRYPT) so tasks work in scheduled/service sessions with no mapped drives.",
+        "when_to_use": "Every I/O call in a task. atomic_write gives crash-safe writes; walk streams a huge NAS tree without materializing; SMB creds come from env (KIROSHI_NAS_USER/PASS, optional per-server KIROSHI_NAS_USER_<SERVER>; tune with KIROSHI_SMB_AUTH/ENCRYPT) so tasks work in scheduled/service sessions with no mapped drives.",
         "when_not": "Don't shell out to xcopy/robocopy from a task — you lose retry semantics and creds. Don't os.walk a UNC path — kfs.walk handles SMB re-connects on transient errors.",
     },
     {
@@ -174,7 +181,7 @@ CAPABILITIES: list[dict[str, Any]] = [
         "name": "mcp",
         "purpose": "Run the Model Context Protocol server — exposes Kiroshi's tools + docs to LLM agents (Claude Desktop, Cursor, custom clients) over stdio.",
         "command": "kiroshi mcp",
-        "when_to_use": "So an MCP-compatible agent can drive Kiroshi (submit_pipeline, seed_sub-jobs, status, list_advisories, export_metrics) with typed tool calls instead of shelling out to the CLI. Also serves the docs (agents.md, pipeline.md) + capability map as resources so the agent starts with full context.",
+        "when_to_use": "So an MCP-compatible agent can drive Kiroshi (advise_io, seed_gigs, validate_pipeline/tick_pipeline, status, list_advisories, export_metrics) with typed tool calls instead of shelling out to the CLI. Also serves the docs (agents.md, pipeline.md) + capability map as resources so the agent starts with full context.",
         "when_not": "Headless nodes that never run an LLM client. Requires 'pip install kiroshi[mcp]'.",
     },
     {

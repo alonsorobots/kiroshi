@@ -93,6 +93,52 @@ over-saturates one spindle. **A sub-job whose `subjob_id` matches no disk gets `
 entirely). Local operator configs use the `.local.` infix (`*.local.toml`) and
 are git-ignored.
 
+### Fast I/O by default → the fail-closed gate (you can't accidentally run slow)
+
+Job creation (`kiroshi seed`, `kiroshi run`, MCP `seed_gigs`) is **fail-closed**
+on I/O: if a job's declared paths are on a genuine slow-path trade-off, Kiroshi
+**refuses to create it** and re-transmits the fast alternative. It never
+silently rewrites your paths — you fix the spec (so it always matches reality),
+or you acknowledge the trade-off with a specific token. Blocking reasons and
+their tokens:
+
+| Reason | Token | Fix (preferred) |
+|--------|-------|-----------------|
+| Reading a cached/FUSE share when a direct spindle share exists | `no_direct_share` | point `read_root` at the disk's `read`/`direct_path` |
+| Writing to a parity-protected array (RMW bottleneck) | `parity_write` | write to the NVMe/SSD cache tier |
+| Writing to a RAW/direct disk path (`/mnt/diskN`), bypassing the pooled share — dup/shadow data-loss risk on Unraid/mergerfs | `direct_disk_write` | write to the disk's cached/user share |
+| UNC path with no SMB creds (redirector fallback) | `no_smb_creds` | set `KIROSHI_NAS_USER`/`PASS` |
+| NAS path matching no `[[storage.disk]]` rule (unroutable) | `unclassified_nas` | add a topology `match` rule |
+
+Acknowledge with `--io-ack <token>` (CLI, repeatable) or `io_ack=["<token>"]`
+(MCP) — a deliberate, recorded choice. The gate passes silently for local paths,
+demo jobs, an already-fast path, or when no topology is configured (it can't
+judge, so it won't block). Emergency override for a false positive:
+`KIROSHI_IO_GATE=0`. Disk **budget** (per-spindle concurrency) is applied
+automatically from the declared folders even without a shard token — Kiroshi
+fills blanks and enforces, but never overwrites your intent.
+
+### `advise_io` — the same classifier, as guidance
+
+You don't need to memorize the storage physics. `advise_io` (MCP tool; also
+printed by `kiroshi doctor`, `seed`, `run`, and `remote probe`) classifies a
+job's `read_root`/`write_root` (plus a sample `src_path`/`dst_path`) against the
+topology and tells you, with **no benchmarking** (these are static facts):
+- **Input on NVMe** → already optimal, push concurrency high.
+- **Input on an HDD** → shard across spindles and read the **direct per-spindle
+  share** (`disk.read` / `direct_path`), not the FUSE `/mnt/user` pool, which
+  serializes reads across disks.
+- **Output on a parity array** → every write is a read-modify-write through the
+  parity spindle (a fleet-global bottleneck); keep write concurrency modest and
+  prefer an NVMe cache tier if configured.
+- **UNC path, no SMB creds** → Kiroshi falls back to the Windows redirector
+  (slow, and dead from a service/SSH logon); set `KIROSHI_NAS_USER/PASS`.
+
+The dual-path routing this recommends is applied automatically at lease time
+(`inject_roots`) once a disk's `match` rule hits, so the main job of `advise_io`
+is to catch the cases where a job's own `read_root`/`write_root` or an
+un-matched shard would put you on a slow path.
+
 ## Multi-stage work → use `kiroshi pipeline`
 
 Do NOT write an external "cascade seeder" that polls a DB and seeds the next

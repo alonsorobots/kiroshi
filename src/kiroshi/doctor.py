@@ -220,6 +220,32 @@ def _check_write_root(rep: _Report, raw: Optional[str]) -> None:
             pass
 
 
+def _check_storage_class(rep: _Report, read_root: Optional[str],
+                         write_root: Optional[str]) -> None:
+    """Static storage-class advice: is this job on the fast path (NVMe / direct
+    spindle share) or about to hit an HDD/parity/redirector slow path? Purely
+    advisory — never a hard FAIL — since it's guidance, not a broken env."""
+    if not (read_root or write_root):
+        return
+    try:
+        from . import iohint
+        from .storage import load_topology
+
+        disks = load_topology()
+        adv = iohint.advise_job(read_root=read_root, write_root=write_root,
+                                disks=disks)
+    except Exception as e:  # noqa: BLE001 — advice must never block doctor
+        rep.line(_WARN, "storage class", f"could not classify roots: {e}")
+        return
+    for f in adv.findings:
+        # The SMB-creds warning is already emitted (with the same fix) by the
+        # read/write-root checks above — don't say it twice in one report.
+        if f.code == "smb.no_creds":
+            continue
+        # iohint "warn" -> WARN; "ok" confirmations stay informational PASS lines.
+        rep.line(_WARN if f.level == "warn" else _OK, "storage class", f.message)
+
+
 def _check_coordlock(rep: _Report) -> None:
     """Report whether a coordinator lock is held on this machine."""
     from .coordlock import CoordinatorLock
@@ -292,6 +318,7 @@ def run_doctor(
     _check_task(rep, task_ref, list(syspath or []))
     _check_read_root(rep, read_root)
     _check_write_root(rep, write_root)
+    _check_storage_class(rep, read_root, write_root)
     _check_coordlock(rep)
     _check_coordinator(rep, coordinator_url, auto, token)
 

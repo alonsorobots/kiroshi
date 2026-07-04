@@ -48,6 +48,8 @@ _probe*
 /_*.bat
 /_*.sh
 /_*.cmd
+/_*.txt
+/_*.md
 *.pid
 gigs.jsonl
 clips.txt

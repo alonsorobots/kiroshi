@@ -103,8 +103,12 @@ def build_server(default_coordinator: Optional[str] = None,
         name="kiroshi",
         instructions=(
             "Kiroshi mesh work-queue. Prefer high-level tools over raw HTTP: "
-            "'submit_pipeline' for multi-stage work, 'seed_gigs' for a single "
-            "stage, 'status'/'list_advisories' for observability. Read the "
+            "'seed_gigs' to enqueue a stage, 'validate_pipeline'/'tick_pipeline' "
+            "for multi-stage work, 'status'/'list_advisories' for observability. "
+            "Before seeding a NAS job, call 'advise_io' with the read/write roots "
+            "(and a sample input/output path) to get storage-class guidance — it "
+            "tells you if you're on the fast path (NVMe / direct spindle share) or "
+            "about to hit an HDD/parity/redirector slow path. Read the "
             "'kiroshi://capabilities.json' and 'kiroshi://agents.md' resources "
             "first if you're new to Kiroshi."
         ),
@@ -161,11 +165,32 @@ def build_server(default_coordinator: Optional[str] = None,
     def _tk(token: Optional[str]) -> Optional[str]:
         return token or default_token or os.environ.get("KIROSHI_TOKEN")
 
-    @app.tool(description="Get a fleet /status snapshot from a coordinator "
-                          "(counts, rate, ETA, per-disk in-flight).")
+    @app.tool(description="Get a fleet snapshot from a coordinator. NOTE: the "
+                          "count fields (total/done/pending/leased/failed) are "
+                          "SUB-JOB counts summed across every job — NOT a number "
+                          "of jobs. A coordinator runs a handful of jobs, each "
+                          "fanned out into thousands of sub-jobs. This tool also "
+                          "returns 'n_jobs' (distinct jobs) and a 'summary' line "
+                          "so the two are never conflated. Includes rate, ETA, "
+                          "per-disk in-flight.")
     def status(coordinator: Optional[str] = None,
                token: Optional[str] = None) -> dict:
-        return _get(_fx(coordinator), "/status", _tk(token))
+        base, tok = _fx(coordinator), _tk(token)
+        st = _get(base, "/status", tok)
+        # Enrich with the distinct-job count so sub-jobs are never read as jobs.
+        try:
+            groups = (_get(base, "/groups", tok) or {}).get("groups") or []
+        except Exception:
+            groups = []
+        n_jobs = len(groups)
+        st["n_jobs"] = n_jobs
+        st["counts_are"] = "sub-jobs"
+        st["summary"] = (
+            f"{n_jobs} job(s) \u00b7 {st.get('total', 0):,} sub-jobs "
+            f"({st.get('done', 0):,} done, {st.get('failed', 0):,} failed, "
+            f"{st.get('pending', 0):,} pending, {st.get('leased', 0):,} leased)"
+        )
+        return st
 
     @app.tool(description="List currently-active coordinator advisories (NAS "
                           "throughput collapse, sub-job failure spike, etc.).")
@@ -185,11 +210,75 @@ def build_server(default_coordinator: Optional[str] = None,
                     token: Optional[str] = None) -> dict:
         return _get(_fx(coordinator), "/storage", _tk(token))
 
-    @app.tool(description="Enqueue gigs into a coordinator. `gigs` is a list of "
-                          "{subjob_id, spec}; duplicates by subjob_id are ignored.")
-    def seed_gigs(gigs: list[dict], job: str, label: str = "",
+    @app.tool(description="STORAGE-CLASS GUIDANCE for a job's I/O paths — call this "
+                          "BEFORE seeding a NAS job. Given read_root/write_root (and "
+                          "optionally a sample input/output path), returns static "
+                          "fast-path advice: is the input on NVMe (fast) or an HDD "
+                          "array (shard + read the direct spindle share)? Do writes "
+                          "hit a parity array (RMW bottleneck)? Are SMB creds set (or "
+                          "will it fall back to the slow Windows redirector)? No "
+                          "benchmarking — pure classification against the topology.")
+    def advise_io(read_root: Optional[str] = None, write_root: Optional[str] = None,
+                  sample_src: Optional[str] = None, sample_dst: Optional[str] = None,
                   coordinator: Optional[str] = None,
                   token: Optional[str] = None) -> dict:
+        from . import iohint
+        disks = _disks_for_advice(coordinator, token)
+        adv = iohint.advise_job(read_root=read_root, write_root=write_root,
+                                sample_src=sample_src, sample_dst=sample_dst,
+                                disks=disks)
+        out = adv.as_dict()
+        out["lines"] = adv.lines()
+        out["topology_disks"] = len(disks)
+        return out
+
+    def _disks_for_advice(coordinator: Optional[str],
+                          token: Optional[str]) -> list:
+        """Full-fidelity DiskConfig list for advice. Prefer the local topology
+        (has parity/direct/cache fields); fall back to the coordinator's /storage
+        so an agent on a laptop still gets useful advice."""
+        from .storage import DiskConfig, load_topology
+        try:
+            local = load_topology()
+        except Exception:  # noqa: BLE001
+            local = []
+        if local:
+            return local
+        try:
+            data = _get(_fx(coordinator), "/storage", _tk(token))
+        except Exception:  # noqa: BLE001
+            return []
+        disks = []
+        for d in (data.get("disks") or []):
+            disks.append(DiskConfig(
+                id=d.get("id", ""), kind=d.get("kind", "hdd"),
+                read=d.get("read"), write=d.get("write"), match=d.get("match", ""),
+                parity_protected=bool(d.get("parity_protected")),
+                direct_path=d.get("direct_path"), cache_tier=d.get("cache_tier")))
+        return disks
+
+    @app.tool(description="Enqueue gigs into a coordinator. `gigs` is a list of "
+                          "{subjob_id, spec}; duplicates by subjob_id are ignored. "
+                          "FAIL-CLOSED I/O gate: if the gigs' paths are on a slow "
+                          "trade-off path (parity write, non-direct read, no SMB "
+                          "creds, unclassified NAS) this REFUSES with the fast "
+                          "alternative + the io_ack token to proceed anyway. Fix the "
+                          "paths (preferred) or pass io_ack=['<token>'].")
+    def seed_gigs(gigs: list[dict], job: str, label: str = "",
+                  io_ack: Optional[list[str]] = None,
+                  coordinator: Optional[str] = None,
+                  token: Optional[str] = None) -> dict:
+        from . import iohint
+        # Sample the first gig's declared I/O and gate the whole batch on it.
+        spec0 = (gigs[0].get("spec") or {}) if gigs else {}
+        adv = iohint.advise_job(
+            read_root=spec0.get("read_root"), write_root=spec0.get("write_root"),
+            sample_src=spec0.get("src_path") or spec0.get("input"),
+            sample_dst=spec0.get("dst_path"),
+            disks=_disks_for_advice(coordinator, token))
+        res = iohint.gate(adv, io_ack)
+        if res.blocked and iohint.gate_enabled():
+            raise ValueError(iohint.block_message(res, ack_syntax="io_ack="))
         return _post(_fx(coordinator), "/seed", _tk(token),
                      {"gigs": gigs, "job": job, "label": label})
 

@@ -913,7 +913,9 @@ def create_app(
             return {"disks": [], "budget": {}}
         return {
             "disks": [{"id": d.id, "kind": d.kind, "match": d.match,
-                        "read": d.read, "write": d.write}
+                        "read": d.read, "write": d.write,
+                        "parity_protected": d.parity_protected,
+                        "direct_path": d.direct_path, "cache_tier": d.cache_tier}
                       for d in app.state.disks],
             "budget": app.state.disk_concurrency,
         }

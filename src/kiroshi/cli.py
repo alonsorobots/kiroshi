@@ -96,6 +96,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                       help="Serve this (single-file, top-level) task's source to "
                            "joiners so `kiroshi join` needs no checkout. Opt-in + "
                            "consent-gated on the joiner — see SECURITY.md §6.5.")
+    prun.add_argument("--io-ack", action="append", default=None, metavar="TOKEN",
+                      help="Acknowledge a slow-I/O trade-off the fail-closed gate "
+                           "flagged (e.g. parity_write, no_direct_share). Repeatable.")
 
     # ---- join (add this machine to a running mesh) ----
     pjoin = sub.add_parser(
@@ -232,6 +235,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                     help="JSONL file; each line {\"subjob_id\":..., \"spec\":{...}}.")
     ps.add_argument("--demo", type=int, default=0, help="Seed N demo sleep gigs.")
     ps.add_argument("--batch", type=int, default=1000, help="POST batch size.")
+    ps.add_argument("--io-ack", action="append", default=None, metavar="TOKEN",
+                    help="Acknowledge a slow-I/O trade-off the fail-closed gate "
+                         "flagged (e.g. parity_write, no_direct_share). Repeatable.")
     ps.add_argument("--job", default=None,
                     help="Job slug; all gigs are grouped under it in the dashboard "
                          "(overrides the subjob_id-prefix grouping).")
@@ -804,9 +810,69 @@ def _launch_command() -> str:
         return " ".join(parts)
 
 
+def _sample_gig_io(jobs_path):
+    """Peek the first line of a sub-job JSONL to sample the I/O paths for the
+    fail-closed gate: (read_root, write_root, src, dst)."""
+    if not jobs_path:
+        return None, None, None, None
+    try:
+        with open(jobs_path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                spec = (json.loads(line).get("spec") or {})
+                return (spec.get("read_root"), spec.get("write_root"),
+                        spec.get("src_path") or spec.get("input"),
+                        spec.get("dst_path"))
+    except Exception:  # noqa: BLE001
+        pass
+    return None, None, None, None
+
+
+def _io_preflight(args, read_root=None, write_root=None,
+                  sample_src=None, sample_dst=None):
+    """Fail-closed I/O gate + advice, run before a job is created. Returns None to
+    proceed, or an int exit code to ABORT (slow path not acknowledged).
+
+    Never mutates paths: on a genuine trade-off it refuses and re-transmits the
+    fast alternative + the exact --io-ack token. Passes silently for local / no-
+    topology / already-fast jobs. Any internal error is swallowed (a gate bug must
+    not wedge the mesh)."""
+    try:
+        from . import iohint
+        from .storage import load_topology
+
+        disks = load_topology()
+        adv = iohint.advise_job(read_root=read_root, write_root=write_root,
+                                sample_src=sample_src, sample_dst=sample_dst,
+                                disks=disks)
+        acks = set(getattr(args, "io_ack", None) or [])
+        res = iohint.gate(adv, acks)
+    except Exception:  # noqa: BLE001
+        return None
+    # Non-blocking advisories (warnings that aren't gate reasons) are still shown.
+    for f in adv.findings:
+        if f.level == "warn" and f not in res.reasons:
+            print(f"[io] {f.message}", flush=True)
+    if res.blocked and iohint.gate_enabled():
+        print(iohint.block_message(res), file=sys.stderr, flush=True)
+        return 2
+    if res.acknowledged:
+        print(f"[io] proceeding with ACKNOWLEDGED slow I/O: "
+              f"{', '.join(res.acknowledged)}", flush=True)
+    return None
+
+
 def _cmd_run(args) -> int:
     from .runjob import run_job
 
+    rr, wr, s_src, s_dst = _sample_gig_io(getattr(args, "jobs", None))
+    rc = _io_preflight(args, read_root=args.read_root or rr,
+                       write_root=args.write_root or wr,
+                       sample_src=s_src, sample_dst=s_dst)
+    if rc is not None:
+        return rc
     return run_job(
         task_ref=args.task,
         items=args.items,
@@ -933,6 +999,13 @@ def _cmd_seed(args) -> int:
         r.raise_for_status()
         out = r.json()
         print(f"  seeded {out['inserted']}/{out['received']}", flush=True)
+
+    if args.jobs:
+        rr, wr, s_src, s_dst = _sample_gig_io(args.jobs)
+        rc = _io_preflight(args, read_root=rr, write_root=wr,
+                           sample_src=s_src, sample_dst=s_dst)
+        if rc is not None:
+            return rc
 
     buf: list[dict] = []
     total = 0
