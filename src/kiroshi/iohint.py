@@ -157,11 +157,20 @@ def advise_job(
     sample_dst: Optional[str] = None,
     subjob_id: str = "",
     disks: Optional[list[DiskConfig]] = None,
+    broker_servers: Optional[set[str]] = None,
 ) -> Advice:
     """Classify a job's declared input/output paths and return static fast-path
     guidance. Everything is best-effort: unknown paths simply yield fewer
-    findings, never an error."""
+    findings, never an error.
+
+    ``broker_servers`` names the UNC servers for which the coordinator can broker
+    NAS credentials to Runners (see ``/mesh/nas-cred/available``). A path on such a
+    server is on the fast ``smbprotocol`` plane at *runtime* even if the CREATING
+    host has no local creds — so it emits ``smb.brokered`` (ok) instead of the
+    ``smb.no_creds`` block. This is what lets a ``seed`` from an uncredentialed
+    shell stay on the fast path without a manual ack."""
     disks = disks or []
+    broker_servers = broker_servers or set()
     adv = Advice()
 
     if not disks:
@@ -177,7 +186,13 @@ def advise_job(
         server, ok = _creds_state(root)
         if server and server not in seen_servers:
             seen_servers.add(server)
-            if not ok:
+            if not ok and server in broker_servers:
+                adv.add("ok", "smb.brokered",
+                        f"{kind} {root!r} is a UNC share on {server!r} with no local "
+                        f"SMB creds, but the coordinator brokers credentials for it — "
+                        f"Runners fetch them at startup and use the direct smbprotocol "
+                        f"data plane. Fast path at runtime; no ack needed.")
+            elif not ok:
                 adv.add("warn", "smb.no_creds",
                         f"{kind} {root!r} is a UNC share on {server!r} but no SMB "
                         f"credentials are set (KIROSHI_NAS_USER/PASS). Kiroshi will "

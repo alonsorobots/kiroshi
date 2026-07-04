@@ -384,6 +384,27 @@ def create_app(
         return JSONResponse({"server": server, "user": user,
                              "sealed": nascred.seal(tok, nonce, payload)})
 
+    @app.get("/mesh/nas-cred/available")
+    def nas_cred_available(server: str = "default") -> JSONResponse:
+        """Non-secret brokerability check (bearer-gated via the auth middleware —
+        deliberately NOT in ``_OPEN_PATHS``, unlike the secret-bearing broker).
+
+        Answers one question for the I/O gate: *will the Runners that execute this
+        job be able to authenticate to ``server`` via the credential broker?* If
+        so, an uncredentialed seed host is a false positive — the runners fetch the
+        secret at startup and use the direct ``smbprotocol`` fast path. Returns only
+        booleans + server names; the password is never read or decrypted here.
+
+        Brokering needs a mesh token (the transit seal keys off it); without one the
+        broker is disabled, so ``available`` is False regardless of stored creds."""
+        from . import nascred
+        st = nascred.status(server)
+        servers = st.get("servers", []) or []
+        can_broker = bool(app.state.token) and (
+            st.get("present") or "default" in servers)
+        return JSONResponse({"server": server, "available": bool(can_broker),
+                             "servers": servers})
+
     # Optional per-task custom views: any *.html dropped in pages_dir is served at
     # /p/<name> and linked from the dashboard. A task ships its own visualization
     # (e.g. a SLERP-quality viewer) without Kiroshi knowing anything about it.

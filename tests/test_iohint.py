@@ -142,6 +142,32 @@ def test_creds_present_no_smb_warning(monkeypatch):
     assert "smb.no_creds" not in _codes(adv)
 
 
+def test_brokered_server_is_ok_not_blocked(monkeypatch):
+    # No local creds, but the coordinator can broker for this server: the
+    # Runners get the direct smbprotocol plane at startup, so it's the fast path,
+    # not a slow-path block. This is what lets a seed from an uncredentialed /
+    # headless shell proceed without a manual --io-ack.
+    monkeypatch.delenv("KIROSHI_NAS_USER", raising=False)
+    monkeypatch.delenv("KIROSHI_NAS_PASS", raising=False)
+    adv = iohint.advise_job(read_root="//nas/nvme/reduced",
+                            write_root="//nas/nvme/reduced",
+                            sample_src="reduced_a/clip.npz", disks=_topo(),
+                            broker_servers={"nas"})
+    assert "smb.brokered" in _codes(adv)
+    assert "smb.no_creds" not in _codes(adv)
+    assert iohint.gate(adv, acks=None).blocked is False
+
+
+def test_broker_only_for_named_server(monkeypatch):
+    # Brokering another server does NOT clear the block for this one.
+    monkeypatch.delenv("KIROSHI_NAS_USER", raising=False)
+    monkeypatch.delenv("KIROSHI_NAS_PASS", raising=False)
+    adv = iohint.advise_job(read_root="//nas/nvme/reduced",
+                            sample_src="reduced_a/clip.npz", disks=_topo(),
+                            broker_servers={"someotherhost"})
+    assert "smb.no_creds" in _codes(adv)
+
+
 # --------------------------------------------------------------------- edges
 def test_no_topology_says_so():
     adv = iohint.advise_job(read_root="//nas/x/y", disks=[])

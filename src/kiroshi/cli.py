@@ -926,6 +926,67 @@ def _sample_gig_io(jobs_path):
     return None, None, None, None
 
 
+def _topology_from_coordinator(args) -> list:
+    """Fetch the ``[[storage.disk]]`` topology from the coordinator's ``/storage``
+    endpoint. The coordinator is the source of truth — it enforces the topology at
+    lease time — so a ``seed``/``run`` launched from *any* working directory stays
+    spindle-aware instead of silently degrading to "no topology" (which turns every
+    NAS path into a false ``unclassified_nas`` gate). Best-effort: any failure
+    returns [] and the caller behaves exactly as before."""
+    try:
+        import requests
+        from .storage import DiskConfig
+
+        url = getattr(args, "coordinator", None) or getattr(args, "fixer", None)
+        if not url:
+            return []
+        url = _resolve_coordinator_arg(url)
+        r = requests.get(f"{url.rstrip('/')}/storage", timeout=10,
+                         headers=_auth_headers(args))
+        r.raise_for_status()
+        out = []
+        for d in (r.json().get("disks") or []):
+            out.append(DiskConfig(
+                id=d.get("id") or "disk", kind=d.get("kind", "hdd"),
+                read=d.get("read"), write=d.get("write"),
+                match=d.get("match", ""),
+                parity_protected=d.get("parity_protected", False),
+                direct_path=d.get("direct_path"), cache_tier=d.get("cache_tier"),
+            ))
+        return out
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _broker_servers_from_coordinator(args, roots) -> set:
+    """UNC servers the coordinator can broker NAS creds for. A seed/run from an
+    uncredentialed shell is still on the fast path if the executing Runners can
+    fetch creds from the broker — so the gate must ask the coordinator (source of
+    truth) rather than trust the launching host's local env. Best-effort: any
+    failure returns the empty set and the gate behaves exactly as before."""
+    try:
+        import requests
+        from . import kfs
+
+        servers = {s for s in (kfs.server_of(r) for r in roots if r) if s}
+        if not servers:
+            return set()
+        url = getattr(args, "coordinator", None) or getattr(args, "fixer", None)
+        if not url:
+            return set()
+        url = _resolve_coordinator_arg(url)
+        ok: set = set()
+        for srv in servers:
+            r = requests.get(f"{url.rstrip('/')}/mesh/nas-cred/available",
+                             params={"server": srv}, timeout=10,
+                             headers=_auth_headers(args))
+            if r.ok and r.json().get("available"):
+                ok.add(srv)
+        return ok
+    except Exception:  # noqa: BLE001
+        return set()
+
+
 def _io_preflight(args, read_root=None, write_root=None,
                   sample_src=None, sample_dst=None):
     """Fail-closed I/O gate + advice, run before a job is created. Returns None to
@@ -940,9 +1001,19 @@ def _io_preflight(args, read_root=None, write_root=None,
         from .storage import load_topology
 
         disks = load_topology()
+        if not disks:
+            # No local kiroshi.local.toml on this CWD — don't lose spindle-
+            # awareness. Ask the coordinator (the authoritative topology owner)
+            # so the gate classifies the same way it will be enforced at lease.
+            disks = _topology_from_coordinator(args)
+            if disks:
+                print(f"[io] no local topology; using coordinator's "
+                      f"{len(disks)} disk rule(s)", flush=True)
+        brokered = _broker_servers_from_coordinator(
+            args, (read_root, write_root, sample_src, sample_dst))
         adv = iohint.advise_job(read_root=read_root, write_root=write_root,
                                 sample_src=sample_src, sample_dst=sample_dst,
-                                disks=disks)
+                                disks=disks, broker_servers=brokered)
         acks = set(getattr(args, "io_ack", None) or [])
         res = iohint.gate(adv, acks)
     except Exception:  # noqa: BLE001
