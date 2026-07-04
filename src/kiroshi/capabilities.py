@@ -20,7 +20,7 @@ CAPABILITIES: list[dict[str, Any]] = [
         "name": "run",
         "purpose": "One-shot 'front door': starts a local coordinator + Runner in one process, seeds, runs, exits. Optional --lan binds the coordinator to the LAN so other machines can join with 'kiroshi remote'.",
         "command": "kiroshi run <module:fn> --items ... | --jobs sub-jobs.jsonl | --enumerate",
-        "when_to_use": "Quick jobs and dev iteration on a single machine (or a small ad-hoc mesh with --lan). --enumerate uses the task's own 'enumerate_sub-jobs' hook to fan out sub-jobs (no external sub-job file).",
+        "when_to_use": "Quick jobs and dev iteration on a single machine (or a small ad-hoc mesh with --lan). --enumerate uses the task's own 'enumerate_gigs' hook to fan out sub-jobs (no external sub-job file).",
         "when_not": "Long-running production jobs — prefer separate coordinator + runner + seed so the state DB and workers can be restarted independently.",
     },
     {
@@ -137,10 +137,10 @@ CAPABILITIES: list[dict[str, Any]] = [
     },
     {
         "name": "task-contract",
-        "purpose": "The ABI a task must satisfy: module-level 'def run(spec)->dict' (status/metrics) + optional 'enumerate_sub-jobs(args)->Iterator[sub-job]' that lets the task fan out its own sub-jobs.",
+        "purpose": "The ABI a task must satisfy: module-level 'def run(spec)->dict' (status/metrics) + optional 'enumerate_gigs(args)->Iterator[sub-job]' that lets the task fan out its own sub-jobs.",
         "command": "# see src/kiroshi/tasks.py; conventions: status='ok'|'skipped'; raise -> failed + retry",
-        "when_to_use": "Any new pipeline stage. Idempotent skip-if-output-exists in run() plus a good enumerate_sub-jobs makes a stage resumable and re-runnable for free.",
-        "when_not": "Don't do I/O in enumerate_sub-jobs (it runs on the launcher, before the mesh). Don't do long blocking waits in run() without honoring sub-job-timeout.",
+        "when_to_use": "Any new pipeline stage. Idempotent skip-if-output-exists in run() plus a good enumerate_gigs makes a stage resumable and re-runnable for free.",
+        "when_not": "Don't do I/O in enumerate_gigs (it runs on the launcher, before the mesh). Don't do long blocking waits in run() without honoring gig-timeout.",
     },
     {
         "name": "kfs",
@@ -202,7 +202,7 @@ CAPABILITIES: list[dict[str, Any]] = [
         "name": "advisories",
         "purpose": "Structured NAS-contention + sub-job-failure warnings emitted by the coordinator.",
         "command": "GET /advisories?token=<T>",
-        "when_to_use": "Poll to detect stalls (nas.throughput_collapse, nas.disk_saturation, sub-job.failure_spike).",
+        "when_to_use": "Poll to detect stalls (nas.throughput_collapse, nas.disk_saturation, gig.failure_spike).",
         "when_not": "—",
     },
     {

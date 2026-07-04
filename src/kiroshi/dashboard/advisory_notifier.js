@@ -2,7 +2,7 @@
  *
  * The Coordinator already exposes /advisories with structured NAS-contention
  * warnings (nas.thrash, nas.disk_saturation, nas.throughput_collapse,
- * nas.parity_write_pressure, sub-job.failure_spike). This script polls that
+ * nas.parity_write_pressure, gig.failure_spike). This script polls that
  * endpoint and, for every advisory whose (fingerprint, count) pair we
  * have not shown yet, raises:
  *   - a native Windows notification (Notification API) — works even when

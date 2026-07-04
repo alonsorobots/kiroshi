@@ -80,7 +80,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     prun.add_argument("--token", default=None, help="Mesh token (for --lan).")
     prun.add_argument("--read-root", default=None, help="Set KIROSHI_READ_ROOT for the task.")
     prun.add_argument("--write-root", default=None, help="Set KIROSHI_WRITE_ROOT for the task.")
-    prun.add_argument("--sub-job-timeout", type=float, default=None,
+    prun.add_argument("--gig-timeout", type=float, default=None,
                       help="Seconds before a hung sub-job is abandoned + its worker killed.")
     prun.add_argument("--syspath", action="append", default=None,
                       help="Extra sys.path entries for task import (repeatable).")
@@ -112,7 +112,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                        help="Extra sys.path entries for task import (repeatable).")
     pjoin.add_argument("--read-root", default=None, help="Set KIROSHI_READ_ROOT for the task.")
     pjoin.add_argument("--write-root", default=None, help="Set KIROSHI_WRITE_ROOT for the task.")
-    pjoin.add_argument("--sub-job-timeout", type=float, default=None,
+    pjoin.add_argument("--gig-timeout", type=float, default=None,
                        help="Seconds before a hung sub-job is abandoned + its worker killed.")
 
     # ---- remote (launch/manage a Runner on another machine, quoting-proof) ----
@@ -205,7 +205,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     pr.add_argument("--poll", type=float, default=2.0)
     pr.add_argument("--heartbeat", type=float, default=30.0)
     pr.add_argument("--retries", type=int, default=2, help="Per-item local retries.")
-    pr.add_argument("--sub-job-timeout", type=float, default=None,
+    pr.add_argument("--gig-timeout", type=float, default=None,
                     help="Seconds before a hung sub-job is abandoned + its worker killed.")
     pr.add_argument("--max-tasks-per-child", type=int, default=None,
                     help="Recycle worker processes every N gigs (band-aid for leaks; off by default).")
@@ -283,7 +283,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     pst.add_argument("--job", default=None,
                      help="Job slug (mesh mode only). Default: 'stage-<timestamp>'.")
     pst.add_argument("--token", default=None, help="Mesh auth token.")
-    pst.add_argument("--sub-job-timeout", type=int, default=300,
+    pst.add_argument("--gig-timeout", type=int, default=300,
                       help="Per-sub-job timeout in seconds (local mode only).")
 
     # ---- jobs (search/list jobs by regex) ----
