@@ -103,3 +103,14 @@ htmlcov/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# DB backups
+*.db.bak-*
+
+# Deployment-specific wrappers (machine-specific paths)
+_*_hidden.vbs
+_reduce30_*
+_slerp_*
+_dvq_*
+_cascade_*
+_pipeline_monitor*

@@ -1,7 +1,7 @@
 """Tests for the coordinator decision ledger — /lease/decisions, /job/trace,
 /decisions/summary, and the /status scheduling block.
 
-Uses FastAPI TestClient against an in-memory Fixer to verify the full
+Uses FastAPI TestClient against an in-memory coordinator to verify the full
 observability chain: seed -> lease -> decision recorded -> queryable.
 """
 from __future__ import annotations
@@ -24,8 +24,8 @@ def _client(**kw):
 
 
 def _seed(c, n, prefix="g"):
-    gigs = [{"subjob_id": f"{prefix}{i}", "spec": {}} for i in range(n)]
-    return c.post("/seed", json={"gigs": gigs}).json()
+    sub-jobs = [{"subjob_id": f"{prefix}{i}", "spec": {}} for i in range(n)]
+    return c.post("/seed", json={"sub-jobs": sub-jobs}).json()
 
 
 def test_lease_decision_recorded_after_lease():
@@ -97,11 +97,11 @@ def test_ring_buffer_bounded():
 
 def test_job_event_index_bounded():
     # The per-job index dict must be bounded (not just each deque), or a
-    # long-lived Fixer leaks one entry per distinct gig forever.
+    # long-lived coordinator leaks one entry per distinct sub-job forever.
     with _client(jobevent_ring=10) as c:
         for i in range(50):
             jid = f"ev{i}"
-            c.post("/seed", json={"gigs": [{"subjob_id": jid, "spec": {}}]})
+            c.post("/seed", json={"sub-jobs": [{"subjob_id": jid, "spec": {}}]})
             lease = c.post("/lease", json={
                 "runner_id": "r", "host": "h", "capacity": 1}).json()
             c.post("/complete", json={
