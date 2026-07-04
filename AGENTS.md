@@ -13,8 +13,9 @@ Kiroshi is a **work-stealing mesh** for embarrassingly parallel file-shaped jobs
 - A **Runner** is a worker process bound to **one task** (`module:function`).
   It leases sub-jobs from the Coordinator, runs the task, reports results. Many runners
   across many machines share one Coordinator's queue.
-- A **sub-job** = `{job_id, spec}`. `job_id` is the dedup key (re-seeding the same
-  id is a no-op). `spec` is opaque to Kiroshi — the task interprets it.
+- A **sub-job** = `{subjob_id, spec}`. `subjob_id` is the dedup key (re-seeding
+  the same id is a no-op). `spec` is opaque to Kiroshi — the task interprets it.
+  (Legacy JSONL using the old `job_id` key is still accepted by `kiroshi seed`.)
 - **Auth:** every HTTP endpoint is token-gated. Pass `?token=<MESH_TOKEN>` on
   the URL or `Authorization: Bearer <MESH_TOKEN>` header. `/healthz` is the
   only exception. First thing an agent trips on if it forgets.
@@ -45,10 +46,10 @@ back in is why this note exists).
 | Run one task across the mesh | `kiroshi run <task> --enumerate --lan` | Quick one-shot; the "front door." Avoid for long jobs — seed into the persistent Coordinator as a group (below) for durability/resume. |
 | Run the coordinator | *(already running — don't start another)* | **There is ONE Coordinator for the whole mesh** — the persistent `kiroshi-coordinator` service (port 8787, beacons, `--coordinator auto` finds it, topology-aware). You almost never start a Coordinator by hand. Every job is a GROUP inside this one Coordinator, not a new port. `--force-second-coordinator` is for deliberately isolated *meshes* (different NAS/topology), NEVER for "a parallel job" — that fragments the queue + disk budget and breaks `auto`/MCP. See "Job model" below. |
 | Run a worker | `kiroshi runner --coordinator <url> --task <m:f> --workers N` | Bind ONE task per runner. `--capacity` caps how many sub-jobs it holds leased (prevents hoarding the whole disk budget). `--syspath` adds import roots for the task code. |
-| Enqueue sub-jobs | `kiroshi seed --coordinator <url> --jobs sub-jobs.jsonl --group <slug> --label "<desc>"` | Dedups by `job_id`. Use `--group` to name a job (dashboard + `/metrics/export` filter on it). |
+| Enqueue sub-jobs | `kiroshi seed --coordinator <url> --jobs sub-jobs.jsonl --group <slug> --label "<desc>"` | Dedups by `subjob_id`. Use `--group` to name a job (dashboard + `/metrics/export` filter on it). |
 | Stage data between tiers | `kiroshi stage --from <src> --to <dst> [--pattern glob] [--coordinator <url>]` | Budgeted, resumable parallel copy (HDD→NVMe, remote fetch, prefetch). Shares the mesh I/O budget via ResourceClient; skips already-copied files. Local mode (no `--coordinator`) runs in-process like `kiroshi run`; mesh mode seeds sub-jobs for a `kiroshi.staging:run` runner. |
-| Snapshot | `kiroshi status --coordinator <url>` | Counts only. For per-sub-job detail use HTTP `/jobs` or `/metrics/export`. |
-| Search jobs by regex | `kiroshi jobs --coordinator <url> --grep '<regex>' [--field job_id\|error] [--state failed] [--group <slug>]` | Server-side regex filter (no 100k-row download). Find specific sub-jobs on large jobs — e.g. `--grep 'PermissionError' --field error --state failed`. `--json` for machine output. |
+| Snapshot | `kiroshi status --coordinator <url>` | Counts only. For per-sub-job detail use HTTP `/subjobs` or `/metrics/export`. |
+| Search jobs by regex | `kiroshi jobs --coordinator <url> --grep '<regex>' [--field subjob_id\|error] [--state failed] [--group <slug>]` | Server-side regex filter (no 100k-row download). Find specific sub-jobs on large jobs — e.g. `--grep 'PermissionError' --field error --state failed`. `--json` for machine output. |
 | Return stuck/failed sub-jobs to pending | `kiroshi requeue --coordinator <url> --state failed` | Bumps attempts; respects max-retries. Use after fixing a systemic error so failed sub-jobs re-run. |
 | **Multi-stage dependent work** | `kiroshi pipeline run spec.toml` | **USE THIS** instead of hand-rolling a cascade-seeder. Declares stages + typed edges (`each` / `quorum:k` / `all` / `artifact`). See `docs/PIPELINE.md` + `examples/pipeline.example.toml`. |
 | Discover Kiroshi's own features | `kiroshi capabilities [--json]` | Task-indexed capability map. `--json` for LLM agents / MCP consumption. Same content as this doc, but machine-readable and version-accurate at runtime. |
@@ -70,12 +71,12 @@ back in is why this note exists).
 Hit these directly from a task or orchestration script (token-gated via `?token=` or header):
 
 - `GET /status` → `{total, pending, leased, done, failed, rate_per_s, eta_s, disk_inflight}` — fleet counts.
-- `GET /metrics/export?grp=<group>&state=done&limit=100000` → lightweight `{rows:[{job_id,metrics,state,grp,disk}]}` for a whole job. **Use this** to find which items a stage has finished (the pipeline coordinator does).
-- `POST /seed` (body: `{sub-jobs:[{job_id,spec}], group, label}`) → enqueue; dedups by `job_id`.
+- `GET /metrics/export?job=<job>&state=done&limit=100000` → lightweight `{rows:[{subjob_id,metrics,state,job,disk}]}` for a whole job. **Use this** to find which items a stage has finished (the pipeline coordinator does).
+- `POST /seed` (body: `{gigs:[{subjob_id,spec}], job, label}`) → enqueue; dedups by `subjob_id`. (`gigs` is a frozen wire-compat key; entries are sub-jobs.)
 - `GET /runners` → registered runners + heartbeats (authoritative for "is my runner alive" — more reliable than `Get-CimInstance` cross-session).
 - `GET /advisories` → structured warnings (`nas.throughput_collapse`, `nas.disk_saturation`, `sub-job.failure_spike`, …). Poll this to detect problems.
 - `GET /storage` → the loaded topology (disks, roots, budgets).
-- `GET /jobs?grp=<g>&state=done&limit=2000` → dashboard-shaped job rows. **Now supports `job_id_re` + `error_re`** regex params for server-side filtering.
+- `GET /subjobs?job=<j>&state=done&limit=2000` → dashboard-shaped sub-job rows. **Supports `subjob_id_re` + `error_re`** regex params for server-side filtering.
 - `POST /requeue` (body: `{state}`) → return failed/leased sub-jobs to pending.
 - `GET /task/meta?task=<module:fn>` → task's declared metadata (docstring, expected spec keys). Introspect BEFORE seeding to know what to put in `spec`.
 - `GET /task/source?task=<module:fn>` → the task's source. Useful when an agent needs to reason about behavior without the local checkout.
@@ -84,9 +85,9 @@ Hit these directly from a task or orchestration script (token-gated via `?token=
 ## Storage topology (`kiroshi.local.toml`)
 
 Per-disk routing + concurrency budgets. Each `[[storage.disk]]` has `read` /
-`write` roots, a `match` pattern tested against the sub-job `job_id`, and a
+`write` roots, a `match` pattern tested against the sub-job `subjob_id`, and a
 `concurrency` cap. The Coordinator leases at most `sum(concurrency)` sub-jobs and never
-over-saturates one spindle. **A sub-job whose `job_id` matches no disk gets `disk=None`
+over-saturates one spindle. **A sub-job whose `subjob_id` matches no disk gets `disk=None`
 (uncapped)** — usually a bug; either give it a `match` or set explicit
 `read_root`/`write_root` in the sub-job `spec` (which bypasses topology routing
 entirely). Local operator configs use the `.local.` infix (`*.local.toml`) and
@@ -126,16 +127,17 @@ A task is a **module-level** `def run(spec: dict) -> dict` returning
 `{"status": "ok"|"skipped", "metrics": {...}}`. Raise → sub-job fails and Kiroshi
 retries. Runners import the task; the Coordinator never does.
 
-**Optional but powerful — the `enumerate_sub-jobs` hook:**
+**Optional but powerful — the `enumerate_gigs` hook** (the hook name is a
+frozen ABI term; the *concept* is "enumerate sub-jobs"):
 
 ```python
 # in your task module
-def enumerate_sub-jobs(args: dict):
-    """Yield {job_id, spec} — 'kiroshi run <task> --enumerate ...' calls this
+def enumerate_gigs(args: dict):
+    """Yield {subjob_id, spec} — 'kiroshi run <task> --enumerate ...' calls this
     so a task can fan out its own sub-jobs (one source → many outputs), no
     external sub-jobs.jsonl file needed."""
     for path in kfs.walk(args["read_root"]):
-        yield {"job_id": path, "spec": {"src": path, "dst": ...}}
+        yield {"subjob_id": path, "spec": {"src": path, "dst": ...}}
 
 def run(spec: dict) -> dict:
     ...
@@ -159,7 +161,7 @@ mapped drives) — set these in the runner's environment:
 
 **Path helpers** (`from kiroshi import paths`) — for resolving sub-job I/O:
 
-- `paths.sub-job_read_root(spec)` / `paths.sub-job_write_root(spec)`  → honors
+- `paths.gig_read_root(spec)` / `paths.gig_write_root(spec)`  → honors
   `spec["read_root"]` / `write_root` overrides, else falls back to topology
 - `paths.confined_join(root, rel)`  → safe join that refuses `..` escapes
 
@@ -182,7 +184,7 @@ resources the built-in per-disk topology doesn't already cover.
 - `--max-tasks-per-child N`  → recycle a worker process after N tasks
   (releases numpy/torch memory a task didn't free)
 - `--gc-between-tasks`  → force `gc.collect()` between tasks
-- `--sub-job-timeout SECONDS`  → hard-kill a sub-job that stalls
+- `--gig-timeout SECONDS`  → hard-kill a sub-job that stalls
 - `--heartbeat SECONDS`  → lease-renewal cadence (default OK for most)
 - `--retries N`  → per-sub-job retry budget (default 3)
 
@@ -190,7 +192,7 @@ resources the built-in per-disk topology doesn't already cover.
 
 - Each completed sub-job carries a `metrics.proc` summary: `cpu_pct_mean`,
   `cpu_pct_peak`, `rss_peak_mb`, `read_mb`, `write_mb`, `wall_s`, `samples`.
-- Visible in `/job/{id}` and `/jobs` — answers *"what did this sub-job actually use?"*
+- Visible in `/subjob/{id}` and `/subjobs` — answers *"what did this sub-job actually use?"*
 - Disable with `KIROSHI_PROFILER=0` env var. Soft dep — works without psutil
   (just no proc summary).
 
@@ -230,7 +232,7 @@ tells you *why* the coordinator gave each host the sub-jobs it did. Three endpoi
    records: requested vs granted, `binding_reason`, fair-share ceiling,
    per-disk budget snapshot. Filter by `host` or `reason`.
 
-3. **`GET /job/trace?job_id=...`** (MCP: `job_trace`) — one sub-job's full
+3. **`GET /subjob/trace?subjob_id=...`** (MCP: `job_trace`) — one sub-job's full
    coordination timeline: SEEDED → LEASED → COMPLETED/FAILED/EXPIRED.
 
 The `binding_reason` enum disambiguates the cause at a glance:
@@ -265,7 +267,7 @@ kiroshi runner --coordinator auto --task scripts.mesh.tasks.reduce_pose:run --wo
 kiroshi status --coordinator auto           # or MCP status / the dashboard
 ```
 
-Groups give per-job dashboards, `/metrics/export?grp=…`, `--group` filters
+Groups give per-job dashboards, `/metrics/export?job=…`, `--group` filters
 on `jobs`/`requeue`, and pipeline edges — all the isolation a job needs,
 with none of the fragmentation. **Do NOT** spin `kiroshi coordinator … --port 88xx
 --force-second-coordinator --no-beacon` per job: that was the old anti-pattern

@@ -505,6 +505,9 @@ def create_app(
     def metrics_history() -> dict[str, Any]:
         return {"samples": list(app.state.metrics), "ts": time.time()}
 
+    # /groups + its {"groups": [...]} payload are frozen wire-compat names (see
+    # the "gigs" note on /lease). The dashboard fetches /groups; renaming it
+    # would require lockstep client updates for no functional gain.
     @app.get("/groups")
     def groups(limit: int = 200) -> dict[str, Any]:
         rows = store.group_stats(limit=min(max(limit, 1), 2000))
@@ -700,6 +703,10 @@ def create_app(
             leased_disks = {g.get("disk") for g in res.gigs if g.get("disk")}
             active = app.state.advisories.active()
             adv_out = filter_advisories_for_lease(active, leased_disks)
+        # NOTE: the wire key "gigs" is an intentional compat name kept from the
+        # pre-rename protocol (workers/pipeline read lease["gigs"]). Renaming it
+        # would break every in-flight worker, so it stays as a frozen wire term
+        # even though the vocabulary is now "sub-jobs". Same for /groups below.
         payload: dict[str, Any] = {
             "lease_id": res.lease_id, "gigs": res.gigs, "ttl": ttl,
         }

@@ -938,6 +938,12 @@ def _cmd_seed(args) -> int:
                 if not line:
                     continue
                 g = json.loads(line)
+                # Back-compat: legacy JSONL files use the old "job_id" key.
+                # Map it onto "subjob_id" BEFORE the uuid fallback, otherwise
+                # every legacy line gets a random id — silently breaking dedup,
+                # idempotency, and subjob_id-prefix grouping.
+                if "subjob_id" not in g and "job_id" in g:
+                    g["subjob_id"] = g.pop("job_id")
                 g.setdefault("subjob_id", uuid.uuid4().hex)
                 g.setdefault("spec", {})
                 buf.append(g)
