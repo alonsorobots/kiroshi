@@ -321,6 +321,29 @@ def run_job(
                   f"(sha256 {task_source['sha256'][:12]}…) — joiners must approve it.",
                   flush=True)
 
+    # A4: --force-second-fixer now requires KIROSHI_ALLOW_SECOND_COORDINATOR=1
+    if force_second_fixer:
+        if os.environ.get("KIROSHI_ALLOW_SECOND_COORDINATOR") != "1":
+            print(
+                "[run] REFUSING: --force-second-fixer now requires the "
+                "environment variable KIROSHI_ALLOW_SECOND_COORDINATOR=1.\n"
+                "  This two-key safety prevents accidentally running a second "
+                "coordinator on the same machine.",
+                file=sys.stderr,
+            )
+            return 3
+
+    # Machine-level exclusive lock (catches same-box second coordinator even
+    # when --no-beacon / loopback). The override path skips the lock.
+    from .coordlock import acquire_or_refuse
+
+    coord_lock = acquire_or_refuse(
+        info={"port": port, "db": db, "host": host},
+        allow_override=force_second_fixer,
+    )
+    if coord_lock is None:
+        return 3
+
     app = create_app(store, token=token, launch_command=launch_command,
                      task_source=task_source, disks=disks)
     # M9: stash the origin so advisories fired against this campaign's spindle
@@ -378,6 +401,7 @@ def run_job(
         server_thread.join(timeout=10)
         if beacon is not None:
             beacon.stop()
+        coord_lock.release()
 
     st = store.stats()
     store.close()

@@ -72,9 +72,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     prun.add_argument("--lan", action="store_true",
                       help="Bind 0.0.0.0 so other machines can join (generates a mesh token).")
     prun.add_argument("--force-second-fixer", action="store_true",
-                      help="Skip the split-brain guard that refuses --lan when "
-                           "another Fixer is already discoverable. Only use when "
-                           "you deliberately want two isolated meshes on the same LAN.")
+                      help="Skip the singleton coordinator guard. Requires BOTH this "
+                           "flag AND KIROSHI_ALLOW_SECOND_COORDINATOR=1 env var. Use "
+                           "ONLY when you deliberately want two isolated meshes.")
     prun.add_argument("--db", default=None,
                       help="Run job-store path (default: state-dir/run-<slug>.db).")
     prun.add_argument("--token", default=None, help="Mesh token (for --lan).")
@@ -181,10 +181,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     pf.add_argument("--no-beacon", action="store_true",
                     help="Disable the UDP discovery beacon (runners must use an explicit --fixer).")
     pf.add_argument("--force-second-fixer", action="store_true",
-                    help="Skip the split-brain guard that refuses to start when "
-                         "another Fixer is already discoverable on the LAN. Use "
+                    help="Skip the singleton coordinator guard. Requires BOTH this "
+                         "flag AND KIROSHI_ALLOW_SECOND_COORDINATOR=1 env var. Use "
                          "ONLY when you deliberately want two isolated meshes on "
-                         "the same LAN (rare — usually you want one Fixer).")
+                         "different NAS pools (rare — usually you want one coordinator).")
     pf.add_argument("--token", default=None,
                     help="Mesh auth token (default: env KIROSHI_TOKEN, token file, or auto-generated).")
     pf.add_argument("--no-auth", action="store_true",
@@ -332,10 +332,19 @@ def main(argv: Optional[list[str]] = None) -> int:
     pmcp = sub.add_parser(
         "mcp",
         help="Run the MCP server (exposes Kiroshi to LLM agents; needs [mcp] extra).")
-    pmcp.add_argument("--fixer", default=cfg.fixer_url,
-                      help="Default Fixer URL for tool calls that don't pass one.")
+    pmcp.add_argument("--fixer", default="auto",
+                      help="Default Fixer URL for tool calls that don't pass one. "
+                           "'auto' (default) discovers it on the LAN — portable "
+                           "across nodes/ports; env KIROSHI_FIXER overrides.")
     pmcp.add_argument("--token", default=None,
                       help="Default mesh token for tool calls that don't pass one.")
+
+    # ---- cursor-bridge (advisory -> Cursor agent prompt; optional [cursor] extra) ----
+    pcb = sub.add_parser(
+        "cursor-bridge",
+        help="Run the advisory->Cursor webhook bridge (needs [cursor] extra).")
+    pcb.add_argument("--host", default=None, help="Bind address (default 127.0.0.1).")
+    pcb.add_argument("--port", type=int, default=None, help="Bind port (default 9123).")
 
     # ---- requeue ----
     pq = sub.add_parser("requeue", help="Return failed/stuck gigs to pending.")
@@ -371,7 +380,10 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     # ---- tray ----
     ptray = sub.add_parser("tray", help="Run the system-tray UI (needs the 'tray' extra).")
-    ptray.add_argument("--fixer", default=cfg.fixer_url, help="Fixer base URL, or 'auto'.")
+    # A tray is a GLOBAL lens on the whole mesh, so it defaults to LAN discovery
+    # (the persistent beaconing Fixer) rather than cfg.fixer_url — which may point
+    # at a specific campaign port and would pin the icon to a single campaign.
+    ptray.add_argument("--fixer", default="auto", help="Fixer base URL, or 'auto' (default: discover).")
     ptray.add_argument("--token", default=None, help="Mesh auth token.")
 
     # ---- firewall (Windows: manage inbound rules for TCP fixer + UDP discovery) ----
@@ -568,6 +580,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         return _cmd_capabilities(args)
     if args.cmd == "mcp":
         return _cmd_mcp(args)
+    if args.cmd == "cursor-bridge":
+        return _cmd_cursor_bridge(args)
     if args.cmd == "stage":
         return _cmd_stage(args)
     if args.cmd == "jobs":
@@ -652,6 +666,34 @@ def _cmd_fixer(args) -> int:
                   file=sys.stderr)
             return 3
 
+    # A4: --force-second-fixer now requires KIROSHI_ALLOW_SECOND_COORDINATOR=1
+    # as a two-key safety. A single flag is too easy to pass by muscle memory.
+    force_second = bool(args.force_second_fixer)
+    if force_second:
+        if os.environ.get("KIROSHI_ALLOW_SECOND_COORDINATOR") != "1":
+            print(
+                "[fixer] REFUSING: --force-second-fixer now requires the "
+                "environment variable KIROSHI_ALLOW_SECOND_COORDINATOR=1.\n"
+                "  This two-key safety prevents accidentally running a second "
+                "coordinator on the same machine.\n"
+                "  If you deliberately need two isolated meshes on different "
+                "NAS pools, set the env var AND pass the flag.",
+                file=sys.stderr,
+            )
+            return 3
+
+    # Machine-level exclusive lock (beacon-independent): catches the same-box
+    # footgun that --no-beacon bypasses. The lock auto-releases on process
+    # death. Override path (deliberate second mesh) skips the lock entirely.
+    from .coordlock import acquire_or_refuse
+
+    coord_lock = acquire_or_refuse(
+        info={"port": args.port, "db": args.db, "host": args.host},
+        allow_override=force_second,
+    )
+    if coord_lock is None:
+        return 3
+
     store = JobStore(args.db, max_retries=args.max_retries)
     from .storage import load_topology
 
@@ -697,6 +739,7 @@ def _cmd_fixer(args) -> int:
         reg.close()
         if beacon is not None:
             beacon.stop()
+        coord_lock.release()
     return 0
 
 
@@ -1211,6 +1254,23 @@ def _cmd_mcp(args) -> int:
     Optional extra: 'pip install kiroshi[mcp]'."""
     from . import mcp_server
     return mcp_server.run_stdio(default_fixer=args.fixer, default_token=args.token)
+
+
+def _cmd_cursor_bridge(args) -> int:
+    """Run the Kiroshi-advisory -> Cursor-agent webhook bridge.
+    Optional extra: 'pip install kiroshi[cursor]'."""
+    try:
+        import uvicorn  # noqa: F401
+    except ImportError:
+        print("kiroshi cursor-bridge: missing deps. Install with: "
+              "pip install 'kiroshi[cursor]'", file=sys.stderr)
+        return 2
+    from .integrations.cursor_bridge import DEFAULT_HOST, DEFAULT_PORT, create_app
+    import uvicorn
+    host = args.host or os.environ.get("KIROSHI_CURSOR_HOST", DEFAULT_HOST)
+    port = args.port or int(os.environ.get("KIROSHI_CURSOR_PORT", DEFAULT_PORT))
+    uvicorn.run(create_app(), host=host, port=port, log_level="info")
+    return 0
 
 
 def _cmd_capabilities(args) -> int:

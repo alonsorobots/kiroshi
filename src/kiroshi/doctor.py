@@ -67,14 +67,38 @@ def _check_task(rep: _Report, task_ref: Optional[str], syspath: list[str]) -> No
     except ModuleNotFoundError as e:
         rep.line(_FAIL, "task import", f"{task_ref}: missing module '{e.name}'. "
                  f"Install it into THIS interpreter's env.")
+        return
     except ImportError as e:
         # Covers Windows Smart App Control / WDAC blocking an unsigned native
         # extension ("An Application Control policy has blocked this file").
         rep.line(_FAIL, "task import", f"{task_ref}: {e}. If this mentions an "
                  f"'Application Control policy', install signed binaries (e.g. "
                  f"from the Anaconda 'defaults' channel) or relax the policy.")
+        return
     except Exception as e:  # noqa: BLE001
         rep.line(_FAIL, "task import", f"{task_ref}: {e!r}")
+        return
+
+    # Deep check: run the task's selftest() on its fixture if it has one. This
+    # exercises LAZY imports (deps imported inside run(), invisible to the
+    # import above) + core compute on THIS interpreter — the exact drift that
+    # made a runner import fine yet fail every gig.
+    try:
+        from .tasks import resolve_selftest
+
+        st = resolve_selftest(task_ref)
+    except Exception:  # noqa: BLE001 — resolution failure already covered above
+        st = None
+    if st is None:
+        rep.line(_WARN, "task selftest", "task defines no selftest() hook "
+                 "(add one to catch lazy-import/asset drift before launch)")
+        return
+    try:
+        st()
+        rep.line(_OK, "task selftest", "fixture passed (lazy imports + compute)")
+    except Exception as e:  # noqa: BLE001
+        rep.line(_FAIL, "task selftest", f"{task_ref}: {type(e).__name__}: {e} — a "
+                 f"runtime/lazy dependency or asset is missing on this node")
 
 
 def _describe_root(raw: str) -> str:
@@ -196,6 +220,20 @@ def _check_write_root(rep: _Report, raw: Optional[str]) -> None:
             pass
 
 
+def _check_coordlock(rep: _Report) -> None:
+    """Report whether a coordinator lock is held on this machine."""
+    from .coordlock import CoordinatorLock
+
+    lk = CoordinatorLock(info={})
+    holder = lk.holder()
+    if holder:
+        rep.line(_OK, "coordinator lock",
+                 f"held by pid={holder.get('pid')}, port={holder.get('port')}, "
+                 f"db={holder.get('db', '?')}")
+    else:
+        rep.line(_OK, "coordinator lock", "not held (no coordinator running on this machine)")
+
+
 def _check_fixer(rep: _Report, fixer_url: Optional[str], auto: bool,
                  token: Optional[str] = None) -> None:
     import requests
@@ -254,6 +292,7 @@ def run_doctor(
     _check_task(rep, task_ref, list(syspath or []))
     _check_read_root(rep, read_root)
     _check_write_root(rep, write_root)
+    _check_coordlock(rep)
     _check_fixer(rep, fixer_url, auto, token)
 
     if rep.failed:
