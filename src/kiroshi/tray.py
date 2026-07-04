@@ -254,17 +254,17 @@ class Tray:
                     pct = (100 * d.get("done", 0) / d["total"]) if d.get("total") else 0
                     # Fetch job summaries so the tooltip shows readable
                     # labels (the fix for "too many jobs") not just a raw count.
-                    campaigns = self._fetch_campaigns(base)
-                    if campaigns:
-                        active = [c for c in campaigns
+                    jobs = self._fetch_jobs(base)
+                    if jobs:
+                        active = [c for c in jobs
                                   if c.get("leased", 0) or c.get("pending", 0)]
                         top = active[:3]
                         names = [c.get("label") or c.get("job", "?") for c in top]
                         if len(active) > 3:
                             names.append(f"… +{len(active) - 3} more")
-                        camp_str = " | ".join(names) if names else "no active campaigns"
+                        job_str = " | ".join(names) if names else "no active jobs"
                         self._status = (f"{pct:.0f}% · {d.get('rate_per_s', 0):.1f}/s · "
-                                        f"{d.get('pending', 0)} queued\n{camp_str}")
+                                        f"{d.get('pending', 0)} queued\n{job_str}")
                     else:
                         self._status = (f"done {d.get('done', 0)}/{d.get('total', 0)} "
                                         f"({pct:.0f}%) · {d.get('rate_per_s', 0):.1f}/s "
@@ -291,7 +291,7 @@ class Tray:
             except Exception:  # noqa: BLE001
                 pass
 
-    def _fetch_campaigns(self, base: str) -> list[dict]:
+    def _fetch_jobs(self, base: str) -> list[dict]:
         """Fetch /groups for the tray tooltip (best-effort)."""
         try:
             r = requests.get(f"{base}/groups?limit=20", timeout=4,

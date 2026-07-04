@@ -140,7 +140,7 @@ def _expand_range(match: str) -> list[str]:
 
 
 def match_disk(haystack: str, match: str) -> bool:
-    """Does ``haystack`` (a sub-job's job_id / path text) belong to the disk with this
+    """Does ``haystack`` (a sub-job's subjob_id / path text) belong to the disk with this
     ``match`` rule? Supports a shard range (``shard_01..08``), a glob
     (``shard_0[1-8]*``), or a plain substring (``shard_01``)."""
     if not match:
@@ -152,14 +152,14 @@ def match_disk(haystack: str, match: str) -> bool:
     return match in haystack
 
 
-def derive_disk(job_id: str, spec: dict[str, Any],
+def derive_disk(subjob_id: str, spec: dict[str, Any],
                 disks: list[DiskConfig]) -> Optional[str]:
     """Resolve which physical disk a sub-job's input lives on, or ``None`` if no rule
-    matches (uncapped / inert). Matches against the job_id and common path fields in
-    the spec, so it works whether the shard is in the job_id or in a ``src_path``."""
+    matches (uncapped / inert). Matches against the subjob_id and common path fields in
+    the spec, so it works whether the shard is in the subjob_id or in a ``src_path``."""
     if not disks:
         return None
-    candidates = [job_id]
+    candidates = [subjob_id]
     for k in ("path", "src_path", "dst_path", "input", "video_path"):
         v = spec.get(k)
         if isinstance(v, str):
@@ -191,7 +191,7 @@ def inject_roots(gigs: list[dict[str, Any]], disks: list[DiskConfig]) -> None:
             # Re-derive: the sub-job was seeded when no disk rule matched (or the
             # topology has since changed). Only fires for untagged gigs —
             # already-tagged gigs pay zero cost.
-            did = derive_disk(g.get("job_id", ""), g.get("spec") or {}, disks)
+            did = derive_disk(g.get("subjob_id", ""), g.get("spec") or {}, disks)
             if did:
                 g["disk"] = did       # lease-copy only; stored row untouched
         d = by_id.get(did)

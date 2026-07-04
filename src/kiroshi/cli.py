@@ -1170,7 +1170,7 @@ def _cmd_jobs(args) -> int:
         print(json.dumps(rows, indent=2, default=str))
         return 0
     # compact table
-    print(f"{'JOB_ID':40s} {'STATE':10s} {'ATT':>3s} {'DISK':8s} ERROR")
+    print(f"{'SUBJOB_ID':42s} {'STATE':10s} {'ATT':>3s} {'DISK':8s} ERROR")
     print("-" * 80)
     for row in rows:
         jid = (row.get("subjob_id") or "")[:40]
