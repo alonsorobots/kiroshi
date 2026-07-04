@@ -103,14 +103,11 @@ def build_server(default_coordinator: Optional[str] = None,
         name="kiroshi",
         instructions=(
             "Kiroshi mesh work-queue. Prefer high-level tools over raw HTTP: "
-            "'seed_gigs' to enqueue a stage, 'validate_pipeline'/'tick_pipeline' "
-            "for multi-stage work, 'status'/'list_advisories' for observability. "
-            "Before seeding a NAS job, call 'advise_io' with the read/write roots "
-            "(and a sample input/output path) to get storage-class guidance — it "
-            "tells you if you're on the fast path (NVMe / direct spindle share) or "
-            "about to hit an HDD/parity/redirector slow path. Read the "
-            "'kiroshi://capabilities.json' and 'kiroshi://agents.md' resources "
-            "first if you're new to Kiroshi."
+            "'status' is the ONE dashboard call (fleet + jobs + resources + mesh "
+            "coverage). 'seed_gigs' to enqueue, 'validate_pipeline'/'tick_pipeline' "
+            "for multi-stage work. 'search_subjobs' greps individual sub-jobs — NOT "
+            "jobs. Before seeding a NAS job, call 'advise_io'. Read "
+            "'kiroshi://capabilities.json' and 'kiroshi://agents.md' first."
         ),
     )
 
@@ -165,32 +162,15 @@ def build_server(default_coordinator: Optional[str] = None,
     def _tk(token: Optional[str]) -> Optional[str]:
         return token or default_token or os.environ.get("KIROSHI_TOKEN")
 
-    @app.tool(description="Get a fleet snapshot from a coordinator. NOTE: the "
-                          "count fields (total/done/pending/leased/failed) are "
-                          "SUB-JOB counts summed across every job — NOT a number "
-                          "of jobs. A coordinator runs a handful of jobs, each "
-                          "fanned out into thousands of sub-jobs. This tool also "
-                          "returns 'n_jobs' (distinct jobs) and a 'summary' line "
-                          "so the two are never conflated. Includes rate, ETA, "
-                          "per-disk in-flight.")
+    @app.tool(description="ONE-CALL mesh dashboard from a coordinator. Returns "
+                          "fleet + jobs[] with per-job progress, ETA, launch_commands, "
+                          "runners, resources (CPU/RAM/GPU/VRAM/disk), health/stall "
+                          "detection, error_digest, action_hint, and mesh coverage "
+                          "(configured vs live hosts). Top-level total/done/pending "
+                          "fields are SUB-JOB counts (legacy dashboard compat).")
     def status(coordinator: Optional[str] = None,
                token: Optional[str] = None) -> dict:
-        base, tok = _fx(coordinator), _tk(token)
-        st = _get(base, "/status", tok)
-        # Enrich with the distinct-job count so sub-jobs are never read as jobs.
-        try:
-            groups = (_get(base, "/groups", tok) or {}).get("groups") or []
-        except Exception:
-            groups = []
-        n_jobs = len(groups)
-        st["n_jobs"] = n_jobs
-        st["counts_are"] = "sub-jobs"
-        st["summary"] = (
-            f"{n_jobs} job(s) \u00b7 {st.get('total', 0):,} sub-jobs "
-            f"({st.get('done', 0):,} done, {st.get('failed', 0):,} failed, "
-            f"{st.get('pending', 0):,} pending, {st.get('leased', 0):,} leased)"
-        )
-        return st
+        return _get(_fx(coordinator), "/status", _tk(token))
 
     @app.tool(description="List currently-active coordinator advisories (NAS "
                           "throughput collapse, sub-job failure spike, etc.).")
@@ -199,7 +179,9 @@ def build_server(default_coordinator: Optional[str] = None,
         return _get(_fx(coordinator), "/advisories", _tk(token))
 
     @app.tool(description="List registered runners and their heartbeats "
-                          "(authoritative for 'is my runner alive').")
+                          "(authoritative for 'is my runner alive'). Prefer "
+                          "'status' for the full picture — runners also appear "
+                          "in status.fleet.runners with resources + code_fingerprint.")
     def list_runners(coordinator: Optional[str] = None,
                      token: Optional[str] = None) -> dict:
         return _get(_fx(coordinator), "/runners", _tk(token))
@@ -282,13 +264,10 @@ def build_server(default_coordinator: Optional[str] = None,
         return _post(_fx(coordinator), "/seed", _tk(token),
                      {"gigs": gigs, "job": job, "label": label})
 
-    @app.tool(description="Search jobs by regex on subjob_id (default) or error, "
-                          "filtered by state/job. Returns matching job rows "
-                          "(subjob_id, state, attempts, error, metrics, etc.).")
-    def search_jobs(regex: str = "", field: str = "subjob_id",
-                    state: str = "", job: str = "", limit: int = 200,
-                    coordinator: Optional[str] = None,
-                    token: Optional[str] = None) -> dict:
+    def _search_subjobs_impl(regex: str = "", field: str = "subjob_id",
+                             state: str = "", job: str = "", limit: int = 200,
+                             coordinator: Optional[str] = None,
+                             token: Optional[str] = None) -> dict:
         params = {"limit": min(max(limit, 1), 2000)}
         if state:
             params["state"] = state
@@ -300,6 +279,25 @@ def build_server(default_coordinator: Optional[str] = None,
             else:
                 params["subjob_id_re"] = regex
         return _get(_fx(coordinator), "/subjobs", _tk(token), **params)
+
+    @app.tool(description="Search SUB-JOBS (not jobs) by regex on subjob_id "
+                          "(default) or error, filtered by state/job slug. "
+                          "For a job-level overview use 'status' instead.")
+    def search_subjobs(regex: str = "", field: str = "subjob_id",
+                       state: str = "", job: str = "", limit: int = 200,
+                       coordinator: Optional[str] = None,
+                       token: Optional[str] = None) -> dict:
+        return _search_subjobs_impl(regex, field, state, job, limit,
+                                    coordinator, token)
+
+    @app.tool(description="Deprecated alias for search_subjobs — searches individual "
+                          "sub-jobs, NOT job slugs. Prefer search_subjobs or status.")
+    def search_jobs(regex: str = "", field: str = "subjob_id",
+                    state: str = "", job: str = "", limit: int = 200,
+                    coordinator: Optional[str] = None,
+                    token: Optional[str] = None) -> dict:
+        return _search_subjobs_impl(regex, field, state, job, limit,
+                                    coordinator, token)
 
     @app.tool(description="Return a lightweight rows list for one job — "
                           "the fastest way to know which items a stage has "
@@ -431,18 +429,22 @@ def build_server(default_coordinator: Optional[str] = None,
         return _get(_fx(coordinator), "/decisions/summary", _tk(token),
                     window_s=window_s)
 
-    @app.tool(description="Paragraph-form health diagnosis of ONE job: "
-                          "progress %, active advisories on its spindles, and "
-                          "recent errors — shaped to paste straight into context. "
-                          "The fastest 'how did my run go?' call.")
-    def campaign_health(subjob_id: str, limit_errors: int = 5,
+    @app.tool(description="Paragraph-form health diagnosis of ONE job slug: "
+                          "progress %, resources, active advisories, recent errors — "
+                          "shaped to paste straight into context. Prefer 'status' "
+                          "for the full fleet; use this for a single-job paragraph.")
+    def campaign_health(job: str, limit_errors: int = 5,
                         coordinator: Optional[str] = None,
                         token: Optional[str] = None) -> dict:
         fx, tk = _fx(coordinator), _tk(token)
-        groups = _get(fx, "/groups", tk, limit=500)
+        st = _get(fx, "/status", tk)
         advisories = _get(fx, "/advisories", tk, active_only="true", limit=100)
-        status = _get(fx, "/status", tk)
-        return _campaign_health(subjob_id, limit_errors, groups, advisories, status)
+        job_row = None
+        for j in st.get("jobs") or []:
+            if j.get("job") == job or j.get("label") == job:
+                job_row = j
+                break
+        return _campaign_health(job, limit_errors, job_row, advisories, st)
 
     @app.tool(description="Return failed/stuck gigs to pending (HTTP /requeue). "
                           "States default to ['failed']; set reset_attempts=True "
@@ -482,50 +484,67 @@ def build_server(default_coordinator: Optional[str] = None,
     return app
 
 
-def _campaign_health(subjob_id: str, limit_errors: int,
-                     groups: Any, advisories: Any, status: Any) -> dict:
-    """Compose a paste-ready job diagnosis from /groups + /advisories +
-    /status. Extracted for direct unit testing (no FastMCP dispatch needed)."""
-    job = None
-    for g in (groups.get("groups") if isinstance(groups, dict) else []) or []:
-        if g.get("job") == subjob_id or g.get("label") == subjob_id:
-            job = g
-            break
+def _campaign_health(job_slug: str, limit_errors: int,
+                     job: Optional[dict], advisories: Any, status: Any) -> dict:
+    """Compose a paste-ready job diagnosis from enriched /status + advisories."""
     relevant: list[dict] = []
     if isinstance(advisories, dict):
         for a in advisories.get("advisories", []) or []:
-            # Surface fleet-wide advisories and (absent per-job disk metadata)
-            # any active advisory — a job author wants to see them.
             relevant.append(a)
     errors = []
-    if isinstance(status, dict):
+    if job:
+        errors = list(job.get("error_digest") or [])[: max(0, int(limit_errors))]
+    if not errors and isinstance(status, dict):
         errors = (status.get("recent_errors") or [])[: max(0, int(limit_errors))]
     return {
-        "summary": _format_summary(subjob_id, job, relevant, errors, status),
+        "summary": _format_summary(job_slug, job, relevant, errors, status),
         "job": job,
         "advisories": relevant,
         "errors": errors,
     }
 
 
-def _format_summary(subjob_id: str, job: Optional[dict],
-                    advisories: list[dict], errors: list[dict],
+def _format_summary(job_slug: str, job: Optional[dict],
+                    advisories: list[dict], errors: list,
                     status: Any) -> str:
     """One deterministic paragraph an agent can paste directly (no LLM)."""
     parts: list[str] = []
     if job:
-        done = int(job.get("done", 0))
-        failed = int(job.get("failed", 0))
-        pending = int(job.get("pending", 0))
-        leased = int(job.get("leased", 0))
-        total = done + failed + pending + leased
-        pct = (100.0 * done / total) if total else 0.0
-        parts.append(f"Job {subjob_id!r}: {done}/{total} done ({pct:.0f}%), "
-                     f"{failed} failed, {pending} pending, {leased} in-flight.")
+        parts.append(
+            f"Job {job_slug!r} ({job.get('label') or job_slug}): "
+            f"{job.get('subjobs_done', job.get('done', 0))}/"
+            f"{job.get('subjobs_total', job.get('total', 0))} sub-jobs done "
+            f"({job.get('pct_done', 0):.0f}%), "
+            f"{job.get('subjobs_failed', job.get('failed', 0))} failed, "
+            f"{job.get('subjobs_pending', job.get('pending', 0))} pending, "
+            f"{job.get('subjobs_leased', job.get('leased', 0))} in-flight."
+        )
+        if job.get("health_detail"):
+            parts.append(str(job["health_detail"]) + ".")
+        if job.get("rate_per_s") is not None:
+            parts.append(f"Job rate ~{job.get('rate_per_s')}/s.")
+        res = job.get("resources") or {}
+        if res:
+            parts.append(
+                f"Resources: {res.get('workers', 0)} workers, "
+                f"CPU {res.get('cpu_pct', 0):.0f}%, "
+                f"RAM {res.get('process_tree_rss_gb', res.get('mem_used_gb', 0)):.1f}GB, "
+                f"GPU {res.get('gpu_util_pct', 0):.0f}%, "
+                f"VRAM {res.get('vram_used_gb', 0):.1f}/"
+                f"{res.get('vram_total_gb', 0):.1f}GB."
+            )
+        cmds = job.get("launch_commands") or []
+        if cmds:
+            parts.append(f"Command: {cmds[0][:160]}.")
+        if job.get("action_hint"):
+            parts.append(f"Hint: {job['action_hint']}.")
     else:
-        parts.append(f"No job matched {subjob_id!r} in the coordinator's groups.")
-    if isinstance(status, dict) and status.get("rate_per_s") is not None:
-        parts.append(f"Fleet throughput ~{status.get('rate_per_s')}/s.")
+        parts.append(f"No job matched {job_slug!r} in status.jobs.")
+    if isinstance(status, dict):
+        mesh = ((status.get("fleet") or {}).get("mesh") or {})
+        missing = mesh.get("missing_hosts") or []
+        if missing:
+            parts.append(f"Missing mesh hosts: {', '.join(missing)}.")
     if advisories:
         by_sev: dict[str, int] = {}
         for a in advisories:
@@ -537,8 +556,13 @@ def _format_summary(subjob_id: str, job: Optional[dict],
     else:
         parts.append("No active advisories.")
     if errors:
-        parts.append(f"Recent errors (up to {len(errors)}): " + "; ".join(
-            f"{e.get('subjob_id', '?')}: {(e.get('error') or '')[:120]}" for e in errors))
+        if errors and isinstance(errors[0], dict) and "count" in errors[0]:
+            parts.append("Top errors: " + "; ".join(
+                f"{e.get('error', '?')[:80]} ×{e.get('count', 1)}" for e in errors))
+        else:
+            parts.append(f"Recent errors (up to {len(errors)}): " + "; ".join(
+                f"{e.get('subjob_id', '?')}: {(e.get('error') or '')[:120]}"
+                for e in errors))
     return " ".join(parts)
 
 

@@ -648,6 +648,48 @@ class JobStore:
             "ts": now,
         }
 
+    def job_done_in_window(self, job: str, window_s: float = 60.0) -> int:
+        """Sub-jobs completed for one job slug in the last ``window_s`` seconds."""
+        now = time.time()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM subjobs "
+                "WHERE job=? AND state='done' AND completed_at >= ?",
+                (job, now - window_s),
+            ).fetchone()
+        return int(row["n"] or 0)
+
+    def job_disk_inflight(self, job: str) -> dict[str, int]:
+        with self._lock:
+            return {
+                (row["disk"] or "(uncapped)"): int(row["n"])
+                for row in self._conn.execute(
+                    "SELECT disk, COUNT(*) AS n FROM subjobs "
+                    "WHERE job=? AND state='leased' AND disk IS NOT NULL GROUP BY disk",
+                    (job,),
+                )
+            }
+
+    def error_digest(self, job: str, limit: int = 5) -> list[dict[str, Any]]:
+        """Top failure messages for a job slug, grouped by error text."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT error, COUNT(*) AS n FROM subjobs "
+                "WHERE job=? AND state='failed' AND error IS NOT NULL AND error != '' "
+                "GROUP BY error ORDER BY n DESC LIMIT ?",
+                (job, int(limit)),
+            ).fetchall()
+        return [{"error": r["error"], "count": int(r["n"])} for r in rows]
+
+    def leased_subjob_ids(self, job: str, limit: int = 10) -> list[str]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT subjob_id FROM subjobs WHERE job=? AND state='leased' "
+                "ORDER BY leased_at ASC LIMIT ?",
+                (job, int(limit)),
+            ).fetchall()
+        return [r["subjob_id"] for r in rows]
+
     # ------------------------------------------------------------- listing
     def disk_done_counts(self) -> dict[str, int]:
         """``{disk_id: done_count}`` — for the throughput sampler to derive per-disk

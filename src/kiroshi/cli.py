@@ -252,9 +252,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     ps.add_argument("--token", default=None, help="Mesh auth token.")
 
     # ---- status ----
-    pt = sub.add_parser("status", help="Print a /status snapshot.")
+    pt = sub.add_parser("status", help="Print enriched /status (fleet + per-job).")
     pt.add_argument("--coordinator", "--fixer", dest="coordinator", default=cfg.coordinator_url, help="Coordinator base URL, or 'auto'.")
     pt.add_argument("--token", default=None, help="Mesh auth token.")
+    pt.add_argument("--brief", action="store_true",
+                    help="Print summary line + job table instead of full JSON.")
 
     # ---- pipeline (declarative multi-stage DAG with typed edges) ----
     ppipe = sub.add_parser(
@@ -394,6 +396,16 @@ def main(argv: Optional[list[str]] = None) -> int:
     pstop.add_argument("--role", choices=["coordinator", "runner"], help="Limit to a role.")
     pstop.add_argument("--pid", type=int, default=None, help="Limit to one PID.")
     pstop.add_argument("--all", action="store_true", help="Stop all registered processes.")
+    pstop.add_argument("--grace", type=float, default=30.0,
+                       help="Seconds to wait for a graceful drain before force-killing "
+                            "the process tree (default 30). A stuck worker (e.g. wedged "
+                            "in a blocking I/O syscall) can never observe the cooperative "
+                            "stop flag, so escalation is what actually frees the machine. "
+                            "Use 0 to request a drain and return WITHOUT escalating.")
+    pstop.add_argument("--force", action="store_true",
+                       help="Skip the graceful drain; hard-kill the process tree now.")
+    pstop.add_argument("--no-escalate", action="store_true",
+                       help="Only request a graceful drain; never force-kill (legacy).")
 
     # ---- tray ----
     ptray = sub.add_parser("tray", help="Run the system-tray UI (needs the 'tray' extra).")
@@ -732,6 +744,7 @@ def _cmd_coordinator(args) -> int:
     store = JobStore(args.db, max_retries=args.max_retries)
     from .storage import load_topology
 
+    mesh_hosts = [h for h in load_config().hosts.keys() if not h.startswith("_")]
     app = create_app(
         store,
         lease_ttl=args.lease_ttl,
@@ -740,6 +753,7 @@ def _cmd_coordinator(args) -> int:
         token=token,
         disks=load_topology(),
         fair_share=args.fair_share,
+        configured_hosts=mesh_hosts,
     )
     beacon = None
     if not args.no_beacon:
@@ -1071,7 +1085,33 @@ def _cmd_status(args) -> int:
     r = requests.get(f"{args.coordinator.rstrip('/')}/status", timeout=30,
                      headers=_auth_headers(args))
     r.raise_for_status()
-    print(json.dumps(r.json(), indent=2))
+    data = r.json()
+    if getattr(args, "brief", False):
+        print(data.get("summary", ""))
+        mesh = (data.get("fleet") or {}).get("mesh") or {}
+        missing = mesh.get("missing_hosts") or []
+        if missing:
+            print(f"  missing mesh hosts: {', '.join(missing)}")
+        for j in data.get("jobs") or []:
+            eta = j.get("eta_s")
+            eta_s = f"{eta:.0f}s" if isinstance(eta, (int, float)) else "—"
+            health = j.get("health_detail") or j.get("health") or ""
+            cmd = (j.get("launch_commands") or [""])[0]
+            if len(cmd) > 72:
+                cmd = cmd[:69] + "..."
+            print(
+                f"  {j.get('job')}: {j.get('pct_done')}% "
+                f"({j.get('subjobs_done')}/{j.get('subjobs_total')}) "
+                f"rate={j.get('rate_per_s')}/s eta={eta_s} "
+                f"[{health}]"
+            )
+            if cmd:
+                print(f"    cmd: {cmd}")
+            hint = j.get("action_hint")
+            if hint:
+                print(f"    hint: {hint}")
+        return 0
+    print(json.dumps(data, indent=2))
     return 0
 
 
@@ -1476,7 +1516,18 @@ def _cmd_nas_cred(args) -> int:
 
 
 def _cmd_stop(args) -> int:
-    from .processreg import list_registered, request_stop
+    """Stop registered Kiroshi processes with graceful-then-forceful escalation.
+
+    A cooperative drain (drop a ``.stop`` file) is the right default — it lets a
+    Runner finish/report in-flight work instead of dying mid-batch. But a drain
+    is *powerless* against a process wedged in a blocking syscall (e.g. a hung
+    SMB write on the OS redirector): the stop flag is never observed, so the
+    Runner never exits and its pool keeps the machine pinned. So, like
+    ``docker stop`` / systemd ``TimeoutStopSec`` / k8s ``terminationGracePeriod``,
+    we wait a bounded grace period and then **hard-kill the process tree**."""
+    import time as _time
+    from .processreg import list_registered, request_stop, _pid_alive
+    from .proctree import terminate_tree
 
     procs = list_registered()
     targets = []
@@ -1485,6 +1536,7 @@ def _cmd_stop(args) -> int:
             continue
         if args.pid is not None and p.get("pid") != args.pid:
             continue
+        # Escalation can only hard-kill PIDs on THIS machine.
         targets.append(p)
     if not targets:
         print("no matching registered processes.")
@@ -1494,12 +1546,65 @@ def _cmd_stop(args) -> int:
         for p in targets:
             print(f"  {p.get('role')} pid={p.get('pid')} {p.get('launch_command','')}")
         return 1
-    n = 0
+
+    def _local(p) -> bool:
+        # Only PIDs on this host are killable; a remote manifest's PID isn't ours.
+        import socket as _s
+        hn = str(p.get("hostname") or "")
+        return (not hn) or hn == _s.gethostname()
+
+    # --force: skip the drain entirely and hard-kill now.
+    if getattr(args, "force", False):
+        n = 0
+        for p in targets:
+            pid = int(p.get("pid", 0))
+            if _local(p) and terminate_tree(pid):
+                print(f"force-killed: {p.get('role')} pid={pid} (process tree)")
+                n += 1
+            else:
+                print(f"could not force-kill {p.get('role')} pid={pid} "
+                      f"({'remote' if not _local(p) else 'kill failed'})")
+        return 0 if n else 1
+
+    # Otherwise request a cooperative drain first.
+    requested = []
     for p in targets:
         if request_stop(p.get("role", ""), int(p.get("pid", 0))):
-            print(f"stop requested: {p.get('role')} pid={p.get('pid')}")
-            n += 1
-    return 0 if n else 1
+            print(f"stop requested (draining): {p.get('role')} pid={p.get('pid')}")
+            requested.append(p)
+    if not requested:
+        return 1
+
+    grace = float(getattr(args, "grace", 30.0) or 0.0)
+    if getattr(args, "no_escalate", False) or grace <= 0:
+        if grace <= 0 and not getattr(args, "no_escalate", False):
+            print("(--grace 0: requested drain, not waiting/escalating)")
+        return 0
+
+    # Wait up to `grace` seconds for the drain to complete; poll liveness.
+    print(f"waiting up to {grace:.0f}s for graceful drain before force-kill...")
+    deadline = _time.time() + grace
+    pending = list(requested)
+    while pending and _time.time() < deadline:
+        _time.sleep(1.0)
+        still = []
+        for p in pending:
+            if _local(p) and _pid_alive(int(p.get("pid", 0))):
+                still.append(p)
+            else:
+                print(f"drained cleanly: {p.get('role')} pid={p.get('pid')}")
+        pending = still
+
+    # Anything still alive past the grace window gets the tree killed.
+    survivors = [p for p in pending if _local(p) and _pid_alive(int(p.get("pid", 0)))]
+    if not survivors:
+        print("all targets drained gracefully.")
+        return 0
+    for p in survivors:
+        pid = int(p.get("pid", 0))
+        print(f"grace expired; force-killing {p.get('role')} pid={pid} (process tree)")
+        terminate_tree(pid)
+    return 0
 
 
 def _cmd_service(args) -> int:

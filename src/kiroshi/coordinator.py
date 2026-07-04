@@ -98,6 +98,9 @@ class RegisterReq(BaseModel):
     workers: int = 0
     pid: Optional[int] = None
     log_path: Optional[str] = None
+    job: Optional[str] = None
+    code_fingerprint: Optional[dict[str, Any]] = None
+    resources: Optional[dict[str, Any]] = None
 
 
 def create_app(
@@ -123,6 +126,7 @@ def create_app(
     fair_share: bool = False,
     decision_ring: int = 5000,
     jobevent_ring: int = 50000,
+    configured_hosts: Optional[list[str]] = None,
 ) -> FastAPI:
     app = FastAPI(title="Kiroshi Coordinator", version="0.0.1")
     app.state.store = store
@@ -159,6 +163,7 @@ def create_app(
     # starve slower hosts. Inert (behaves exactly as before) unless enabled AND a
     # per-disk budget exists to divide.
     app.state.fair_share = fair_share
+    app.state.configured_hosts = list(configured_hosts or [])
 
     # --- Coordination decision ledger (observability) ---
     # Bounded ring buffers recording *why* every /lease call returned the count
@@ -485,19 +490,40 @@ def create_app(
                     lst.append(dict(req.origin))
         return {"inserted": inserted, "received": len(req.gigs)}
 
-    def _touch_runner(runner_id: str, host: str) -> None:
+    def _touch_runner(runner_id: str, host: str,
+                      stats: Optional[dict[str, Any]] = None) -> None:
         r = app.state.runners.get(runner_id)
         now = time.time()
         if r is None:
             app.state.runners[runner_id] = {
                 "runner_id": runner_id, "host": host, "launch_command": "",
                 "task": "", "workers": 0, "pid": None, "log_path": None,
+                "job": None, "code_fingerprint": None, "resources": {},
                 "started_at": now, "last_seen": now,
             }
+            r = app.state.runners[runner_id]
         else:
             r["last_seen"] = now
             if host and host != "?":
                 r["host"] = host
+        if stats:
+            if stats.get("resources"):
+                r["resources"] = dict(stats["resources"])
+            if stats.get("job") is not None:
+                r["job"] = stats.get("job")
+
+    def _groups_with_launch(limit: int = 200) -> list[dict[str, Any]]:
+        rows = store.group_stats(limit=min(max(limit, 1), 2000))
+        idx = app.state.runners
+        for g in rows:
+            cmds = []
+            for rid in g.get("runner_ids", []):
+                r = idx.get(rid)
+                if r and r.get("launch_command") and r["launch_command"] not in cmds:
+                    cmds.append(r["launch_command"])
+            g["launch_commands"] = cmds
+            g["has_custom_page"] = _has_custom_job_page()
+        return rows
 
     def _job_event(subjob_id: str, event: str, **fields) -> None:
         """Record a per-job coordination transition in the bounded ring buffer +
@@ -526,10 +552,12 @@ def create_app(
             "runner_id": req.runner_id, "host": req.host,
             "launch_command": req.launch_command, "task": req.task,
             "workers": req.workers, "pid": req.pid, "log_path": req.log_path,
+            "job": req.job, "code_fingerprint": req.code_fingerprint,
+            "resources": dict(req.resources or {}),
             "started_at": now, "last_seen": now,
         }
         print(f"[coordinator] runner registered: {req.runner_id} on {req.host} "
-              f"({req.workers}w) task={req.task}", flush=True)
+              f"({req.workers}w) task={req.task} job={req.job or '*'}", flush=True)
         return {"ok": True}
 
     @app.get("/runners")
@@ -553,17 +581,7 @@ def create_app(
     # would require lockstep client updates for no functional gain.
     @app.get("/groups")
     def groups(limit: int = 200) -> dict[str, Any]:
-        rows = store.group_stats(limit=min(max(limit, 1), 2000))
-        idx = app.state.runners
-        for g in rows:
-            cmds = []
-            for rid in g.get("runner_ids", []):
-                r = idx.get(rid)
-                if r and r.get("launch_command") and r["launch_command"] not in cmds:
-                    cmds.append(r["launch_command"])
-            g["launch_commands"] = cmds
-            g["has_custom_page"] = _has_custom_job_page()
-        return {"groups": rows, "ts": time.time()}
+        return {"groups": _groups_with_launch(limit), "ts": time.time()}
 
     @app.get("/subjobs")
     def jobs(state: Optional[str] = None, limit: int = 200,
@@ -775,7 +793,7 @@ def create_app(
     @app.post("/heartbeat")
     def heartbeat(req: HeartbeatReq) -> dict[str, Any]:
         if req.runner_id and req.runner_id != "?":
-            _touch_runner(req.runner_id, "?")
+            _touch_runner(req.runner_id, "?", stats=req.stats or None)
         ttl = _effective_ttl(req.heartbeat_interval)
         extended = store.heartbeat(req.lease_id, ttl)
         return {"extended": extended, "ttl": ttl}
@@ -818,6 +836,8 @@ def create_app(
 
     @app.get("/status")
     def status() -> JSONResponse:
+        from .statusview import enrich_status
+
         st = store.stats()
         # Per-disk observability (N6): attach the budget + disk metadata so the
         # dashboard can render in-flight vs budget per spindle. Inert without a
@@ -837,7 +857,16 @@ def create_app(
             }
         # Scheduling observability block: per-host grant ratio in the last ~120s.
         st["scheduling"] = _scheduling_summary(window_s=120.0)
-        return JSONResponse(st)
+        groups = _groups_with_launch()
+        enriched = enrich_status(
+            st,
+            store=store,
+            runners=app.state.runners,
+            groups=groups,
+            configured_hosts=app.state.configured_hosts,
+            window_s=float(st.get("window_s") or 60.0),
+        )
+        return JSONResponse(enriched)
 
     # ================================================================
     # Coordination decision ledger (observability endpoints)

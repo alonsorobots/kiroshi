@@ -181,6 +181,52 @@ def _bind_windows_job_object() -> bool:
 _JOB_HANDLE: list = [None]
 
 
+# ---------------------------------------------------------- external hard kill
+def terminate_tree(pid: int) -> bool:
+    """Force-kill a process **and its children** from *outside* that process.
+
+    Used by ``kiroshi stop`` to escalate when a graceful drain doesn't complete
+    in time (e.g. a worker wedged in a blocking syscall — a hung SMB write on
+    the redirector — where the cooperative stop flag can never be observed).
+
+    * **Windows:** ``taskkill /F /T`` kills the tree. A Runner also binds a Job
+      Object with KILL_ON_JOB_CLOSE (see above), so killing the Runner root
+      independently triggers the kernel to reap every pool worker — this is
+      belt-and-suspenders on top of that.
+    * **POSIX:** SIGKILL the process group (the Runner ``setsid``'d itself into
+      its own group, so the leader's pgid == its pid), falling back to the bare
+      pid if the group send fails.
+
+    Returns True if the kill command was issued without error.
+    """
+    if pid <= 0:
+        return False
+    if sys.platform == "win32":
+        import subprocess
+        try:
+            r = subprocess.run(["taskkill", "/F", "/T", "/PID", str(int(pid))],
+                               capture_output=True, check=False)
+            # rc 0 = killed; 128 = "no such process" (already gone → treat as ok)
+            return r.returncode in (0, 128)
+        except Exception:  # noqa: BLE001
+            return False
+    import signal
+    ok = False
+    try:
+        os.killpg(os.getpgid(int(pid)), signal.SIGKILL)
+        ok = True
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+    try:
+        os.kill(int(pid), signal.SIGKILL)
+        ok = True
+    except ProcessLookupError:
+        ok = True  # already gone
+    except OSError:
+        pass
+    return ok
+
+
 # ------------------------------------------------------------------ POSIX
 
 def _bind_posix_setsid() -> bool:

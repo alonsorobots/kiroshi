@@ -283,6 +283,8 @@ class Runner:
     def _register(self) -> None:
         """Announce our launch command + identity so the Coordinator can surface it on
         the dashboard/history (and so jobs can be traced to the exact command)."""
+        from .codefinger import fingerprint_repos
+        from .hostsample import sample_host
         from .logsetup import current_log_path
 
         ok = self._post("/register", {
@@ -293,6 +295,9 @@ class Runner:
             "workers": self.workers,
             "pid": os.getpid(),
             "log_path": current_log_path(),
+            "job": self.job,
+            "code_fingerprint": fingerprint_repos(self.extra_syspath),
+            "resources": sample_host(root_pid=os.getpid()),
         })
         self._registered = bool(ok)
 
@@ -363,9 +368,16 @@ class Runner:
 
                 def _hb() -> None:
                     if lease_id:
-                        self._post("/heartbeat", {"lease_id": lease_id,
-                                                  "runner_id": self.runner_id,
-                                                  "heartbeat_interval": self.heartbeat_interval})
+                        from .hostsample import sample_host
+                        self._post("/heartbeat", {
+                            "lease_id": lease_id,
+                            "runner_id": self.runner_id,
+                            "heartbeat_interval": self.heartbeat_interval,
+                            "stats": {
+                                "job": self.job,
+                                "resources": sample_host(root_pid=os.getpid()),
+                            },
+                        })
 
                 results = pool.run_batch(
                     gigs,

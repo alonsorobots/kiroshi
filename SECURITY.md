@@ -37,6 +37,7 @@ Everything that listens or executes is gated and hardened:
 | Token at rest | **Redacted** from teed logs and from launch commands shown in the UI; only ever stored in the token file. |
 | Custom per-job pages (`/p/`) | **Token-gated** (not world-readable). |
 | Task reading/writing outside its data roots | The shipped example task **confines paths to `KIROSHI_READ_ROOT`/`WRITE_ROOT`** (rejects absolute + `..` escape). |
+| NAS credential broker (`/mesh/nas-cred`) hands a shared-storage secret to Runners | Stored **encrypted at rest** (machine-DPAPI + per-install entropy + ACL) on the Coordinator only; served **only** after the caller proves it holds the mesh token, and delivered **sealed** (HKDF-derived key, encrypt-then-MAC) so it never crosses the wire in clear even without TLS. See §4.5. |
 
 Not present (verified): no `pickle`/`eval`/`yaml.unsafe_load` on network data
 (JSON only), no SQL injection (fully parameterized), no path traversal in static
@@ -61,6 +62,7 @@ design. See §6–§7.
 | **Job queue / outputs** | Stealing/poisoning gigs wastes compute or corrupts shared-NAS outputs. |
 | **Topology / operational info** | Hostnames, file paths, error strings, task names — useful for lateral movement. |
 | **Mesh token** | The single secret gating the whole mesh. |
+| **NAS credential** | The SMB service-account password Runners use to reach shared storage. Distinct from the mesh token; brokered by the Coordinator (§4.5) so it never lives on Runner disks or in launch flags. |
 
 ## 2. Trust boundary
 
@@ -107,6 +109,55 @@ what the overlay/TLS recommendation in §6 is for.
   (or `--token`) on each Runner. The only manual step; treat it like an SSH key.
 - **Rotation:** delete `<state_dir>/mesh.token` (or set a new `KIROSHI_TOKEN`) and
   restart the Coordinator; redistribute. Old tokens get `401` and back off.
+
+## 4.5 NAS credential broker (shared-storage secret distribution)
+
+Tasks that read/write a shared NAS need an SMB credential on **every** Runner.
+The naive options are all bad: baking the password into launch flags leaks it
+into logs/UI and the process table; dropping it in an env file or on disk on
+each node multiplies the blast radius and rots on rotation; relying on the
+Windows credential store / redirector fails in the exact contexts a headless
+mesh runs in (service, scheduled task, SSH network logon — where the
+interactive user's DPAPI profile and saved credentials aren't loaded).
+
+So Kiroshi treats the NAS password like any other mesh secret: **one copy, held
+by the Coordinator, delivered on demand over the already-authenticated channel.**
+
+**At rest (Coordinator only).** `kiroshi nas-cred set` encrypts the password
+with **machine-scoped DPAPI** (`CryptProtectData` + `CRYPTPROTECT_LOCAL_MACHINE`)
+plus a per-install entropy blob, and writes it under the state dir with an ACL
+restricted to `Administrators` + the Coordinator's own account. Machine scope
+(not user scope) is deliberate: it decrypts in *any* logon context on that host,
+so a service/scheduled-task Coordinator can read its own secret — while remaining
+undecryptable if the ciphertext file is copied to another machine. The plaintext
+is never logged and never leaves the Coordinator's memory except sealed (below).
+
+**In transit (Coordinator → Runner).** A Runner fetches the secret from
+`GET /mesh/nas-cred?server=…&nonce=…`. This rides the **same mutual auth** as
+everything else (§3): the Runner has already HMAC-verified the Coordinator, and
+must present a proof — `HMAC(token, nonce‖server)` — so a caller without the
+mesh token can't pull the credential even if it can reach the port. The response
+body is **sealed**: a fresh key is derived via `HKDF(token, nonce)` and the
+payload is encrypt-then-MAC'd, so the password is confidential and
+tamper-evident **on the wire even without TLS**. (This is defense-in-depth, not
+a substitute for the overlay/TLS recommendation in §6 — it removes cleartext
+exposure of *this specific high-value secret*, but the mesh token itself and
+other traffic are still only as private as the transport.)
+
+**On the Runner.** The unsealed credential is injected into the Runner's process
+environment (`KIROSHI_NAS_USER`/`KIROSHI_NAS_PASS`) so child pool workers inherit
+it, and the data plane is forced to **SMB3 encryption** (`KIROSHI_SMB_ENCRYPT=1`).
+It is **never written to Runner disk** and never appears in a launch command.
+
+**Rotation.** Change the SMB account password on the NAS and re-run
+`kiroshi nas-cred set` on the Coordinator; Runners pick up the new secret at
+their next join. No Runner-side cleanup is required because nothing was persisted
+there.
+
+**Residual risk.** A token-holding node can pull the NAS credential — that is by
+design (it needs it to do work) and is the same trust already placed in any
+mesh member. The broker's value is eliminating the *extra* copies and the
+plaintext-on-the-wire / plaintext-in-flags exposure, and centralizing rotation.
 
 ## 5. Binding & network exposure
 
@@ -202,6 +253,8 @@ URL), or the task is pre-installed (the current model). Until all of (1)–(3) l
       **on a private overlay**, never a forwarded public port.
 - [ ] Leave discovery solicited-only (default); `--no-beacon` if you pin URLs.
 - [ ] Confine your task to its data roots; run Runners least-privilege.
+- [ ] Distribute NAS/shared-storage creds via `kiroshi nas-cred set` (broker,
+      §4.5), not launch flags or per-node disk files; rotate at the Coordinator.
 - [ ] Keep secrets out of `--task`/launch flags (surfaced in the UI; redacted but
       still avoid).
 
