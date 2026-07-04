@@ -1,7 +1,7 @@
 """Tests for kiroshi.staging — the mesh-task ABI + budgeted copy.
 
 Covers the pure enumeration logic and the run() task with a fake
-ResourceClient (no network, no real Fixer).
+ResourceClient (no network, no real Coordinator).
 """
 from __future__ import annotations
 
@@ -108,7 +108,7 @@ def test_run_creates_parent_dirs():
         assert (dst / "a" / "b.txt").read_text() == "deep"
 
 
-def test_run_fail_open_without_fixer():
+def test_run_fail_open_without_coordinator():
     """When KIROSHI_FIXER is unset, run() must still copy (fail-open)."""
     with tempfile.TemporaryDirectory() as d:
         src = Path(d) / "s"; dst = Path(d) / "d"
@@ -149,7 +149,7 @@ class _FakeResourceClient:
 
 def test_run_actually_acquires_and_releases_slots():
     """The bug this catches: acquire() returns a context manager whose __enter__
-    does the POST /resource/acquire. If run() never enters the CM, the Fixer
+    does the POST /resource/acquire. If run() never enters the CM, the Coordinator
     never sees the slot and mesh budgeting is silently disabled."""
     with tempfile.TemporaryDirectory() as d:
         src = Path(d) / "s"; dst = Path(d) / "d"

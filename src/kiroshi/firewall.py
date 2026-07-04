@@ -2,7 +2,7 @@
 
 Kiroshi's Coordinator binds *exactly two* ports for the mesh to work:
 
-- TCP ``<fixer_port>`` (default 8787) — HTTP API + dashboard.
+- TCP ``<coordinator_port>`` (default 8787) — HTTP API + dashboard.
 - UDP ``<discovery_port>`` (default 8788) — solicited-reply beacon so runners
   can find the Coordinator via ``--fixer auto``.
 
@@ -154,13 +154,13 @@ def pick_lan_subnet(ips: Optional[list[str]] = None) -> Optional[str]:
 
 # ---------------------------------------------------------------- planning
 def plan_rules(
-    fixer_ports: "int | Iterable[int]",
+    coordinator_ports: "int | Iterable[int]",
     discovery_port: int = 8788,
     remote_ip: str = "any",
 ) -> list[FirewallRule]:
     """The desired set of Kiroshi-managed rules. Pure function; drives tests.
 
-    ``fixer_ports`` may be a single port (int) or many (iterable). Passing the
+    ``coordinator_ports`` may be a single port (int) or many (iterable). Passing the
     full set of ports the mesh uses — e.g. the persistent service plus every
     job Coordinator (8787, 8800, 8801, 8802) — opens them all in one idempotent
     shot, so you never silently close one job's port by opening another's.
@@ -170,11 +170,11 @@ def plan_rules(
     (``Kiroshi Coordinator HTTP 8800``) so each is tracked + drift-cleaned
     independently.
     """
-    if isinstance(fixer_ports, int):
-        ports = [int(fixer_ports)]
+    if isinstance(coordinator_ports, int):
+        ports = [int(coordinator_ports)]
     else:
         # dedup, preserve order
-        ports = list(dict.fromkeys(int(p) for p in fixer_ports))
+        ports = list(dict.fromkeys(int(p) for p in coordinator_ports))
     single = len(ports) == 1
     rules: list[FirewallRule] = []
     for p in ports:

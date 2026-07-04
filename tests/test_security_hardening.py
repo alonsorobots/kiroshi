@@ -1,9 +1,9 @@
-"""Security-hardening tests: mutual auth (Fixer proves it holds the token before
+"""Security-hardening tests: mutual auth (Coordinator proves it holds the token before
 a Runner trusts it), the /auth/challenge endpoint, secret redaction in logs and
 captured launch commands, and path confinement of the example task.
 
 These encode the specific attacks the hardening pass closed:
-  - rogue Fixer (e.g. winning `--fixer auto`) harvesting the token / injecting specs
+  - rogue Coordinator (e.g. winning `--fixer auto`) harvesting the token / injecting specs
   - the mesh token leaking to disk via teed logs or to the dashboard via launch cmd
   - a malicious spec making a Runner read/write outside its configured roots
 """
@@ -38,17 +38,17 @@ def test_prove_verify_roundtrip():
 def test_no_auth_opt_out_ignores_persisted_token(tmp_path, monkeypatch):
     # --no-auth is an explicit operator opt-out: it must return None (no auth)
     # even when a persisted mesh.token file exists (e.g. left by a service install).
-    # Previously ensure_fixer_token consulted the token file BEFORE the opt-out,
+    # Previously ensure_coordinator_token consulted the token file BEFORE the opt-out,
     # silently re-enabling auth with a stale token.
     monkeypatch.setenv("KIROSHI_STATE_DIR", str(tmp_path / "state"))
     (tmp_path / "state").mkdir()
     (tmp_path / "state" / "mesh.token").write_text("STALE-PERSISTED-TOKEN\n")
     monkeypatch.delenv("KIROSHI_TOKEN", raising=False)
-    assert security.ensure_fixer_token(None, allow_insecure=True) is None
+    assert security.ensure_coordinator_token(None, allow_insecure=True) is None
     # without the opt-out, the persisted token IS honored (auth on)
-    assert security.ensure_fixer_token(None, allow_insecure=False) == "STALE-PERSISTED-TOKEN"
+    assert security.ensure_coordinator_token(None, allow_insecure=False) == "STALE-PERSISTED-TOKEN"
     # an explicit --token always wins, even alongside --no-auth
-    assert security.ensure_fixer_token("explicit", allow_insecure=True) == "explicit"
+    assert security.ensure_coordinator_token("explicit", allow_insecure=True) == "explicit"
 
 
 def test_auth_challenge_endpoint():
@@ -95,7 +95,7 @@ def test_custom_pages_are_token_gated():
         assert c.get("/p/job.html").status_code in (401, 404)
 
 
-# ------------------------------------------------ Runner authenticates Fixer
+# ------------------------------------------------ Runner authenticates Coordinator
 class _FakeResp:
     def __init__(self, payload, status=200):
         self._p, self.status_code = payload, status
@@ -118,37 +118,37 @@ def _runner(token, monkeypatch, server_token, server_auth=True):
         return _FakeResp({"auth": True, "proof": security.prove(server_token, nonce)})
 
     monkeypatch.setattr(worker.requests, "get", fake_get)
-    r = worker.Runner(fixer_url="http://fixer.local:8787", task_ref="t:run",
+    r = worker.Runner(coordinator_url="http://coordinator.local:8787", task_ref="t:run",
                       token=token)
     return r
 
 
-def test_runner_trusts_matching_fixer(monkeypatch):
+def test_runner_trusts_matching_coordinator(monkeypatch):
     r = _runner("shared", monkeypatch, server_token="shared")
-    assert r._verify_fixer(r.fixer_url) is True
+    assert r._verify_coordinator(r.coordinator_url) is True
 
 
-def test_runner_refuses_rogue_fixer_wrong_token(monkeypatch):
-    # rogue Fixer holds a DIFFERENT token -> cannot produce a valid proof
+def test_runner_refuses_rogue_coordinator_wrong_token(monkeypatch):
+    # rogue Coordinator holds a DIFFERENT token -> cannot produce a valid proof
     r = _runner("shared", monkeypatch, server_token="attacker-token")
-    assert r._verify_fixer(r.fixer_url) is False
+    assert r._verify_coordinator(r.coordinator_url) is False
 
 
-def test_runner_refuses_fixer_claiming_no_auth(monkeypatch):
-    # We hold a token; a Fixer that reports no-auth is rogue/misconfigured -> refuse
+def test_runner_refuses_coordinator_claiming_no_auth(monkeypatch):
+    # We hold a token; a Coordinator that reports no-auth is rogue/misconfigured -> refuse
     r = _runner("shared", monkeypatch, server_token="shared", server_auth=False)
-    assert r._verify_fixer(r.fixer_url) is False
+    assert r._verify_coordinator(r.coordinator_url) is False
 
 
-def test_runner_unverifiable_fixer_fails_closed(monkeypatch):
+def test_runner_unverifiable_coordinator_fails_closed(monkeypatch):
     import kiroshi.worker as worker
 
     def boom(url, params=None, timeout=None):
         raise worker.requests.RequestException("connection refused")
 
     monkeypatch.setattr(worker.requests, "get", boom)
-    r = worker.Runner(fixer_url="http://x:8787", task_ref="t:run", token="shared")
-    assert r._verify_fixer(r.fixer_url) is False
+    r = worker.Runner(coordinator_url="http://x:8787", task_ref="t:run", token="shared")
+    assert r._verify_coordinator(r.coordinator_url) is False
 
 
 # ------------------------------------------------------- secret redaction

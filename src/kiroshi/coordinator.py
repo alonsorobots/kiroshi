@@ -168,7 +168,7 @@ def create_app(
     # Warn about likely-misconfigured disk topologies at boot so a bad match
     # rule surfaces immediately instead of as 129k runtime "READ_ROOT not set".
     for _w in validate_disks(app.state.disks):
-        print(f"[fixer][WARN] {_w}", flush=True)
+        print(f"[coordinator][WARN] {_w}", flush=True)
 
     # --- Mesh resource governor (standalone resource-acquire service) ---
     # Extends the per-disk read budget to non-sub-job workloads + adds a global
@@ -331,12 +331,12 @@ def create_app(
             try:
                 n = store.reap()
                 if n:
-                    print(f"[fixer] reaped {n} expired lease(s) -> pending", flush=True)
+                    print(f"[coordinator] reaped {n} expired lease(s) -> pending", flush=True)
                     # The reaped gigs are now 'pending' again; emit a summary
                     # event (per-sub-job identification isn't available post-reap).
                     _job_event("(reaper)", "REAPED", count=n)
             except Exception as e:  # pragma: no cover
-                print(f"[fixer] reaper error: {e}", flush=True)
+                print(f"[coordinator] reaper error: {e}", flush=True)
 
     def _sampler() -> None:
         # Sample throughput/counts into the ring buffer so the dashboard can draw
@@ -485,7 +485,7 @@ def create_app(
             "workers": req.workers, "pid": req.pid, "log_path": req.log_path,
             "started_at": now, "last_seen": now,
         }
-        print(f"[fixer] runner registered: {req.runner_id} on {req.host} "
+        print(f"[coordinator] runner registered: {req.runner_id} on {req.host} "
               f"({req.workers}w) task={req.task}", flush=True)
         return {"ok": True}
 
@@ -672,7 +672,7 @@ def create_app(
             if ts - last >= 10.0:
                 app.state._last_lease_log[host] = ts
                 free_map = {d: s["free"] for d, s in decision["disk"].items()}
-                print(f"[fixer][lease] host={host} req={requested} "
+                print(f"[coordinator][lease] host={host} req={requested} "
                       f"granted={granted} reason={decision['binding_reason']} "
                       f"free={free_map} pending={decision['pending_total']}",
                       flush=True)

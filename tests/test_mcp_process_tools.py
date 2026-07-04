@@ -1,8 +1,8 @@
 """Tests for the new MCP process-management tools (requeue, ps, stop).
 
-``requeue`` is tested against a live in-process Fixer (HTTP /requeue).
+``requeue`` is tested against a live in-process Coordinator (HTTP /requeue).
 ``ps``/``stop`` are tested with mocked ``processreg`` since they operate on
-the local process manifest, not the Fixer API.
+the local process manifest, not the Coordinator API.
 """
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ def _skip_or_import():
 
 
 def _build_client(max_retries=3):
-    """Spin up an in-process Fixer for HTTP-based tool tests."""
+    """Spin up an in-process Coordinator for HTTP-based tool tests."""
     from fastapi.testclient import TestClient
     from kiroshi.coordinator import create_app
     from kiroshi.jobstore import JobStore
@@ -37,7 +37,7 @@ def _build_client(max_retries=3):
     return TestClient(app)
 
 
-def test_requeue_tool_calls_fixer_endpoint():
+def test_requeue_tool_calls_coordinator_endpoint():
     """requeue tool should POST /requeue and return the count."""
     m = _skip_or_import()
     # max_retries=0 so a single error immediately marks the gig 'failed'
@@ -86,14 +86,14 @@ def test_stop_ambiguous_guard():
     Actually calls the extracted _stop_impl logic (not a hollow proxy)."""
     m = _skip_or_import()
     fake_procs = [
-        {"role": "fixer", "pid": 100, "launch_command": "kiroshi fixer --port 8800"},
-        {"role": "fixer", "pid": 200, "launch_command": "kiroshi fixer --port 8801"},
+        {"role": "coordinator", "pid": 100, "launch_command": "kiroshi coordinator --port 8800"},
+        {"role": "coordinator", "pid": 200, "launch_command": "kiroshi coordinator --port 8801"},
     ]
     mock_stop = MagicMock(return_value=True)
     with patch("kiroshi.processreg.list_registered", return_value=fake_procs):
         with patch("kiroshi.processreg.request_stop", mock_stop):
             from kiroshi.mcp_server import _stop_impl
-            result = _stop_impl(role="fixer")  # 2 matches, no pid, no all
+            result = _stop_impl(role="coordinator")  # 2 matches, no pid, no all
             assert result["stopped"] == 0
             assert result.get("ambiguous") is True
             assert len(result["matches"]) == 2
@@ -118,14 +118,14 @@ def test_stop_all_flag_overrides_ambiguous():
     """stop with all=True should stop all matches even if ambiguous."""
     m = _skip_or_import()
     fake_procs = [
-        {"role": "fixer", "pid": 100, "launch_command": "k1"},
-        {"role": "fixer", "pid": 200, "launch_command": "k2"},
+        {"role": "coordinator", "pid": 100, "launch_command": "k1"},
+        {"role": "coordinator", "pid": 200, "launch_command": "k2"},
     ]
     mock_stop = MagicMock(return_value=True)
     with patch("kiroshi.processreg.list_registered", return_value=fake_procs):
         with patch("kiroshi.processreg.request_stop", mock_stop):
             from kiroshi.mcp_server import _stop_impl
-            result = _stop_impl(role="fixer", all=True)
+            result = _stop_impl(role="coordinator", all=True)
             assert result["stopped"] == 2
             assert mock_stop.call_count == 2
 

@@ -1,6 +1,6 @@
 # Kiroshi pipelines — dependent multi-stage work
 
-Kiroshi's core is a mesh work-queue: a Fixer hands gigs to Runners, budgeting
+Kiroshi's core is a mesh work-queue: a Coordinator hands gigs to Runners, budgeting
 per-disk/per-host. That's the right primitive for **one** stage of embarrassingly
 parallel work. Real datasets need **several** stages with dependencies:
 
@@ -56,7 +56,7 @@ kiroshi pipeline run      my_pipeline.toml   # coordinator loop
 kiroshi pipeline run      my_pipeline.toml --once   # single tick (cron-style)
 ```
 
-A **source** stage (seeded/served externally) needs only `fixer` + `group`;
+A **source** stage (seeded/served externally) needs only `coordinator` + `group`;
 the pipeline just observes its done set. A **map** stage adds a
 `job_id_template` + `[stages.X.spec]` template (`{clip}` / `{stem}` are
 substituted per item). A **barrier/reduce** stage carries a `command` (run
@@ -67,11 +67,11 @@ which `artifact` edges then gate on).
 
 - Pure core (`item_key`, `resolve_each`, `quorum_met`, `render_spec`,
   `build_gigs`) is I/O-free and unit-tested (`tests/test_pipeline.py`).
-- The coordinator talks to Fixers over the existing `/metrics/export`
+- The coordinator talks to Coordinators over the existing `/metrics/export`
   (done/seeded sets) and `/seed` (dedups by `job_id`) endpoints — no new
-  Fixer surface, works cross-host.
+  Coordinator surface, works cross-host.
 - Barrier `command`s run wherever the coordinator runs (e.g. an `ssh` to a
   build host that reads the corpus from local NVMe — far faster than pulling
   it back over SMB).
-- Everything is idempotent + resumable: state lives in the Fixers' job DBs
+- Everything is idempotent + resumable: state lives in the Coordinators' job DBs
   and the on-disk artifacts; kill and relaunch the coordinator freely.

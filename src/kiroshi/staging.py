@@ -226,12 +226,12 @@ def run(spec: dict[str, Any]) -> dict[str, Any]:
     # called acquire() bare (which only constructs the slot object) and then
     # __exit__ manually — which released nothing because __enter__ was never
     # called, silently disabling the mesh budget.
-    fixer = os.environ.get("KIROSHI_FIXER")
+    coordinator = os.environ.get("KIROSHI_FIXER")
     token = os.environ.get("KIROSHI_TOKEN")
     client = None
-    if fixer:
+    if coordinator:
         try:
-            client = ResourceClient(fixer, token)
+            client = ResourceClient(coordinator, token)
         except Exception:  # noqa: BLE001
             client = None
 

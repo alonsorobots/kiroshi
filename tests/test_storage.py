@@ -2,7 +2,7 @@
 
 Covers: gig.disk derivation (range/glob/substring + spec-path), the disk column +
 migration, and the disk-aware lease — the mesh-global per-spindle budget +
-round-robin interleave. The key invariant: only the Fixer can cap per-disk
+round-robin interleave. The key invariant: only the Coordinator can cap per-disk
 in-flight across the whole fleet, so over-subscribing a spindle is impossible.
 """
 from __future__ import annotations
@@ -131,7 +131,7 @@ def test_lease_round_robin_keeps_all_disks_busy(tmp_path):
 
 def test_second_lease_blocked_while_first_holds_budget(tmp_path):
     # the distributed semaphore: Runner A fills disk1's budget; Runner B gets none
-    # from disk1 until A completes (only the Fixer sees this fleet-wide).
+    # from disk1 until A completes (only the Coordinator sees this fleet-wide).
     store = JobStore(str(tmp_path / "l4.db"), max_retries=3)
     _seed_many(store, 5)
     budget = {"d1": 2, "d2": 2}

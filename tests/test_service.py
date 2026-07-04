@@ -27,15 +27,15 @@ def test_find_nssm_env_override(tmp_path, monkeypatch):
 def test_build_install_commands_shape():
     cmds = ws.build_install_commands(
         nssm="nssm.exe", service_name="kiroshi-fixer", python_exe="py.exe",
-        app_parameters="-m kiroshi fixer --port 8787",
+        app_parameters="-m kiroshi coordinator --port 8787",
         app_directory="C:\\work", log_dir="C:\\logs",
-        display_name="Kiroshi Fixer", description="desc",
+        display_name="Kiroshi Coordinator", description="desc",
         account="LocalSystem",
     )
     # first command must be the install
     assert cmds[0] == ["nssm.exe", "install", "kiroshi-fixer", "py.exe"]
     flat = [" ".join(c) for c in cmds]
-    assert any("AppParameters -m kiroshi fixer --port 8787" in f for f in flat)
+    assert any("AppParameters -m kiroshi coordinator --port 8787" in f for f in flat)
     assert any("Start SERVICE_AUTO_START" in f for f in flat)
     assert any("AppStdout" in f and "kiroshi-fixer.stdout.log" in f for f in flat)
     assert any("AppRotateBytes" in f for f in flat)

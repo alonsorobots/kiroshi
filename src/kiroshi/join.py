@@ -17,18 +17,18 @@ from typing import Optional
 import requests
 
 from . import security, taskdist
-from .discovery import discover_fixer
+from .discovery import discover_coordinator
 from .tasks import resolve_task
-from .worker import _AUTO, verify_fixer
+from .worker import _AUTO, verify_coordinator
 
 
-def _resolve_fixer(fixer: str, timeout: float = 6.0) -> Optional[str]:
-    if (fixer or "").strip().lower() not in _AUTO:
-        return fixer.rstrip("/")
-    print("[join] discovering fixer on the LAN...", flush=True)
-    url = discover_fixer(timeout=timeout)
+def _resolve_coordinator(coordinator: str, timeout: float = 6.0) -> Optional[str]:
+    if (coordinator or "").strip().lower() not in _AUTO:
+        return coordinator.rstrip("/")
+    print("[join] discovering coordinator on the LAN...", flush=True)
+    url = discover_coordinator(timeout=timeout)
     if url:
-        print(f"[join] found fixer at {url}", flush=True)
+        print(f"[join] found coordinator at {url}", flush=True)
     return url
 
 
@@ -141,7 +141,7 @@ def _acquire_task(url: str, token: Optional[str], task_ref: Optional[str],
 
 
 def join(
-    fixer: str = "auto",
+    coordinator: str = "auto",
     *,
     task: Optional[str] = None,
     token: Optional[str] = None,
@@ -154,9 +154,9 @@ def join(
     gig_timeout: Optional[float] = None,
     launch_command: str = "",
 ) -> int:
-    url = _resolve_fixer(fixer)
+    url = _resolve_coordinator(coordinator)
     if not url:
-        print("[join] no fixer found. Is one running with --lan? Pass --fixer "
+        print("[join] no coordinator found. Is one running with --lan? Pass --fixer "
               "http://HOST:PORT to skip discovery.", file=sys.stderr)
         return 2
 
@@ -171,7 +171,7 @@ def join(
             sys.path.insert(0, sp)
 
     # Mutual auth BEFORE sending the token or fetching code (SECURITY.md §3).
-    if not verify_fixer(url, token):
+    if not verify_coordinator(url, token):
         print(f"[join] could not verify the Coordinator at {url} (wrong/missing token, or "
               f"a rogue Coordinator). Refusing to join.", file=sys.stderr)
         return 2
@@ -196,7 +196,7 @@ def join(
     print(f"[join] joining {url} as a Runner for task {ref} "
           f"(Ctrl-C to leave)…", flush=True)
     Runner(
-        fixer_url=url,
+        coordinator_url=url,
         task_ref=ref,
         workers=workers,
         token=token,

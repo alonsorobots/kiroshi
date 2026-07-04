@@ -19,7 +19,7 @@ Usage (any process, not just Kiroshi gigs)::
 
     from kiroshi.resource import ResourceClient
 
-    rc = ResourceClient(fixer="http://nas:8800", token=...)
+    rc = ResourceClient(coordinator="http://nas:8800", token=...)
     # Acquire a read slot on disk3 (blocks if the per-disk budget is full)
     with rc.acquire(disk="disk3", mode="read"):
         ... read the file ...
@@ -68,16 +68,16 @@ class ResourceClient:
     If the Coordinator is unreachable, acquire is a no-op (fail-open).
     """
 
-    def __init__(self, fixer: str, token: Optional[str] = None,
+    def __init__(self, coordinator: str, token: Optional[str] = None,
                  timeout: float = _DEFAULT_ACQUIRE_TIMEOUT,
                  slot_ttl: float = _DEFAULT_SLOT_TTL):
-        self._fixer = fixer.rstrip("/")
+        self._coordinator = coordinator.rstrip("/")
         self._token = token or os.environ.get("KIROSHI_TOKEN", "")
         self._timeout = timeout
         self._slot_ttl = slot_ttl
         self._local_slots: set[str] = set()
         self._lock = threading.Lock()
-        self._available: Optional[bool] = None  # cached fixer-reachability
+        self._available: Optional[bool] = None  # cached coordinator-reachability
 
     def _headers(self):
         return {"Authorization": f"Bearer {self._token}"} if self._token else {}
@@ -88,14 +88,14 @@ class ResourceClient:
             return self._available
         try:
             import requests
-            r = requests.get(f"{self._fixer}/healthz",
+            r = requests.get(f"{self._coordinator}/healthz",
                              headers=self._headers(), timeout=5)
             self._available = r.status_code == 200
         except Exception:
             self._available = False
         if not self._available:
             logger.warning("resource: Coordinator at %s unreachable — acquire will "
-                           "be a no-op (no contention protection)", self._fixer)
+                           "be a no-op (no contention protection)", self._coordinator)
         return self._available
 
     def acquire(self, disk: Optional[str] = None, mode: str = "read",
@@ -128,7 +128,7 @@ class ResourceClient:
         while time.time() < deadline:
             try:
                 r = requests.post(
-                    f"{self._fixer}/resource/acquire",
+                    f"{self._coordinator}/resource/acquire",
                     json={"slot_id": slot_id, "disk": disk, "mode": mode,
                           "ttl": self._slot_ttl},
                     headers=self._headers(), timeout=10)
@@ -164,7 +164,7 @@ class ResourceClient:
             return
         try:
             import requests
-            requests.post(f"{self._fixer}/resource/renew",
+            requests.post(f"{self._coordinator}/resource/renew",
                           json={"slot_id": slot_id, "disk": disk, "mode": mode,
                                 "ttl": self._slot_ttl},
                           headers=self._headers(), timeout=5)
@@ -181,7 +181,7 @@ class ResourceClient:
             return
         try:
             import requests
-            requests.post(f"{self._fixer}/resource/release",
+            requests.post(f"{self._coordinator}/resource/release",
                           json={"slot_id": slot_id},
                           headers=self._headers(), timeout=5)
         except Exception:

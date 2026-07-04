@@ -234,33 +234,33 @@ def _check_coordlock(rep: _Report) -> None:
         rep.line(_OK, "coordinator lock", "not held (no coordinator running on this machine)")
 
 
-def _check_fixer(rep: _Report, fixer_url: Optional[str], auto: bool,
+def _check_coordinator(rep: _Report, coordinator_url: Optional[str], auto: bool,
                  token: Optional[str] = None) -> None:
     import requests
 
-    from .discovery import discover_fixer
+    from .discovery import discover_coordinator
 
-    if auto or not fixer_url:
-        url = discover_fixer(timeout=6.0)
+    if auto or not coordinator_url:
+        url = discover_coordinator(timeout=6.0)
         if not url:
-            rep.line(_FAIL, "fixer discovery",
+            rep.line(_FAIL, "coordinator discovery",
                      "no beacon heard in 6s. Either no Coordinator is running on this "
-                     "LAN (start it with: kiroshi fixer), OR the Coordinator host is "
+                     "LAN (start it with: kiroshi coordinator), OR the Coordinator host is "
                      "silently dropping UDP :8788 at the firewall. On the Coordinator "
                      "host, run (elevated): kiroshi firewall install")
             return
-        rep.line(_OK, "fixer discovery", f"beacon -> {url}")
-        fixer_url = url
+        rep.line(_OK, "coordinator discovery", f"beacon -> {url}")
+        coordinator_url = url
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     try:
-        r = requests.get(f"{fixer_url.rstrip('/')}/status", timeout=8, headers=headers)
+        r = requests.get(f"{coordinator_url.rstrip('/')}/status", timeout=8, headers=headers)
         if r.status_code == 401:
-            rep.line(_FAIL, "fixer auth", f"{fixer_url}: 401 unauthorized — wrong/"
+            rep.line(_FAIL, "coordinator auth", f"{coordinator_url}: 401 unauthorized — wrong/"
                      f"missing mesh token (set KIROSHI_TOKEN or --token).")
             return
         r.raise_for_status()
         d = r.json()
-        rep.line(_OK, "fixer reachable", f"{fixer_url}  "
+        rep.line(_OK, "coordinator reachable", f"{coordinator_url}  "
                  f"(pending={d.get('pending')} leased={d.get('leased')} "
                  f"done={d.get('done')} failed={d.get('failed')})")
     except Exception as e:  # noqa: BLE001
@@ -270,13 +270,13 @@ def _check_fixer(rep: _Report, fixer_url: Optional[str], auto: bool,
             hint = ("  hint: TCP timeout usually means Windows Firewall is dropping "
                     "inbound on the Coordinator host. On that host, run (elevated): "
                     "kiroshi firewall install")
-        rep.line(_FAIL, "fixer reachable", f"{fixer_url}: {e}" + (f"\n{hint}" if hint else ""))
+        rep.line(_FAIL, "coordinator reachable", f"{coordinator_url}: {e}" + (f"\n{hint}" if hint else ""))
 
 
 def run_doctor(
     task_ref: Optional[str] = None,
     syspath: Optional[list[str]] = None,
-    fixer_url: Optional[str] = None,
+    coordinator_url: Optional[str] = None,
     auto: bool = False,
     read_root: Optional[str] = None,
     write_root: Optional[str] = None,
@@ -293,7 +293,7 @@ def run_doctor(
     _check_read_root(rep, read_root)
     _check_write_root(rep, write_root)
     _check_coordlock(rep)
-    _check_fixer(rep, fixer_url, auto, token)
+    _check_coordinator(rep, coordinator_url, auto, token)
 
     if rep.failed:
         print("\nRESULT: FAIL — fix the above before joining the mesh.", flush=True)

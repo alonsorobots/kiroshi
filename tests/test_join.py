@@ -1,6 +1,6 @@
 """Tests for `kiroshi join` machinery: task-code serving + consent gate.
 
-Covers taskdist (read/hash/pin/write, single-file-only rule), the Fixer's
+Covers taskdist (read/hash/pin/write, single-file-only rule), the Coordinator's
 /task/meta + /task/source endpoints (token-gated, opt-in), and the consent
 decision (pin auto-accept, --accept-task-hash, interactive y/N). The full
 discover→verify→run orchestration is exercised by the end-to-end smoke join.
@@ -102,7 +102,7 @@ def test_consent_auto_accepts_when_pin_matches(isolated_state):
     src = {"sha256": "abc123", "module": "m", "task_ref": "m:run",
            "filename": "m.py", "source": "x"}
     taskdist.write_pin("m", "abc123")
-    assert _consent(src, "http://fixer", None) is True
+    assert _consent(src, "http://coordinator", None) is True
 
 
 def test_consent_accept_hash_must_match(isolated_state):
@@ -110,8 +110,8 @@ def test_consent_accept_hash_must_match(isolated_state):
 
     src = {"sha256": "abc", "module": "m2", "task_ref": "m2:run",
            "filename": "m2.py", "source": "x"}
-    assert _consent(src, "http://fixer", "abc") is True
-    assert _consent(src, "http://fixer", "wrong") is False
+    assert _consent(src, "http://coordinator", "abc") is True
+    assert _consent(src, "http://coordinator", "wrong") is False
 
 
 def test_consent_interactive_yes_no(isolated_state, monkeypatch):
@@ -120,11 +120,11 @@ def test_consent_interactive_yes_no(isolated_state, monkeypatch):
     src = {"sha256": "z9", "module": "m3", "task_ref": "m3:run",
            "filename": "m3.py", "source": "x"}
     monkeypatch.setattr(builtins, "input", lambda *_a: "y")
-    assert _consent(src, "http://fixer", None) is True
+    assert _consent(src, "http://coordinator", None) is True
     monkeypatch.setattr(builtins, "input", lambda *_a: "n")
-    assert _consent(src, "http://fixer", None) is False
+    assert _consent(src, "http://coordinator", None) is False
     # fails closed on no input (non-interactive, no --accept-task-hash)
     def _raise(*_a):
         raise EOFError
     monkeypatch.setattr(builtins, "input", _raise)
-    assert _consent(src, "http://fixer", None) is False
+    assert _consent(src, "http://coordinator", None) is False

@@ -1,9 +1,9 @@
-"""Kiroshi CLI — ``kiroshi fixer | runner | seed | status``.
+"""Kiroshi CLI — ``kiroshi coordinator | runner | seed | status``.
 
 Examples::
 
     # 1. Start the Coordinator (coordinator + dashboard) on this box
-    kiroshi fixer --db demo.db
+    kiroshi coordinator --db demo.db
 
     # 2. Seed some demo gigs
     kiroshi seed --fixer http://localhost:8787 --demo 500
@@ -68,10 +68,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     prun.add_argument("--workers", type=int, default=0,
                       help="Local worker processes (default: CPU count).")
     prun.add_argument("--capacity", type=int, default=cfg.host().capacity)
-    prun.add_argument("--port", type=int, default=cfg.fixer_port)
+    prun.add_argument("--port", type=int, default=cfg.coordinator_port)
     prun.add_argument("--lan", action="store_true",
                       help="Bind 0.0.0.0 so other machines can join (generates a mesh token).")
-    prun.add_argument("--force-second-fixer", action="store_true",
+    prun.add_argument("--force-second-coordinator", "--force-second-fixer",
+                      dest="force_second_coordinator", action="store_true",
                       help="Skip the singleton coordinator guard. Requires BOTH this "
                            "flag AND KIROSHI_ALLOW_SECOND_COORDINATOR=1 env var. Use "
                            "ONLY when you deliberately want two isolated meshes.")
@@ -80,7 +81,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     prun.add_argument("--token", default=None, help="Mesh token (for --lan).")
     prun.add_argument("--read-root", default=None, help="Set KIROSHI_READ_ROOT for the task.")
     prun.add_argument("--write-root", default=None, help="Set KIROSHI_WRITE_ROOT for the task.")
-    prun.add_argument("--gig-timeout", type=float, default=None,
+    prun.add_argument("--subjob-timeout", "--gig-timeout", dest="gig_timeout",
+                      type=float, default=None,
                       help="Seconds before a hung sub-job is abandoned + its worker killed.")
     prun.add_argument("--syspath", action="append", default=None,
                       help="Extra sys.path entries for task import (repeatable).")
@@ -98,7 +100,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     # ---- join (add this machine to a running mesh) ----
     pjoin = sub.add_parser(
         "join", help="Join this machine to a running mesh as a Runner.")
-    pjoin.add_argument("--coordinator", "--fixer", dest="fixer", default="auto", help="Coordinator URL or 'auto' (default).")
+    pjoin.add_argument("--coordinator", "--fixer", dest="coordinator", default="auto", help="Coordinator URL or 'auto' (default).")
     pjoin.add_argument("--task", default=None,
                        help="Task 'module:function' (default: the Coordinator's served task).")
     pjoin.add_argument("--token", default=None, help="Mesh token (the join code).")
@@ -112,7 +114,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                        help="Extra sys.path entries for task import (repeatable).")
     pjoin.add_argument("--read-root", default=None, help="Set KIROSHI_READ_ROOT for the task.")
     pjoin.add_argument("--write-root", default=None, help="Set KIROSHI_WRITE_ROOT for the task.")
-    pjoin.add_argument("--gig-timeout", type=float, default=None,
+    pjoin.add_argument("--subjob-timeout", "--gig-timeout", dest="gig_timeout",
+                       type=float, default=None,
                        help="Seconds before a hung sub-job is abandoned + its worker killed.")
 
     # ---- remote (launch/manage a Runner on another machine, quoting-proof) ----
@@ -140,9 +143,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                       help="[sync] signal runners to exit so the auto-restart "
                            "wrapper picks up the new code. Default: no (report only).")
     prem.add_argument("--task", default=None, help="Task 'module:function' to run.")
-    prem.add_argument("--coordinator", "--fixer", dest="fixer", default=None,
+    prem.add_argument("--coordinator", "--fixer", dest="coordinator", default=None,
                       help="Coordinator URL the remote should pull from "
-                           "(default: http://<this-LAN-ip>:<fixer_port>).")
+                           "(default: http://<this-LAN-ip>:<coordinator_port>).")
     prem.add_argument("--workers", type=int, default=0,
                       help="Worker processes on the remote (default: its [hosts.<Host>].workers).")
     prem.add_argument("--python", default=None,
@@ -160,16 +163,16 @@ def main(argv: Optional[list[str]] = None) -> int:
     prem.add_argument("--force", action="store_true",
                       help="Launch even if preflight reports problems.")
     prem.add_argument("--no-verify", action="store_true",
-                      help="Skip waiting for the runner to appear in the fixer.")
+                      help="Skip waiting for the runner to appear in the coordinator.")
 
-    # ---- fixer ----
-    pf = sub.add_parser("fixer", help="Run the coordinator + dashboard.",
-                        aliases=["coordinator"], description="Run the coordinator + dashboard.")
+    # ---- coordinator ----
+    pf = sub.add_parser("coordinator", help="Run the coordinator + dashboard.",
+                        aliases=["fixer"], description="Run the coordinator + dashboard.")
     pf.add_argument("--db", default="kiroshi.db", help="SQLite job-store path (gitignored).")
     pf.add_argument("--host", default="127.0.0.1",
                     help="Bind address. Defaults to loopback (secure). Pass "
                          "0.0.0.0 to expose the mesh to the LAN (requires a token).")
-    pf.add_argument("--port", type=int, default=cfg.fixer_port)
+    pf.add_argument("--port", type=int, default=cfg.coordinator_port)
     pf.add_argument("--max-retries", type=int, default=3)
     pf.add_argument("--lease-ttl", type=float, default=120.0)
     pf.add_argument("--reap-interval", type=float, default=15.0)
@@ -178,10 +181,11 @@ def main(argv: Optional[list[str]] = None) -> int:
                     help="Cap each host's in-flight gigs at its live-worker slice "
                          "of the per-disk budget, so a fast poller can't hoard the "
                          "budget and starve slower hosts. Default from "
-                         "[fixer].fair_share (off).")
+                         "[coordinator].fair_share (off).")
     pf.add_argument("--no-beacon", action="store_true",
                     help="Disable the UDP discovery beacon (runners must use an explicit --fixer).")
-    pf.add_argument("--force-second-fixer", action="store_true",
+    pf.add_argument("--force-second-coordinator", "--force-second-fixer",
+                    dest="force_second_coordinator", action="store_true",
                     help="Skip the singleton coordinator guard. Requires BOTH this "
                          "flag AND KIROSHI_ALLOW_SECOND_COORDINATOR=1 env var. Use "
                          "ONLY when you deliberately want two isolated meshes on "
@@ -195,7 +199,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     # ---- runner ----
     pr = sub.add_parser("runner", help="Run a worker node (Runner).")
-    pr.add_argument("--coordinator", "--fixer", dest="fixer", default=cfg.fixer_url,
+    pr.add_argument("--coordinator", "--fixer", dest="coordinator", default=cfg.coordinator_url,
                     help="Coordinator base URL, or 'auto' to discover it on the LAN.")
     pr.add_argument("--task", required=True, help="Task as 'module:function'.")
     pr.add_argument("--workers", type=int, default=cfg.host().workers)
@@ -205,7 +209,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     pr.add_argument("--poll", type=float, default=2.0)
     pr.add_argument("--heartbeat", type=float, default=30.0)
     pr.add_argument("--retries", type=int, default=2, help="Per-item local retries.")
-    pr.add_argument("--gig-timeout", type=float, default=None,
+    pr.add_argument("--subjob-timeout", "--gig-timeout", dest="gig_timeout",
+                    type=float, default=None,
                     help="Seconds before a hung sub-job is abandoned + its worker killed.")
     pr.add_argument("--max-tasks-per-child", type=int, default=None,
                     help="Recycle worker processes every N gigs (band-aid for leaks; off by default).")
@@ -218,7 +223,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     # ---- seed ----
     ps = sub.add_parser("seed", help="Enqueue gigs into the Coordinator.")
-    ps.add_argument("--coordinator", "--fixer", dest="fixer", default=cfg.fixer_url, help="Coordinator base URL, or 'auto'.")
+    ps.add_argument("--coordinator", "--fixer", dest="coordinator", default=cfg.coordinator_url, help="Coordinator base URL, or 'auto'.")
     ps.add_argument("--jobs", default=None,
                     help="JSONL file; each line {\"subjob_id\":..., \"spec\":{...}}.")
     ps.add_argument("--demo", type=int, default=0, help="Seed N demo sleep gigs.")
@@ -238,7 +243,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     # ---- status ----
     pt = sub.add_parser("status", help="Print a /status snapshot.")
-    pt.add_argument("--coordinator", "--fixer", dest="fixer", default=cfg.fixer_url, help="Coordinator base URL, or 'auto'.")
+    pt.add_argument("--coordinator", "--fixer", dest="coordinator", default=cfg.coordinator_url, help="Coordinator base URL, or 'auto'.")
     pt.add_argument("--token", default=None, help="Mesh auth token.")
 
     # ---- pipeline (declarative multi-stage DAG with typed edges) ----
@@ -274,7 +279,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     pst.add_argument("--by", choices=["file", "shard"], default="file",
                      help="Granularity: 'file' = one sub-job per file (default); "
                           "'shard' = one sub-job per top-level dir (not implemented yet).")
-    pst.add_argument("--coordinator", "--fixer", dest="fixer", default=None,
+    pst.add_argument("--coordinator", "--fixer", dest="coordinator", default=None,
                      help="If set, seed gigs to this Coordinator for mesh execution. "
                           "If omitted, runs in-process like 'kiroshi run'.")
     pst.add_argument("--workers", type=int, default=0,
@@ -283,14 +288,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     pst.add_argument("--job", default=None,
                      help="Job slug (mesh mode only). Default: 'stage-<timestamp>'.")
     pst.add_argument("--token", default=None, help="Mesh auth token.")
-    pst.add_argument("--gig-timeout", type=int, default=300,
-                      help="Per-sub-job timeout in seconds (local mode only).")
+    pst.add_argument("--subjob-timeout", "--gig-timeout", dest="gig_timeout",
+                     type=int, default=300,
+                     help="Per-sub-job timeout in seconds (local mode only).")
 
     # ---- jobs (search/list jobs by regex) ----
     pj = sub.add_parser(
         "jobs",
         help="Search/list jobs by regex on subjob_id or error, filtered by state/job.")
-    pj.add_argument("--coordinator", "--fixer", dest="fixer", default=cfg.fixer_url, help="Coordinator base URL, or 'auto'.")
+    pj.add_argument("--coordinator", "--fixer", dest="coordinator", default=cfg.coordinator_url, help="Coordinator base URL, or 'auto'.")
     pj.add_argument("--grep", default=None,
                     help="Regex to match against subjob_id (default) or error (--field error).")
     pj.add_argument("--field", choices=["subjob_id", "error"], default="subjob_id",
@@ -312,7 +318,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     pbr = pb_sub.add_parser("rate", help="Report TRUE throughput of a completed/running job.")
     pbr.add_argument("--dir", default=None,
                      help="Output directory to scan (uses file mtimes).")
-    pbr.add_argument("--coordinator", "--fixer", dest="fixer", default=None,
+    pbr.add_argument("--coordinator", "--fixer", dest="coordinator", default=None,
                      help="Coordinator URL — use with --job to derive throughput from "
                           "per-sub-job completed_at timestamps over HTTP (no FS access needed).")
     pbr.add_argument("--job", default=None,
@@ -333,7 +339,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     pmcp = sub.add_parser(
         "mcp",
         help="Run the MCP server (exposes Kiroshi to LLM agents; needs [mcp] extra).")
-    pmcp.add_argument("--coordinator", "--fixer", dest="fixer", default="auto",
+    pmcp.add_argument("--coordinator", "--fixer", dest="coordinator", default="auto",
                       help="Default Coordinator URL for tool calls that don't pass one. "
                            "'auto' (default) discovers it on the LAN — portable "
                            "across nodes/ports; env KIROSHI_FIXER overrides.")
@@ -349,7 +355,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     # ---- requeue ----
     pq = sub.add_parser("requeue", help="Return failed/stuck gigs to pending.")
-    pq.add_argument("--coordinator", "--fixer", dest="fixer", default=cfg.fixer_url, help="Coordinator base URL, or 'auto'.")
+    pq.add_argument("--coordinator", "--fixer", dest="coordinator", default=cfg.coordinator_url, help="Coordinator base URL, or 'auto'.")
     pq.add_argument("--state", action="append", choices=["failed", "leased", "done"],
                     help="Sub-job state(s) to requeue (repeatable; default: failed).")
     pq.add_argument("--keep-attempts", action="store_true",
@@ -358,7 +364,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     # ---- doctor ----
     pd = sub.add_parser("doctor", help="Preflight checks for this machine + env.")
-    pd.add_argument("--coordinator", "--fixer", dest="fixer", default=cfg.fixer_url, help="Coordinator base URL, or 'auto'.")
+    pd.add_argument("--coordinator", "--fixer", dest="coordinator", default=cfg.coordinator_url, help="Coordinator base URL, or 'auto'.")
     pd.add_argument("--task", default=None, help="Task 'module:function' to import-test.")
     pd.add_argument("--syspath", action="append", default=None,
                     help="Extra sys.path entries for the task import (repeatable).")
@@ -375,29 +381,30 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     # ---- stop (request graceful drain of a registered process) ----
     pstop = sub.add_parser("stop", help="Ask a registered Coordinator/Runner to drain + exit.")
-    pstop.add_argument("--role", choices=["fixer", "runner"], help="Limit to a role.")
+    pstop.add_argument("--role", choices=["coordinator", "runner"], help="Limit to a role.")
     pstop.add_argument("--pid", type=int, default=None, help="Limit to one PID.")
     pstop.add_argument("--all", action="store_true", help="Stop all registered processes.")
 
     # ---- tray ----
     ptray = sub.add_parser("tray", help="Run the system-tray UI (needs the 'tray' extra).")
     # A tray is a GLOBAL lens on the whole mesh, so it defaults to LAN discovery
-    # (the persistent beaconing Coordinator) rather than cfg.fixer_url — which may point
+    # (the persistent beaconing Coordinator) rather than cfg.coordinator_url — which may point
     # at a specific job port and would pin the icon to a single job.
-    ptray.add_argument("--coordinator", "--fixer", dest="fixer", default="auto", help="Coordinator base URL, or 'auto' (default: discover).")
+    ptray.add_argument("--coordinator", "--fixer", dest="coordinator", default="auto", help="Coordinator base URL, or 'auto' (default: discover).")
     ptray.add_argument("--token", default=None, help="Mesh auth token.")
 
-    # ---- firewall (Windows: manage inbound rules for TCP fixer + UDP discovery) ----
+    # ---- firewall (Windows: manage inbound rules for TCP coordinator + UDP discovery) ----
     pfw = sub.add_parser(
         "firewall",
         help="Manage Windows Firewall rules for Kiroshi's two inbound ports "
-             "(idempotent; opens TCP fixer + UDP discovery from `kiroshi.local.toml`).",
+             "(idempotent; opens TCP coordinator + UDP discovery from `kiroshi.local.toml`).",
     )
     pfw.add_argument("action", choices=["install", "status", "remove"],
                      help="install/remove need admin; status is read-only.")
-    pfw.add_argument("--fixer-port", type=int, default=None, action="append",
+    pfw.add_argument("--coordinator-port", "--fixer-port", dest="coordinator_port",
+                     type=int, default=None, action="append",
                      help="Override the TCP Coordinator port(s) to open (repeatable). "
-                          f"Default: [fixer].ports or [fixer].port = {cfg.fixer_port}.")
+                          f"Default: [coordinator].ports or [coordinator].port = {cfg.coordinator_port}.")
     pfw.add_argument("--discovery-port", type=int, default=None,
                      help="Override the UDP discovery port (default: 8788 or "
                           "KIROSHI_DISCOVERY_PORT env).")
@@ -405,14 +412,14 @@ def main(argv: Optional[list[str]] = None) -> int:
                      help="Scope rules to this remote IP/CIDR. Default: auto-detected "
                           "LAN /24 for defense in depth; pass 'any' to allow all.")
 
-    # ---- install (one-command setup: fixer service + tray autostart) ----
+    # ---- install (one-command setup: coordinator service + tray autostart) ----
     pins = sub.add_parser("install",
                           help="One-command setup: install the Coordinator as a Windows service "
                                "+ register the tray to auto-start on login.")
-    pins.add_argument("--db", default="kiroshi.db", help="(fixer) SQLite job-store path.")
-    pins.add_argument("--host", default="0.0.0.0", help="(fixer) bind host (LAN-default).")
-    pins.add_argument("--port", type=int, default=cfg.fixer_port, help="(fixer) bind port.")
-    pins.add_argument("--pages-dir", default=None, help="(fixer) custom views dir.")
+    pins.add_argument("--db", default="kiroshi.db", help="(coordinator) SQLite job-store path.")
+    pins.add_argument("--host", default="0.0.0.0", help="(coordinator) bind host (LAN-default).")
+    pins.add_argument("--port", type=int, default=cfg.coordinator_port, help="(coordinator) bind port.")
+    pins.add_argument("--pages-dir", default=None, help="(coordinator) custom views dir.")
     pins.add_argument("--no-tray", action="store_true",
                       help="Skip tray autostart registration (service only).")
 
@@ -488,7 +495,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                           help="Install/uninstall/inspect Coordinator or Runner as a Windows service (NSSM).")
     psvc.add_argument("action", choices=["install", "uninstall", "status"],
                       help="What to do.")
-    psvc.add_argument("--role", choices=["fixer", "runner"],
+    psvc.add_argument("--role", choices=["coordinator", "runner"],
                       help="Which service (required for install).")
     psvc.add_argument("--name", default=None, help="Service name (default: kiroshi-<role>).")
     psvc.add_argument("--python", default=None,
@@ -499,13 +506,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     psvc.add_argument("--password", default=None, help="Password for --account.")
     psvc.add_argument("--force", action="store_true",
                       help="Override the NAS-as-LocalSystem safety refusal.")
-    # fixer params
-    psvc.add_argument("--db", default="kiroshi.db", help="(fixer) job store path.")
-    psvc.add_argument("--host", default="0.0.0.0", help="(fixer) bind host.")
-    psvc.add_argument("--port", type=int, default=cfg.fixer_port, help="(fixer) bind port.")
-    psvc.add_argument("--pages-dir", default=None, help="(fixer) custom views dir.")
+    # coordinator params
+    psvc.add_argument("--db", default="kiroshi.db", help="(coordinator) job store path.")
+    psvc.add_argument("--host", default="0.0.0.0", help="(coordinator) bind host.")
+    psvc.add_argument("--port", type=int, default=cfg.coordinator_port, help="(coordinator) bind port.")
+    psvc.add_argument("--pages-dir", default=None, help="(coordinator) custom views dir.")
     # runner params
-    psvc.add_argument("--coordinator", "--fixer", dest="fixer", default="auto", help="(runner) Coordinator URL or 'auto'.")
+    psvc.add_argument("--coordinator", "--fixer", dest="coordinator", default="auto", help="(runner) Coordinator URL or 'auto'.")
     psvc.add_argument("--task", default=None, help="(runner) task 'module:function'.")
     psvc.add_argument("--workers", type=int, default=0, help="(runner) worker count.")
     psvc.add_argument("--syspath", action="append", default=None,
@@ -527,7 +534,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     # on first CLI use. Headless-only paths (seed/requeue/stop) and any
     # non-Windows host are skipped; never raises -- autostart is best-effort
     # and must not block a job. The tray itself stays decoupled from jobs.
-    if args.cmd in ("run", "fixer", "runner", "status", "ps", "tray"):
+    if args.cmd in ("run", "coordinator", "runner", "status", "ps", "tray"):
         try:
             from . import autostart as _autostart
             if hasattr(_autostart, "ensure_registered"):
@@ -549,8 +556,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             return 2
         from .remote import run_remote
         return run_remote(args)
-    if args.cmd == "fixer":
-        return _cmd_fixer(args)
+    if args.cmd == "coordinator":
+        return _cmd_coordinator(args)
     if args.cmd == "runner":
         return _cmd_runner(args)
     if args.cmd == "seed":
@@ -596,23 +603,23 @@ def main(argv: Optional[list[str]] = None) -> int:
     return 1
 
 
-def _resolve_fixer_arg(value: str) -> str:
+def _resolve_coordinator_arg(value: str) -> str:
     """Turn a ``--fixer`` value into a base URL, discovering it if 'auto'."""
-    from .discovery import discover_fixer
+    from .discovery import discover_coordinator
     from .worker import _AUTO
 
     if (value or "").strip().lower() not in _AUTO:
         return value
-    print("[kiroshi] discovering fixer on the LAN...", flush=True)
-    url = discover_fixer(timeout=6.0)
+    print("[kiroshi] discovering coordinator on the LAN...", flush=True)
+    url = discover_coordinator(timeout=6.0)
     if not url:
-        raise SystemExit("No fixer beacon heard. Is a Coordinator running? "
+        raise SystemExit("No coordinator beacon heard. Is a Coordinator running? "
                          "Pass --fixer http://HOST:PORT to skip discovery.")
-    print(f"[kiroshi] found fixer at {url}", flush=True)
+    print(f"[kiroshi] found coordinator at {url}", flush=True)
     return url
 
 
-def _cmd_fixer(args) -> int:
+def _cmd_coordinator(args) -> int:
     import uvicorn
 
     from . import security
@@ -622,9 +629,9 @@ def _cmd_fixer(args) -> int:
     from .jobstore import JobStore
     from .logsetup import tee_process_output
 
-    tee_process_output("fixer")
+    tee_process_output("coordinator")
 
-    token = security.ensure_fixer_token(args.token, allow_insecure=args.no_auth)
+    token = security.ensure_coordinator_token(args.token, allow_insecure=args.no_auth)
     if token:
         # Keep the token off disk: the lines below print it to the console, and
         # stdout is teed into a state-dir log readable by other local users.
@@ -632,34 +639,34 @@ def _cmd_fixer(args) -> int:
         redact(token)
     bind_is_public = args.host not in ("127.0.0.1", "localhost", "::1")
     if token is None:
-        print("[fixer] WARNING: running with NO AUTH (--no-auth).", flush=True)
+        print("[coordinator] WARNING: running with NO AUTH (--no-auth).", flush=True)
         if bind_is_public:
-            print("[fixer] DANGER: --no-auth on a public bind address exposes an "
+            print("[coordinator] DANGER: --no-auth on a public bind address exposes an "
                   "unauthenticated job API to the whole LAN. Anyone can enqueue/steal "
                   "work. Use a token, or bind 127.0.0.1.", flush=True)
     elif bind_is_public:
-        print(f"[fixer] NOTE: binding {args.host} exposes the mesh API to the LAN "
+        print(f"[coordinator] NOTE: binding {args.host} exposes the mesh API to the LAN "
               "(token-gated). Do NOT port-forward this to the internet — put the "
               "mesh on a private overlay (WireGuard/Tailscale) or TLS instead.",
               flush=True)
     else:
-        print("[fixer] bound to loopback (secure default). To let other machines "
+        print("[coordinator] bound to loopback (secure default). To let other machines "
               "join, restart with --host 0.0.0.0.", flush=True)
 
     # Split-brain guard: refuse to spin up a discoverable Coordinator if another
-    # one is already reachable on this LAN. Two Fixers → two disjoint queues
+    # one is already reachable on this LAN. Two Coordinators → two disjoint queues
     # + two disjoint per-spindle budgets → both saturate the shared NAS
     # assuming the other doesn't exist. Skipped when we're not participating
     # in LAN discovery anyway (--no-beacon or loopback bind).
     beacon_would_broadcast = not args.no_beacon and bind_is_public
-    if beacon_would_broadcast and not args.force_second_fixer:
-        from .discovery import check_singleton_fixer
+    if beacon_would_broadcast and not args.force_second_coordinator:
+        from .discovery import check_singleton_coordinator
 
-        other = check_singleton_fixer(timeout=3.0)
+        other = check_singleton_coordinator(timeout=3.0)
         if other:
-            print(f"[fixer] REFUSING to start: another Coordinator is already "
+            print(f"[coordinator] REFUSING to start: another Coordinator is already "
                   f"discoverable at {other}.\n"
-                  f"  Two Fixers on one LAN means two disjoint queues and two\n"
+                  f"  Two Coordinators on one LAN means two disjoint queues and two\n"
                   f"  disjoint per-spindle budgets — both would happily saturate\n"
                   f"  the shared NAS assuming the other doesn't exist.\n"
                   f"  Fix: stop the other Coordinator, or pass --force-second-fixer if\n"
@@ -669,11 +676,11 @@ def _cmd_fixer(args) -> int:
 
     # A4: --force-second-fixer now requires KIROSHI_ALLOW_SECOND_COORDINATOR=1
     # as a two-key safety. A single flag is too easy to pass by muscle memory.
-    force_second = bool(args.force_second_fixer)
+    force_second = bool(args.force_second_coordinator)
     if force_second:
         if os.environ.get("KIROSHI_ALLOW_SECOND_COORDINATOR") != "1":
             print(
-                "[fixer] REFUSING: --force-second-fixer now requires the "
+                "[coordinator] REFUSING: --force-second-fixer now requires the "
                 "environment variable KIROSHI_ALLOW_SECOND_COORDINATOR=1.\n"
                 "  This two-key safety prevents accidentally running a second "
                 "coordinator on the same machine.\n"
@@ -709,14 +716,14 @@ def _cmd_fixer(args) -> int:
     )
     beacon = None
     if not args.no_beacon:
-        beacon = BeaconBroadcaster(fixer_port=args.port).start()
-        print(f"[fixer] broadcasting discovery beacon (port {args.port}); "
+        beacon = BeaconBroadcaster(coordinator_port=args.port).start()
+        print(f"[coordinator] broadcasting discovery beacon (port {args.port}); "
               f"runners can use --fixer auto", flush=True)
-    print(f"[fixer] db={args.db}  dashboard=http://{args.host}:{args.port}/", flush=True)
+    print(f"[coordinator] db={args.db}  dashboard=http://{args.host}:{args.port}/", flush=True)
     if token:
-        print(f"[fixer] mesh token: {token}", flush=True)
-        print("[fixer]   on other machines: set KIROSHI_TOKEN, or pass --token", flush=True)
-        print(f"[fixer]   open dashboard: http://{current_host()}:{args.port}/?token={token}",
+        print(f"[coordinator] mesh token: {token}", flush=True)
+        print("[coordinator]   on other machines: set KIROSHI_TOKEN, or pass --token", flush=True)
+        print(f"[coordinator]   open dashboard: http://{current_host()}:{args.port}/?token={token}",
               flush=True)
     from .logsetup import current_log_path
     from .processreg import ProcessRegistration
@@ -724,7 +731,7 @@ def _cmd_fixer(args) -> int:
     config = uvicorn.Config(app, host=args.host, port=args.port, log_level="warning")
     server = uvicorn.Server(config)
     reg = ProcessRegistration(
-        "fixer",
+        "coordinator",
         {
             "launch_command": _launch_command(),
             "host": args.host, "port": args.port,
@@ -820,7 +827,7 @@ def _cmd_run(args) -> int:
         max_tasks_per_child=args.max_tasks_per_child,
         gc_between_tasks=args.gc_between_tasks,
         launch_command=_launch_command(),
-        force_second_fixer=getattr(args, "force_second_fixer", False),
+        force_second_coordinator=getattr(args, "force_second_coordinator", False),
     )
 
 
@@ -828,7 +835,7 @@ def _cmd_join(args) -> int:
     from .join import join
 
     return join(
-        fixer=args.fixer,
+        coordinator=args.coordinator,
         task=args.task,
         token=args.token,
         workers=args.workers,
@@ -852,7 +859,7 @@ def _cmd_runner(args) -> int:
     from .worker import Runner
 
     Runner(
-        fixer_url=args.fixer,
+        coordinator_url=args.coordinator,
         task_ref=args.task,
         workers=args.workers,
         capacity=args.capacity,
@@ -904,7 +911,7 @@ def _resolve_origin(cli_arg: Optional[str]) -> Optional[dict]:
 def _cmd_seed(args) -> int:
     import requests
 
-    args.fixer = _resolve_fixer_arg(args.fixer)
+    args.coordinator = _resolve_coordinator_arg(args.coordinator)
     headers = _auth_headers(args)
     origin = _resolve_origin(getattr(args, "origin", None))
 
@@ -916,7 +923,7 @@ def _cmd_seed(args) -> int:
             body["label"] = args.label
         if origin:
             body["origin"] = origin
-        r = requests.post(f"{args.fixer.rstrip('/')}/seed", json=body,
+        r = requests.post(f"{args.coordinator.rstrip('/')}/seed", json=body,
                           timeout=60, headers=headers)
         r.raise_for_status()
         out = r.json()
@@ -965,8 +972,8 @@ def _cmd_seed(args) -> int:
 def _cmd_status(args) -> int:
     import requests
 
-    args.fixer = _resolve_fixer_arg(args.fixer)
-    r = requests.get(f"{args.fixer.rstrip('/')}/status", timeout=30,
+    args.coordinator = _resolve_coordinator_arg(args.coordinator)
+    r = requests.get(f"{args.coordinator.rstrip('/')}/status", timeout=30,
                      headers=_auth_headers(args))
     r.raise_for_status()
     print(json.dumps(r.json(), indent=2))
@@ -987,7 +994,7 @@ def _cmd_pipeline(args) -> int:
               f"poll={pipe.poll_s}s")
         for name, s in pipe.stages.items():
             extra = f" command={'yes' if s.command else 'no'}" if s.command else ""
-            print(f"  stage {name:12s} fixer={s.fixer} job={s.job}{extra}")
+            print(f"  stage {name:12s} coordinator={s.coordinator} job={s.job}{extra}")
         for e in pipe.edges:
             tag = e.kind + (f":{e.k}" if e.kind == "quorum" else "")
             gate = f" gate={e.artifact}" if e.artifact else ""
@@ -1054,7 +1061,7 @@ def _cmd_bench(args) -> int:
     from . import bench
 
     if args.bench_cmd == "rate":
-        if args.fixer:
+        if args.coordinator:
             # HTTP mode: derive true throughput from per-sub-job completed_at over
             # /jobs. NOTE: /jobs is hard-capped at 2000 rows (most-recent-first),
             # so for jobs > 2000 done gigs this is a SAMPLE of the tail, not
@@ -1066,11 +1073,11 @@ def _cmd_bench(args) -> int:
             if args.token:
                 params["token"] = args.token
             try:
-                r = requests.get(f"{args.fixer.rstrip('/')}/jobs",
+                r = requests.get(f"{args.coordinator.rstrip('/')}/jobs",
                                  params=params, timeout=30)
                 r.raise_for_status()
             except requests.RequestException as exc:
-                print(f"[bench rate] FAILED to reach {args.fixer}: {exc}",
+                print(f"[bench rate] FAILED to reach {args.coordinator}: {exc}",
                       file=sys.stderr)
                 return 1
             rows = r.json().get("jobs", [])
@@ -1078,13 +1085,13 @@ def _cmd_bench(args) -> int:
                      if row.get("completed_at")]
             if not times:
                 print(f"[bench rate] no completed gigs found for job "
-                      f"{args.job!r} on {args.fixer}.")
+                      f"{args.job!r} on {args.coordinator}.")
                 return 0
             span = max(0.0, max(times) - min(times))
             n = len(times)
             sampled = " (SAMPLE: most-recent 2000 gigs — use --dir for whole run)" \
                 if n >= LIMIT else ""
-            print(f"[bench rate] job={args.job}  fixer={args.fixer}{sampled}")
+            print(f"[bench rate] job={args.job}  coordinator={args.coordinator}{sampled}")
             if span > 0:
                 print(f"  {n} completed gigs, span={span:.1f}s, "
                       f"true rate={n / span:.2f} gigs/s")
@@ -1145,7 +1152,7 @@ def _cmd_bench(args) -> int:
 def _cmd_jobs(args) -> int:
     """Search/list jobs by regex on subjob_id or error, filtered by state/job."""
     import requests
-    fixer = _resolve_fixer_arg(args.fixer)
+    coordinator = _resolve_coordinator_arg(args.coordinator)
     params: dict[str, Any] = {"limit": min(max(args.limit, 1), 2000)}
     if args.state:
         params["state"] = args.state
@@ -1159,10 +1166,10 @@ def _cmd_jobs(args) -> int:
     if args.token:
         params["token"] = args.token
     try:
-        r = requests.get(f"{fixer.rstrip('/')}/jobs", params=params, timeout=30)
+        r = requests.get(f"{coordinator.rstrip('/')}/jobs", params=params, timeout=30)
         r.raise_for_status()
     except requests.RequestException as exc:
-        print(f"[jobs] FAILED to reach {fixer}: {exc}", file=sys.stderr)
+        print(f"[jobs] FAILED to reach {coordinator}: {exc}", file=sys.stderr)
         return 1
     body = r.json()
     if "error" in body:
@@ -1212,7 +1219,7 @@ def _cmd_stage(args) -> int:
     if args.pattern and args.pattern != "*":
         task_args += ["--pattern", args.pattern]
 
-    if args.fixer:
+    if args.coordinator:
         # mesh mode: enumerate + seed
         gigs = list(enumerate_gigs({
             "from": args.src_root, "to": args.dst_root,
@@ -1227,15 +1234,15 @@ def _cmd_stage(args) -> int:
                    "label": f"stage: {args.src_root} -> {args.dst_root}"}
         params = {"token": args.token} if args.token else {}
         try:
-            r = requests.post(f"{args.fixer.rstrip('/')}/seed",
+            r = requests.post(f"{args.coordinator.rstrip('/')}/seed",
                               params=params, json=payload, timeout=60)
             r.raise_for_status()
         except requests.RequestException as exc:
-            print(f"[stage] FAILED to seed to {args.fixer}: {exc}",
+            print(f"[stage] FAILED to seed to {args.coordinator}: {exc}",
                   file=sys.stderr)
             return 1
-        print(f"[stage] seeded {len(gigs)} gigs to {args.fixer} (job={job}).")
-        print(f"  Start a runner:  kiroshi runner --fixer {args.fixer} "
+        print(f"[stage] seeded {len(gigs)} gigs to {args.coordinator} (job={job}).")
+        print(f"  Start a runner:  kiroshi runner --fixer {args.coordinator} "
               f"--task kiroshi.staging:run --workers N "
               f"--syspath <kiroshi-src> --syspath <kiroshi-src>/src")
         return 0
@@ -1260,7 +1267,7 @@ def _cmd_mcp(args) -> int:
     etc.) can enumerate + call Kiroshi tools without shelling out to the CLI.
     Optional extra: 'pip install kiroshi[mcp]'."""
     from . import mcp_server
-    return mcp_server.run_stdio(default_fixer=args.fixer, default_token=args.token)
+    return mcp_server.run_stdio(default_coordinator=args.coordinator, default_token=args.token)
 
 
 def _cmd_cursor_bridge(args) -> int:
@@ -1291,10 +1298,10 @@ def _cmd_capabilities(args) -> int:
 def _cmd_requeue(args) -> int:
     import requests
 
-    args.fixer = _resolve_fixer_arg(args.fixer)
+    args.coordinator = _resolve_coordinator_arg(args.coordinator)
     states = args.state or ["failed"]
     r = requests.post(
-        f"{args.fixer.rstrip('/')}/requeue",
+        f"{args.coordinator.rstrip('/')}/requeue",
         json={"states": states, "reset_attempts": not args.keep_attempts},
         timeout=30,
         headers=_auth_headers(args),
@@ -1383,10 +1390,10 @@ def _cmd_service(args) -> int:
 
     # ---- install ----
     if not args.role:
-        print("[service] install requires --role fixer|runner", file=sys.stderr)
+        print("[service] install requires --role coordinator|runner", file=sys.stderr)
         return 2
     python_exe = args.python or sys.executable
-    name = args.name or (ws.DEFAULT_FIXER_SERVICE if args.role == "fixer"
+    name = args.name or (ws.DEFAULT_FIXER_SERVICE if args.role == "coordinator"
                         else ws.DEFAULT_RUNNER_SERVICE)
     env: dict[str, str] = {}
     for kv in (args.env or []):
@@ -1400,8 +1407,8 @@ def _cmd_service(args) -> int:
     if args.write_root:
         env["KIROSHI_WRITE_ROOT"] = args.write_root
 
-    if args.role == "fixer":
-        parts = ["-m", "kiroshi", "fixer", "--db", args.db,
+    if args.role == "coordinator":
+        parts = ["-m", "kiroshi", "coordinator", "--db", args.db,
                  "--host", args.host, "--port", str(args.port)]
         if args.pages_dir:
             parts += ["--pages-dir", args.pages_dir]
@@ -1425,7 +1432,7 @@ def _cmd_service(args) -> int:
                   "  (Override with --force if you really mean LocalSystem.)",
                   file=sys.stderr)
             return 2
-        parts = ["-m", "kiroshi", "runner", "--coordinator", args.fixer, "--task", args.task]
+        parts = ["-m", "kiroshi", "runner", "--coordinator", args.coordinator, "--task", args.task]
         if args.workers:
             parts += ["--workers", str(args.workers)]
         for sp in (args.syspath or []):
@@ -1458,7 +1465,7 @@ def _cmd_tray(args) -> int:
         print(f"[tray] missing dependency: {e}\n"
               f"Install the tray extra:  pip install kiroshi[tray]")
         return 2
-    return run_tray(fixer=args.fixer, token=args.token)
+    return run_tray(coordinator=args.coordinator, token=args.token)
 
 
 def _cmd_firewall(args) -> int:
@@ -1478,7 +1485,7 @@ def _cmd_firewall(args) -> int:
     from .discovery import discovery_port
 
     cfg = load_config()
-    fixer_ports = args.fixer_port or cfg.fixer_ports or [cfg.fixer_port]
+    coordinator_ports = args.coordinator_port or cfg.coordinator_ports or [cfg.coordinator_port]
     disc_port = args.discovery_port or discovery_port()
     remote_ip = args.remote_ip
     if remote_ip is None:
@@ -1490,8 +1497,8 @@ def _cmd_firewall(args) -> int:
             print("[firewall] no private /24 detected — falling back to remote_ip=any. "
                   "Pass --remote-ip <cidr> to pin.", file=sys.stderr)
 
-    print(f"[firewall] fixer TCP ports: {', '.join(str(p) for p in fixer_ports)}")
-    rules = fw.plan_rules(fixer_ports, disc_port, remote_ip=remote_ip)
+    print(f"[firewall] coordinator TCP ports: {', '.join(str(p) for p in coordinator_ports)}")
+    rules = fw.plan_rules(coordinator_ports, disc_port, remote_ip=remote_ip)
     existing = fw.list_kiroshi_rules()
 
     if args.action == "status":
@@ -1719,7 +1726,7 @@ def _cmd_install(args) -> int:
     else:
         print(f"[install] registering Coordinator service '{name}'...")
 
-    parts = ["-m", "kiroshi", "fixer", "--db", args.db,
+    parts = ["-m", "kiroshi", "coordinator", "--db", args.db,
              "--host", args.host, "--port", str(args.port)]
     if args.pages_dir:
         parts += ["--pages-dir", args.pages_dir]
@@ -1803,11 +1810,11 @@ def _cmd_doctor(args) -> int:
 
     from . import security
 
-    auto = (args.fixer or "").strip().lower() in _AUTO
+    auto = (args.coordinator or "").strip().lower() in _AUTO
     return run_doctor(
         task_ref=args.task,
         syspath=args.syspath,
-        fixer_url=None if auto else args.fixer,
+        coordinator_url=None if auto else args.coordinator,
         auto=auto,
         read_root=args.read_root,
         write_root=args.write_root,

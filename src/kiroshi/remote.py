@@ -24,7 +24,7 @@ closes, and the *interpreter* actually used on the far side is easy to get wrong
    interpreter comes from ``[hosts.<Host>].python`` in ``kiroshi.local.toml``.
 
 Every step runs a **preflight** first and reports, per check, exactly what is
-wrong on the remote (kiroshi importable? task importable? fixer reachable? NAS
+wrong on the remote (kiroshi importable? task importable? coordinator reachable? NAS
 roots visible?) instead of a cryptic stack trace.
 """
 from __future__ import annotations
@@ -216,18 +216,18 @@ if mod:
             if _st_box.get("error"):
                 R["task_selftest_error"] = _st_box["error"]
 
-# fixer reachable + token accepted?
-fx = CFG.get("fixer")
-R["fixer"] = None
+# coordinator reachable + token accepted?
+fx = CFG.get("coordinator")
+R["coordinator"] = None
 if fx:
     import urllib.request
     req = urllib.request.Request(fx.rstrip("/") + "/status",
                                  headers={"Authorization": "Bearer " + CFG.get("token", "")})
     try:
         with urllib.request.urlopen(req, timeout=8) as resp:
-            R["fixer"] = resp.status
+            R["coordinator"] = resp.status
     except Exception as e:
-        R["fixer"] = f"{e.__class__.__name__}: {e}"
+        R["coordinator"] = f"{e.__class__.__name__}: {e}"
 
 # NAS roots visible from this box (SMB as the logged-in user)?
 for key in ("read_root", "write_root"):
@@ -382,7 +382,7 @@ def q(s):
     return '"' + s + '"' if (" " in s or "\t" in s) else s
 
 parts = [q(CFG["python"]), "-m", "kiroshi", "join",
-         "--fixer", CFG["fixer"], "--task", CFG["task"],
+         "--fixer", CFG["coordinator"], "--task", CFG["task"],
          "--workers", str(CFG["workers"])]
 for sp in CFG.get("syspath", []):
     parts += ["--syspath", q(sp)]
@@ -427,7 +427,7 @@ def _resolve(args, cfg: MeshConfig) -> dict:
     hc = cfg.host(host)  # case-insensitive [hosts.<Host>] lookup
     ssh_target = getattr(hc, "ssh_target", None) or host
     remote_python = args.python or hc.python or "python"
-    fixer = args.fixer or f"http://{_lan_ip()}:{cfg.fixer_port}"
+    coordinator = args.coordinator or f"http://{_lan_ip()}:{cfg.coordinator_port}"
     workers = args.workers or hc.workers
     read_root = args.read_root or hc.read_root or cfg.read_root
     write_root = args.write_root or hc.write_root or cfg.write_root
@@ -438,7 +438,7 @@ def _resolve(args, cfg: MeshConfig) -> dict:
         "host": host,
         "ssh_target": ssh_target,
         "python": remote_python,
-        "fixer": fixer.rstrip("/"),
+        "coordinator": coordinator.rstrip("/"),
         "task": args.task or "",
         "workers": int(workers),
         "syspath": syspath,
@@ -490,8 +490,8 @@ def _print_preflight(host: str, r: dict, local_fp: Optional[dict] = None) -> boo
             line("task selftest", False,
                  (r.get("task_selftest_error") or "failed")
                  + " — a runtime/lazy dep is missing on this node")
-    fx = r.get("fixer")
-    line("fixer reachable + authed", fx == 200,
+    fx = r.get("coordinator")
+    line("coordinator reachable + authed", fx == 200,
          "HTTP 200" if fx == 200 else str(fx))
 
     # --- env fingerprint: code (git SHA) + key deps vs the coordinator -------
@@ -612,11 +612,11 @@ def run_remote(args) -> int:
 
     if not eff["token"]:
         print("[remote] WARNING: no mesh token resolved locally — the runner "
-              "will be rejected by an authed fixer. Set KIROSHI_TOKEN or pass "
+              "will be rejected by an authed coordinator. Set KIROSHI_TOKEN or pass "
               "--token.", file=sys.stderr)
 
     # --- 1. preflight (always) ------------------------------------------------
-    pre_cfg = {k: eff[k] for k in ("task", "syspath", "fixer", "token",
+    pre_cfg = {k: eff[k] for k in ("task", "syspath", "coordinator", "token",
                                    "read_root", "write_root")}
     rc, out, err = _ssh_python(eff["ssh_target"], eff["python"],
                                _embed(pre_cfg) + _PREFLIGHT, timeout=60)
@@ -639,7 +639,7 @@ def run_remote(args) -> int:
         return 1
 
     # --- 2. provision: token + durable logon task + start now ----------------
-    prov_cfg = {k: eff[k] for k in ("python", "fixer", "task", "workers",
+    prov_cfg = {k: eff[k] for k in ("python", "coordinator", "task", "workers",
                                     "syspath", "read_root", "write_root",
                                     "token", "task_name", "slug", "user")}
     rc, out, err = _ssh_python(eff["ssh_target"], eff["python"],
@@ -667,20 +667,20 @@ def run_remote(args) -> int:
     print(f"[remote] installed + started Scheduled Task '{prov.get('task_name')}' "
           f"on {host} (runs at logon, survives disconnect).")
 
-    # --- 3. verify the runner shows up in the fixer's per-host view -----------
+    # --- 3. verify the runner shows up in the coordinator's per-host view -----------
     if args.no_verify:
         return 0
     print(f"[remote] verifying {host} joins the mesh…", flush=True)
-    if _verify_join(eff["fixer"], eff["token"], host, timeout=40):
-        print(f"[remote] {host} is now pulling gigs from {eff['fixer']}.")
+    if _verify_join(eff["coordinator"], eff["token"], host, timeout=40):
+        print(f"[remote] {host} is now pulling gigs from {eff['coordinator']}.")
         return 0
-    print(f"[remote] {host} did not appear in the fixer's runner list within "
+    print(f"[remote] {host} did not appear in the coordinator's runner list within "
           f"the timeout. Check the runner log on {host}:\n   {prov.get('log')}",
           file=sys.stderr)
     return 1
 
 
-def _verify_join(fixer: str, token: Optional[str], host: str,
+def _verify_join(coordinator: str, token: Optional[str], host: str,
                  timeout: float = 40.0) -> bool:
     import time
     import urllib.request
@@ -689,7 +689,7 @@ def _verify_join(fixer: str, token: Optional[str], host: str,
     want = host.lower()
     while time.time() < deadline:
         try:
-            req = urllib.request.Request(fixer.rstrip("/") + "/status",
+            req = urllib.request.Request(coordinator.rstrip("/") + "/status",
                                          headers=headers)
             with urllib.request.urlopen(req, timeout=6) as resp:
                 data = json.loads(resp.read())

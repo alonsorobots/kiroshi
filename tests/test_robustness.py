@@ -54,12 +54,12 @@ def test_beacon_parse_rejects_junk():
 
 
 def test_discover_over_loopback():
-    """A real broadcaster -> discover_fixer round-trip on an ephemeral port."""
+    """A real broadcaster -> discover_coordinator round-trip on an ephemeral port."""
     port = _free_udp_port()
-    bc = discovery.BeaconBroadcaster(fixer_port=9999, interval=0.2,
+    bc = discovery.BeaconBroadcaster(coordinator_port=9999, interval=0.2,
                                      disc_port=port, passive=True).start()
     try:
-        url = discovery.discover_fixer(timeout=4.0, disc_port=port)
+        url = discovery.discover_coordinator(timeout=4.0, disc_port=port)
     finally:
         bc.stop()
     assert url is not None and url.endswith(":9999"), url
@@ -68,7 +68,7 @@ def test_discover_over_loopback():
 def test_discover_times_out_when_silent():
     port = _free_udp_port()
     t0 = time.time()
-    url = discovery.discover_fixer(timeout=1.0, disc_port=port)
+    url = discovery.discover_coordinator(timeout=1.0, disc_port=port)
     assert url is None
     assert time.time() - t0 < 5.0
 

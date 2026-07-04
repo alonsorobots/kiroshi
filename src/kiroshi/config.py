@@ -84,15 +84,15 @@ class HostConfig:
 
 @dataclass
 class MeshConfig:
-    fixer_host: str = "localhost"
-    fixer_port: int = DEFAULT_PORT
-    # All Coordinator TCP ports the mesh uses (persistent service + job Fixers).
+    coordinator_host: str = "localhost"
+    coordinator_port: int = DEFAULT_PORT
+    # All Coordinator TCP ports the mesh uses (persistent service + job Coordinators).
     # Drives `kiroshi firewall install` so opening one port never closes another.
-    # Defaults to [fixer_port] when [fixer].ports is absent.
-    fixer_ports: list = field(default_factory=list)
+    # Defaults to [coordinator_port] when [coordinator].ports is absent.
+    coordinator_ports: list = field(default_factory=list)
     # Fair-share leasing: cap each host's in-flight gigs at its live-worker slice
     # of the per-disk budget so no single fast poller hoards it. From
-    # [fixer].fair_share; off by default (behaves as plain work-stealing).
+    # [coordinator].fair_share; off by default (behaves as plain work-stealing).
     fair_share: bool = False
     read_root: Optional[str] = None
     write_root: Optional[str] = None
@@ -102,8 +102,8 @@ class MeshConfig:
     disks: list = field(default_factory=list)
 
     @property
-    def fixer_url(self) -> str:
-        return f"http://{self.fixer_host}:{self.fixer_port}"
+    def coordinator_url(self) -> str:
+        return f"http://{self.coordinator_host}:{self.coordinator_port}"
 
     def host(self, name: Optional[str] = None) -> HostConfig:
         """Resolve config for ``name`` (default: this machine), case-insensitive,
@@ -143,12 +143,14 @@ def load_config(path: Optional[str] = None) -> MeshConfig:
     if found and tomllib is not None:
         with open(found, "rb") as f:
             data = tomllib.load(f)
-        fixer = data.get("fixer", {})
-        cfg.fixer_host = fixer.get("host", cfg.fixer_host)
-        cfg.fixer_port = int(fixer.get("port", cfg.fixer_port))
-        if fixer.get("ports"):
-            cfg.fixer_ports = [int(p) for p in fixer["ports"]]
-        cfg.fair_share = bool(fixer.get("fair_share", cfg.fair_share))
+        # New section name [coordinator]; fall back to legacy [fixer] so
+        # pre-rename config files keep working.
+        coordinator = data.get("coordinator", data.get("fixer", {}))
+        cfg.coordinator_host = coordinator.get("host", cfg.coordinator_host)
+        cfg.coordinator_port = int(coordinator.get("port", cfg.coordinator_port))
+        if coordinator.get("ports"):
+            cfg.coordinator_ports = [int(p) for p in coordinator["ports"]]
+        cfg.fair_share = bool(coordinator.get("fair_share", cfg.fair_share))
         paths = data.get("paths", {})
         cfg.read_root = paths.get("read_root", cfg.read_root)
         cfg.write_root = paths.get("write_root", cfg.write_root)
@@ -189,17 +191,17 @@ def load_config(path: Optional[str] = None) -> MeshConfig:
     # Environment overrides (highest priority for connection + roots)
     # New names (KIROSHI_COORDINATOR_*) win; old names (KIROSHI_FIXER_*) are
     # kept as a fallback for one release so a stray service env doesn't break.
-    cfg.fixer_host = os.environ.get("KIROSHI_COORDINATOR_HOST",
-                                    os.environ.get("KIROSHI_FIXER_HOST", cfg.fixer_host))
-    cfg.fixer_port = int(os.environ.get("KIROSHI_COORDINATOR_PORT",
-                                        os.environ.get("KIROSHI_FIXER_PORT", cfg.fixer_port)) or cfg.fixer_port)
+    cfg.coordinator_host = os.environ.get("KIROSHI_COORDINATOR_HOST",
+                                    os.environ.get("KIROSHI_FIXER_HOST", cfg.coordinator_host))
+    cfg.coordinator_port = int(os.environ.get("KIROSHI_COORDINATOR_PORT",
+                                        os.environ.get("KIROSHI_FIXER_PORT", cfg.coordinator_port)) or cfg.coordinator_port)
     cfg.read_root = os.environ.get("KIROSHI_READ_ROOT", cfg.read_root)
     cfg.write_root = os.environ.get("KIROSHI_WRITE_ROOT", cfg.write_root)
 
-    # Normalize the fixer-port set: default to [fixer_port], and always include
-    # fixer_port (so an env override of the port is covered by firewall rules).
-    if not cfg.fixer_ports:
-        cfg.fixer_ports = [cfg.fixer_port]
-    elif cfg.fixer_port not in cfg.fixer_ports:
-        cfg.fixer_ports = [cfg.fixer_port, *cfg.fixer_ports]
+    # Normalize the coordinator-port set: default to [coordinator_port], and always include
+    # coordinator_port (so an env override of the port is covered by firewall rules).
+    if not cfg.coordinator_ports:
+        cfg.coordinator_ports = [cfg.coordinator_port]
+    elif cfg.coordinator_port not in cfg.coordinator_ports:
+        cfg.coordinator_ports = [cfg.coordinator_port, *cfg.coordinator_ports]
     return cfg

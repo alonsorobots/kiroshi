@@ -23,7 +23,7 @@ semantics. This module deliberately has two halves:
   * PURE core (``item_key``, ``resolve_each``, ``quorum_met``, ``render_spec``)
     — no I/O, unit-tested in tests/test_pipeline.py.
   * a thin HTTP/loop shell (``PipelineCoordinator``) that talks to one or
-    more Fixers over the existing ``/metrics/export`` + ``/seed`` endpoints.
+    more Coordinators over the existing ``/metrics/export`` + ``/seed`` endpoints.
 
 Why many stages instead of one fused job? Because (1) every stage output is a
 persisted deliverable, (2) stages have different resource profiles the mesh
@@ -138,7 +138,7 @@ def build_gigs(stems: list[str], subjob_id_template: str, spec_template: dict[st
 @dataclass
 class Stage:
     name: str
-    fixer: str                              # base URL of the Coordinator hosting this stage
+    coordinator: str                              # base URL of the Coordinator hosting this stage
     job: str                              # job job slug on that Coordinator
     task: Optional[str] = None              # task ident (informational; runners bind it)
     label: str = ""
@@ -167,7 +167,7 @@ class Pipeline:
         for name, s in (doc.get("stages") or {}).items():
             stages[name] = Stage(
                 name=name,
-                fixer=s["fixer"],
+                coordinator=s["coordinator"],
                 job=s["job"],
                 task=s.get("task"),
                 label=s.get("label", ""),
@@ -192,7 +192,7 @@ class Pipeline:
 # --------------------------------------------------------------------------
 
 class PipelineCoordinator:
-    """Applies the declared edges each tick. HTTP-only against Fixers; the
+    """Applies the declared edges each tick. HTTP-only against Coordinators; the
     barrier ``command`` runs locally (e.g. an ssh to a build host)."""
 
     def __init__(self, pipe: Pipeline, log: Callable[[str], None] = print,
@@ -221,27 +221,27 @@ class PipelineCoordinator:
 
     # -- HTTP helpers --
     def _done_keys(self, stage: Stage) -> set[str]:
-        url = (f"{stage.fixer}/metrics/export?job={stage.job}"
+        url = (f"{stage.coordinator}/metrics/export?job={stage.job}"
                f"&state=done&limit=300000&token={self.pipe.token}")
         rows = self._get(url).get("rows", [])
         return {item_key(r["subjob_id"]) for r in rows}
 
     def _have_keys(self, stage: Stage) -> set[str]:
         # everything already seeded downstream, any state
-        url = (f"{stage.fixer}/metrics/export?job={stage.job}"
+        url = (f"{stage.coordinator}/metrics/export?job={stage.job}"
                f"&state=pending,leased,done,failed&limit=300000&token={self.pipe.token}")
         rows = self._get(url).get("rows", [])
         return {item_key(r["subjob_id"]) for r in rows}
 
     def _done_count(self, stage: Stage) -> int:
-        url = f"{stage.fixer}/status?token={self.pipe.token}&job={stage.job}"
+        url = f"{stage.coordinator}/status?token={self.pipe.token}&job={stage.job}"
         try:
             return int(self._get(url).get("done", 0))
         except Exception:
             return len(self._done_keys(stage))
 
     def _seed(self, stage: Stage, gigs: list[dict]) -> None:
-        url = f"{stage.fixer}/seed?token={self.pipe.token}"
+        url = f"{stage.coordinator}/seed?token={self.pipe.token}"
         BATCH = 1000
         for i in range(0, len(gigs), BATCH):
             self._post(url, {"gigs": gigs[i:i+BATCH],
@@ -293,7 +293,7 @@ class PipelineCoordinator:
         up_total = 0
         if edge.kind == "all":
             try:
-                url = f"{up.fixer}/status?token={self.pipe.token}&job={up.job}"
+                url = f"{up.coordinator}/status?token={self.pipe.token}&job={up.job}"
                 up_total = int(self._get(url).get("total", 0))
             except Exception:
                 up_total = 0

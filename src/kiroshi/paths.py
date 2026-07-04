@@ -52,6 +52,12 @@ def gig_write_root(spec: dict[str, Any]) -> Optional[str]:
     return spec.get("write_root") or os.environ.get("KIROSHI_WRITE_ROOT")
 
 
+# Preferred names in the operator vocabulary; the ``gig_*`` originals are the
+# frozen legacy aliases (task modules may call either).
+subjob_read_root = gig_read_root
+subjob_write_root = gig_write_root
+
+
 def confined_join(root: str, rel: str) -> str:
     """Join a sub-job-supplied relative path under ``root`` using PURE path arithmetic
     (no ``resolve()``/realpath — the root may be an SMB UNC we deliberately never

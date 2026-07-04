@@ -80,11 +80,11 @@ def _broadcast_addrs() -> list[str]:
     return sorted(addrs)
 
 
-def encode_beacon(fixer_port: int, fp: str = "") -> bytes:
+def encode_beacon(coordinator_port: int, fp: str = "") -> bytes:
     """Encode a discovery beacon. ``fp`` is a short non-secret, non-identifying
-    fingerprint (NOT the hostname) so multiple fixers can be told apart."""
+    fingerprint (NOT the hostname) so multiple coordinators can be told apart."""
     return json.dumps(
-        {"svc": _MAGIC, "port": int(fixer_port), "fp": fp, "ts": time.time()}
+        {"svc": _MAGIC, "port": int(coordinator_port), "fp": fp, "ts": time.time()}
     ).encode("utf-8")
 
 
@@ -109,10 +109,10 @@ class BeaconBroadcaster:
     as a fallback for flat networks.
     """
 
-    def __init__(self, fixer_port: int, fp: Optional[str] = None,
+    def __init__(self, coordinator_port: int, fp: Optional[str] = None,
                  interval: float = 3.0, disc_port: Optional[int] = None,
                  passive: Optional[bool] = None):
-        self.fixer_port = fixer_port
+        self.coordinator_port = coordinator_port
         # Non-identifying fingerprint (random per process), never the hostname.
         self.fp = fp if fp is not None else secrets.token_hex(3)
         self.interval = interval
@@ -150,7 +150,7 @@ class BeaconBroadcaster:
                 try:
                     data, sender = sock.recvfrom(2048)
                     if data.strip() == _QUERY:
-                        sock.sendto(encode_beacon(self.fixer_port, self.fp), sender)
+                        sock.sendto(encode_beacon(self.coordinator_port, self.fp), sender)
                 except socket.timeout:
                     pass
                 except OSError:
@@ -159,7 +159,7 @@ class BeaconBroadcaster:
                 if self.passive:
                     now = time.time()
                     if now - last_bcast >= self.interval:
-                        payload = encode_beacon(self.fixer_port, self.fp)
+                        payload = encode_beacon(self.coordinator_port, self.fp)
                         for addr in _broadcast_addrs():
                             try:
                                 sock.sendto(payload, (addr, self.disc_port))
@@ -176,7 +176,7 @@ class BeaconBroadcaster:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         try:
             while not self._stop.is_set():
-                payload = encode_beacon(self.fixer_port, self.fp)
+                payload = encode_beacon(self.coordinator_port, self.fp)
                 for addr in _broadcast_addrs():
                     try:
                         sock.sendto(payload, (addr, self.disc_port))
@@ -187,27 +187,27 @@ class BeaconBroadcaster:
             sock.close()
 
 
-def check_singleton_fixer(
+def check_singleton_coordinator(
     timeout: float = 3.0,
     disc_port: Optional[int] = None,
 ) -> Optional[str]:
     """Split-brain guard: is another discoverable Coordinator already on this LAN?
 
     Called during Coordinator startup (before we bind our own beacon) to detect the
-    common footgun of accidentally starting two Fixers on the same LAN — e.g.
+    common footgun of accidentally starting two Coordinators on the same LAN — e.g.
     running ``kiroshi run --lan`` on a workstation while the persistent
-    ``kiroshi-fixer`` service is up on the coordinator host. Two Fixers means
+    ``kiroshi-fixer`` service is up on the coordinator host. Two Coordinators means
     two disjoint queues + two disjoint per-spindle disk budgets, so each
     happily saturates the shared NAS assuming the other doesn't exist.
 
     Returns the reachable existing-Coordinator URL if one is discoverable, else
     ``None`` (safe to proceed). Uses the same solicited-reply mechanism as
-    :func:`discover_fixer` so anything the runners would see, we see.
+    :func:`discover_coordinator` so anything the runners would see, we see.
     """
-    return discover_fixer(timeout=timeout, disc_port=disc_port)
+    return discover_coordinator(timeout=timeout, disc_port=disc_port)
 
 
-def discover_fixer(
+def discover_coordinator(
     timeout: float = 5.0,
     disc_port: Optional[int] = None,
 ) -> Optional[str]:

@@ -2,7 +2,7 @@
 
 Covers the pure pieces (pass-through arg parsing, glob enumeration, slug) and the
 enumeration-contract resolver, plus the seed-count fix (campaign label row must
-not inflate the inserted count). The full in-process Fixer+Runner orchestration is
+not inflate the inserted count). The full in-process Coordinator+Runner orchestration is
 exercised by the end-to-end smoke run, not here.
 """
 from __future__ import annotations

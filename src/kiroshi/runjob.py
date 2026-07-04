@@ -180,24 +180,24 @@ def run_job(
     gc_between_tasks: bool = False,
     launch_command: str = "",
     origin: Optional[dict[str, Any]] = None,
-    force_second_fixer: bool = False,
+    force_second_coordinator: bool = False,
 ) -> int:
     import uvicorn
 
     from . import security
     from .config import current_host
     from .coordinator import create_app
-    from .discovery import BeaconBroadcaster, check_singleton_fixer
+    from .discovery import BeaconBroadcaster, check_singleton_coordinator
     from .jobstore import JobStore
     from .tasks import module_of, resolve_enumerator, resolve_task
     from .worker import Runner
 
     # Split-brain guard for `kiroshi run --lan`: refuse to broadcast a second
-    # discoverable Coordinator on a LAN that already has one. See cli._cmd_fixer for
-    # the same guard on `kiroshi fixer`. When --lan is off we bind loopback and
+    # discoverable Coordinator on a LAN that already has one. See cli._cmd_coordinator for
+    # the same guard on `kiroshi coordinator`. When --lan is off we bind loopback and
     # don't beacon, so this check is skipped (no cross-host contention possible).
-    if lan and not force_second_fixer:
-        other = check_singleton_fixer(timeout=3.0)
+    if lan and not force_second_coordinator:
+        other = check_singleton_coordinator(timeout=3.0)
         if other:
             print(f"[run] REFUSING --lan: another Coordinator is already "
                   f"discoverable at {other}.\n"
@@ -293,7 +293,7 @@ def run_job(
     # "reports NO auth but this runner has a token").
     host = "0.0.0.0" if lan else "127.0.0.1"
     if lan:
-        token = security.ensure_fixer_token(token)
+        token = security.ensure_coordinator_token(token)
     else:
         token = security.resolve_token(token)
 
@@ -322,7 +322,7 @@ def run_job(
                   flush=True)
 
     # A4: --force-second-fixer now requires KIROSHI_ALLOW_SECOND_COORDINATOR=1
-    if force_second_fixer:
+    if force_second_coordinator:
         if os.environ.get("KIROSHI_ALLOW_SECOND_COORDINATOR") != "1":
             print(
                 "[run] REFUSING: --force-second-fixer now requires the "
@@ -339,7 +339,7 @@ def run_job(
 
     coord_lock = acquire_or_refuse(
         info={"port": port, "db": db, "host": host},
-        allow_override=force_second_fixer,
+        allow_override=force_second_coordinator,
     )
     if coord_lock is None:
         return 3
@@ -366,10 +366,10 @@ def run_job(
             break
         time.sleep(0.05)
 
-    beacon = BeaconBroadcaster(fixer_port=port).start() if lan else None
+    beacon = BeaconBroadcaster(coordinator_port=port).start() if lan else None
 
     runner = Runner(
-        fixer_url=f"http://127.0.0.1:{port}",
+        coordinator_url=f"http://127.0.0.1:{port}",
         task_ref=task_ref,
         workers=workers,
         capacity=capacity,

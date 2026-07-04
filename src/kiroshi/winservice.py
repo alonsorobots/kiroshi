@@ -1,6 +1,6 @@
 """Windows service install/uninstall via NSSM — the persistence layer (M4).
 
-Mirrors the at-field pattern: wrap ``kiroshi fixer`` / ``kiroshi runner`` as
+Mirrors the at-field pattern: wrap ``kiroshi coordinator`` / ``kiroshi runner`` as
 auto-starting Windows services with rotating stdout/stderr logs and crash
 auto-restart, so the mesh survives reboots and runs unattended.
 

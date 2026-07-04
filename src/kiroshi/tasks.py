@@ -30,7 +30,10 @@ TaskFn = Callable[[Dict[str, Any]], Dict[str, Any]]
 # ``/seed`` and :meth:`JobStore.seed` accept. This lets a task own its own
 # fan-out (e.g. one source read -> a 4-fps and an 8-fps sub-job) which a generic
 # ``--items`` globber can't infer.
-ENUMERATE_FN = "enumerate_gigs"
+# Primary hook name is ``enumerate_subjobs``; ``enumerate_gigs`` is the frozen
+# legacy alias so pre-rename task modules keep resolving.
+ENUMERATE_FN = "enumerate_subjobs"
+ENUMERATE_FN_ALIASES = ("enumerate_subjobs", "enumerate_gigs")
 EnumerateFn = Callable[[Dict[str, Any]], Iterator[Dict[str, Any]]]
 
 # The self-test contract. A task module MAY define a module-level
@@ -73,10 +76,11 @@ def resolve_enumerator(ref: str) -> Optional[EnumerateFn]:
     same module.
     """
     module = importlib.import_module(module_of(ref))
-    fn = getattr(module, ENUMERATE_FN, None)
-    if fn is None or not callable(fn):
-        return None
-    return fn  # type: ignore[return-value]
+    for name in ENUMERATE_FN_ALIASES:
+        fn = getattr(module, name, None)
+        if fn is not None and callable(fn):
+            return fn  # type: ignore[return-value]
+    return None
 
 
 def resolve_selftest(ref: str) -> Optional[SelfTestFn]:

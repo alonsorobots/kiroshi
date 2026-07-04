@@ -6,7 +6,7 @@ on the same box (even on different ports) means two disjoint budgets that each
 happily saturate the shared NAS — the exact footgun that caused production
 incidents.
 
-The existing LAN split-brain guard (``discovery.check_singleton_fixer``) only
+The existing LAN split-brain guard (``discovery.check_singleton_coordinator``) only
 fires when beaconing AND binding public — ``--no-beacon`` or loopback bypasses
 it entirely. This module adds a **beacon-independent, machine-level OS lock**
 that catches the same-box case regardless of network configuration.

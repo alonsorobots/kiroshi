@@ -1,4 +1,4 @@
-"""Adaptive lease TTL: the Fixer sizes a lease as a safe multiple of the Runner's
+"""Adaptive lease TTL: the Coordinator sizes a lease as a safe multiple of the Runner's
 heartbeat cadence, so a slow-but-alive Runner isn't reaped and handed the same gig
 twice (at-least-once duplication — the cause of the rare "file in use" write race).
 """

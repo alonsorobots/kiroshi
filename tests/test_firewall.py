@@ -156,11 +156,11 @@ def test_pick_lan_subnet_falls_back_to_virtual_range_if_no_real_lan():
 # ------------------------------------------------ enumeration + apply
 def test_list_kiroshi_rules_filters_by_prefix_and_dedups():
     fake = _FakeNetsh(initial_rules=[
-        "Kiroshi Fixer HTTP", "Kiroshi Discovery UDP", "Something Else",
-        "Kiroshi Fixer HTTP",  # dedupped
+        "Kiroshi Coordinator HTTP", "Kiroshi Discovery UDP", "Something Else",
+        "Kiroshi Coordinator HTTP",  # dedupped
     ])
     names = fw.list_kiroshi_rules(runner=fake)
-    assert names == ["Kiroshi Discovery UDP", "Kiroshi Fixer HTTP"]
+    assert names == ["Kiroshi Coordinator HTTP", "Kiroshi Discovery UDP"]
 
 
 def test_apply_rules_creates_desired_rules_when_none_exist():
@@ -176,11 +176,11 @@ def test_apply_rules_creates_desired_rules_when_none_exist():
 
 
 def test_apply_rules_removes_stale_kiroshi_rules_not_in_desired_set():
-    fake = _FakeNetsh(initial_rules=["Kiroshi Fixer 8800", "Kiroshi Old Beacon"])
+    fake = _FakeNetsh(initial_rules=["Kiroshi Coordinator 8800", "Kiroshi Old Beacon"])
     rules = fw.plan_rules(8787, 8788, remote_ip="any")
     res = fw.apply_rules(rules, runner=fake)
     assert res.ok
-    assert set(res.removed) == {"Kiroshi Fixer 8800", "Kiroshi Old Beacon"}
+    assert set(res.removed) == {"Kiroshi Coordinator 8800", "Kiroshi Old Beacon"}
     assert set(res.added) == {fw.FIXER_RULE_NAME, fw.DISCOVERY_RULE_NAME}
 
 
@@ -189,28 +189,28 @@ def test_apply_rules_re_creates_existing_rules_to_pick_up_config_changes():
     rules = fw.plan_rules(9999, 8788, remote_ip="10.0.0.0/24")
     res = fw.apply_rules(rules, runner=fake)
     assert res.ok
-    # existing rules were deleted then re-added; final call for the fixer add
+    # existing rules were deleted then re-added; final call for the coordinator add
     # must carry the new port + subnet.
     add_calls = [c for c in fake.calls if len(c) >= 4 and c[3] == "add"]
-    fixer_add = next(
+    coordinator_add = next(
         c for c in add_calls
         if any(a == f"name={fw.FIXER_RULE_NAME}" for a in c)
     )
-    assert "localport=9999" in " ".join(fixer_add)
-    assert "remoteip=10.0.0.0/24" in " ".join(fixer_add)
+    assert "localport=9999" in " ".join(coordinator_add)
+    assert "remoteip=10.0.0.0/24" in " ".join(coordinator_add)
 
 
 def test_apply_rules_dry_run_makes_no_changes():
-    fake = _FakeNetsh(initial_rules=["Kiroshi Fixer 8800"])
+    fake = _FakeNetsh(initial_rules=["Kiroshi Coordinator 8800"])
     rules = fw.plan_rules(8787, 8788, remote_ip="any")
     res = fw.apply_rules(rules, runner=fake, dry_run=True)
     assert res.ok
-    assert res.removed == ["Kiroshi Fixer 8800"]
+    assert res.removed == ["Kiroshi Coordinator 8800"]
     assert set(res.added) == {fw.FIXER_RULE_NAME, fw.DISCOVERY_RULE_NAME}
     # Only the initial `show` call should have hit netsh in dry-run.
     ops = [c[3] for c in fake.calls if len(c) >= 4]
     assert ops == ["show"]
-    assert fake.rules == {"Kiroshi Fixer 8800"}
+    assert fake.rules == {"Kiroshi Coordinator 8800"}
 
 
 def test_apply_rules_reports_errors_on_failed_add():
@@ -224,11 +224,11 @@ def test_apply_rules_reports_errors_on_failed_add():
 
 def test_format_status_flags_missing_and_stale_rules():
     rules = fw.plan_rules(8787, 8788, remote_ip="192.168.1.0/24")
-    existing = [fw.FIXER_RULE_NAME, "Kiroshi Fixer 8800"]  # missing UDP, has stale
+    existing = [fw.FIXER_RULE_NAME, "Kiroshi Coordinator 8800"]  # missing UDP, has stale
     out = fw.format_status(rules, existing)
     assert "OK " in out and fw.FIXER_RULE_NAME in out
     assert "-- " in out and fw.DISCOVERY_RULE_NAME in out
-    assert "Kiroshi Fixer 8800" in out and "stale" in out
+    assert "Kiroshi Coordinator 8800" in out and "stale" in out
 
 
 def test_elevated_install_hint_includes_action_and_powershell():

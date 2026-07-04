@@ -80,7 +80,7 @@ def resolve_token(explicit: Optional[str] = None) -> Optional[str]:
     return _read_token_file()
 
 
-def ensure_fixer_token(explicit: Optional[str] = None,
+def ensure_coordinator_token(explicit: Optional[str] = None,
                        allow_insecure: bool = False) -> Optional[str]:
     """Resolve the token for the Coordinator, auto-generating + persisting if absent.
 

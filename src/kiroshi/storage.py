@@ -83,7 +83,7 @@ def disk_concurrency_map(disks: list[DiskConfig]) -> dict[str, int]:
 def validate_disks(disks: list[DiskConfig]) -> list[str]:
     """Return human-readable warnings for likely-misconfigured disk topologies.
 
-    Called at fixer boot (non-fatal) so a misconfiguration surfaces at startup
+    Called at coordinator boot (non-fatal) so a misconfiguration surfaces at startup
     instead of as 129k cryptic runtime ``KIROSHI_READ_ROOT is not set`` errors.
 
     The key case: a disk with ``match=""`` routes NOTHING (``match_disk`` returns

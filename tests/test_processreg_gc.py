@@ -38,7 +38,7 @@ def _write(reg: Path, *, role: str, pid: int, host: str,
 def test_live_local_process_is_included_and_marked_alive(reg_dir: Path,
                                                           monkeypatch: pytest.MonkeyPatch):
     my_pid = os.getpid()
-    _write(reg_dir, role="fixer", pid=my_pid, host=socket.gethostname())
+    _write(reg_dir, role="coordinator", pid=my_pid, host=socket.gethostname())
     monkeypatch.setattr(pr, "_pid_alive", lambda pid: pid == my_pid)
     got = pr.list_registered()
     assert len(got) == 1
@@ -48,7 +48,7 @@ def test_live_local_process_is_included_and_marked_alive(reg_dir: Path,
 
 def test_dead_local_pid_is_filtered_out_by_default(reg_dir: Path,
                                                     monkeypatch: pytest.MonkeyPatch):
-    _write(reg_dir, role="fixer", pid=99999,
+    _write(reg_dir, role="coordinator", pid=99999,
            host=socket.gethostname(),
            updated_at=time.time())  # fresh - no GC yet
     monkeypatch.setattr(pr, "_pid_alive", lambda pid: False)
@@ -57,7 +57,7 @@ def test_dead_local_pid_is_filtered_out_by_default(reg_dir: Path,
 
 def test_include_stale_returns_dead_entries(reg_dir: Path,
                                              monkeypatch: pytest.MonkeyPatch):
-    _write(reg_dir, role="fixer", pid=99999, host=socket.gethostname())
+    _write(reg_dir, role="coordinator", pid=99999, host=socket.gethostname())
     monkeypatch.setattr(pr, "_pid_alive", lambda pid: False)
     got = pr.list_registered(include_stale=True, gc=False)
     assert len(got) == 1

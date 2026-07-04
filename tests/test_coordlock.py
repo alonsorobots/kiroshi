@@ -2,7 +2,7 @@
 
 This lock prevents two coordinators on the same machine regardless of beacon
 or port — the core singleton invariant. The existing LAN-guard test
-(test_singleton_fixer.py) covers the discovery-based guard; this covers the
+(test_singleton_coordinator.py) covers the discovery-based guard; this covers the
 OS-lock that catches the --no-beacon / loopback bypass.
 
 Tests use a temp KIROSHI_STATE_DIR so they never touch the real ProgramData.
@@ -174,10 +174,10 @@ def test_acquire_or_refuse_override_skips_lock(tmp_state):
     holder.release()
 
 
-def test_force_second_fixer_without_env_is_refused(tmp_state):
+def test_force_second_coordinator_without_env_is_refused(tmp_state):
     """A4: --force-second-fixer without KIROSHI_ALLOW_SECOND_COORDINATOR=1
     should be refused. Test the env check logic directly."""
-    # This tests the guard logic in _cmd_fixer; we can't easily run the full
+    # This tests the guard logic in _cmd_coordinator; we can't easily run the full
     # CLI handler, but we can verify the env-check contract.
     monkeypatch_env = os.environ.copy()
     os.environ.pop("KIROSHI_ALLOW_SECOND_COORDINATOR", None)

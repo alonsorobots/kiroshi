@@ -19,17 +19,17 @@ from typing import Any, Optional
 import requests
 
 from . import security
-from .discovery import discover_fixer
+from .discovery import discover_coordinator
 from .pool import LocalPool
 
 # Sentinel values (any of these, or an empty url) trigger zero-config discovery.
 _AUTO = {"auto", "discover", "", "auto://", "http://auto"}
 
 
-def verify_fixer(url: str, token: Optional[str], timeout: float = 30.0) -> bool:
+def verify_coordinator(url: str, token: Optional[str], timeout: float = 30.0) -> bool:
     """Authenticate the *Coordinator* via the HMAC challenge before trusting it.
 
-    Standalone form of :meth:`Runner._verify_fixer` so ``kiroshi join`` can verify
+    Standalone form of :meth:`Runner._verify_coordinator` so ``kiroshi join`` can verify
     a Coordinator *before* sending the token or fetching task code. Sends a random nonce
     with NO Authorization header; only a Coordinator holding the mesh token can return
     ``HMAC(token, nonce)``. With no token, trusts only a Coordinator that declares
@@ -53,7 +53,7 @@ def verify_fixer(url: str, token: Optional[str], timeout: float = 30.0) -> bool:
 class Runner:
     def __init__(
         self,
-        fixer_url: str,
+        coordinator_url: str,
         task_ref: str,
         workers: int = 0,
         capacity: int = 100,
@@ -78,8 +78,8 @@ class Runner:
         # in-process `kiroshi run` can render a clean progress bar. Errors and
         # security warnings are always printed.
         self.quiet = quiet
-        self._auto = (fixer_url or "").strip().lower() in _AUTO
-        self.fixer_url = "" if self._auto else fixer_url.rstrip("/")
+        self._auto = (coordinator_url or "").strip().lower() in _AUTO
+        self.coordinator_url = "" if self._auto else coordinator_url.rstrip("/")
         self.token = token if token is not None else security.resolve_token()
         self.launch_command = launch_command
         self._registered = False
@@ -109,8 +109,8 @@ class Runner:
         self.extra_syspath = sp
 
     # --------------------------------------------------------- discovery
-    def _resolve_fixer(self, *, blocking: bool = True) -> Optional[str]:
-        """Ensure ``self.fixer_url`` points at a live Coordinator.
+    def _resolve_coordinator(self, *, blocking: bool = True) -> Optional[str]:
+        """Ensure ``self.coordinator_url`` points at a live Coordinator.
 
         In auto mode this listens for a discovery beacon; with a fixed URL it's a
         no-op. When ``blocking`` it retries (with backoff) until a Coordinator appears
@@ -118,20 +118,20 @@ class Runner:
         Coordinator, or survive the Coordinator moving to a new IP.
         """
         if not self._auto:
-            return self.fixer_url
+            return self.coordinator_url
         backoff = 1.0
         while not self._draining:
-            url = discover_fixer(timeout=self.discover_timeout)
+            url = discover_coordinator(timeout=self.discover_timeout)
             if url:
-                if url != self.fixer_url:
-                    print(f"[runner] discovered fixer at {url}", flush=True)
-                self.fixer_url = url
+                if url != self.coordinator_url:
+                    print(f"[runner] discovered coordinator at {url}", flush=True)
+                self.coordinator_url = url
                 self._fails = 0
                 return url
             if not blocking:
                 return None
             print(
-                f"[runner] no fixer beacon yet; retrying in {backoff:.0f}s "
+                f"[runner] no coordinator beacon yet; retrying in {backoff:.0f}s "
                 f"(is the Coordinator running?)",
                 flush=True,
             )
@@ -140,7 +140,7 @@ class Runner:
         return None
 
     # ------------------------------------------------------- mutual auth
-    def _verify_fixer(self, url: str) -> bool:
+    def _verify_coordinator(self, url: str) -> bool:
         """Authenticate the *Coordinator* before trusting it. The Runner sends a random
         nonce (with NO Authorization header) and requires the Coordinator to return
         HMAC(token, nonce); only a Coordinator holding the same mesh token can. This
@@ -175,12 +175,12 @@ class Runner:
     def _trusted(self) -> bool:
         """True iff the current Coordinator URL has passed (and still passes) the auth
         challenge. Caches the last verified URL so we challenge once per connect."""
-        if not self.fixer_url:
+        if not self.coordinator_url:
             return False
-        if self._verified_url == self.fixer_url:
+        if self._verified_url == self.coordinator_url:
             return True
-        if self._verify_fixer(self.fixer_url):
-            self._verified_url = self.fixer_url
+        if self._verify_coordinator(self.coordinator_url):
+            self._verified_url = self.coordinator_url
             return True
         self._verified_url = None
         return False
@@ -190,9 +190,9 @@ class Runner:
         return {"Authorization": f"Bearer {self.token}"} if self.token else {}
 
     def _post(self, path: str, payload: dict[str, Any]) -> Optional[dict[str, Any]]:
-        if not self.fixer_url:
-            self._resolve_fixer()
-        url = f"{self.fixer_url}{path}"
+        if not self.coordinator_url:
+            self._resolve_coordinator()
+        url = f"{self.coordinator_url}{path}"
         for attempt in range(3):
             try:
                 r = requests.post(url, json=payload, timeout=self.http_timeout,
@@ -212,11 +212,11 @@ class Runner:
         """After repeated failures, assume the Coordinator moved and re-discover."""
         self._fails += 1
         if self._auto and self._fails >= self.rediscover_after:
-            print("[runner] lost contact with fixer; re-discovering...", flush=True)
-            self.fixer_url = ""
+            print("[runner] lost contact with coordinator; re-discovering...", flush=True)
+            self.coordinator_url = ""
             self._registered = False
             self._verified_url = None
-            self._resolve_fixer(blocking=False)
+            self._resolve_coordinator(blocking=False)
 
     def _register(self) -> None:
         """Announce our launch command + identity so the Coordinator can surface it on
@@ -244,11 +244,11 @@ class Runner:
         # so spawned workers inherit the Job Object membership.
         from .proctree import bind_job_object
         bind_job_object()
-        self._resolve_fixer()  # block until a Coordinator is known (auto mode)
+        self._resolve_coordinator()  # block until a Coordinator is known (auto mode)
         if not self.quiet:
             print(
                 f"[runner] {self.runner_id} on {self.host}: {self.workers} workers, "
-                f"capacity {self.capacity}, task {self.task_ref}, fixer {self.fixer_url}",
+                f"capacity {self.capacity}, task {self.task_ref}, coordinator {self.coordinator_url}",
                 flush=True,
             )
         pool = LocalPool(
@@ -268,9 +268,9 @@ class Runner:
                 if not self._trusted():
                     time.sleep(self.poll_interval)
                     if self._auto:
-                        self.fixer_url = ""
+                        self.coordinator_url = ""
                         self._verified_url = None
-                        self._resolve_fixer(blocking=False)
+                        self._resolve_coordinator(blocking=False)
                     continue
                 if not self._registered:
                     self._register()
@@ -370,7 +370,7 @@ class Runner:
                     "launch_command": self.launch_command,
                     "task": self.task_ref,
                     "workers": self.workers,
-                    "fixer_url": self.fixer_url,
+                    "coordinator_url": self.coordinator_url,
                     "log_path": current_log_path(),
                 },
                 on_stop=_on_stop,

@@ -1,8 +1,8 @@
 """Tests for storage topology validation — catches misconfigured disk match rules
-at fixer boot instead of at runtime.
+at coordinator boot instead of at runtime.
 
 Key regression: a single-pool topology with ``match=""`` routes nothing (every
-gig gets ``disk=None``, fails with ``KIROSHI_READ_ROOT is not set``). The fixer
+gig gets ``disk=None``, fails with ``KIROSHI_READ_ROOT is not set``). The coordinator
 should warn at startup.
 """
 from __future__ import annotations

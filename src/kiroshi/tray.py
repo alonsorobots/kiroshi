@@ -27,7 +27,7 @@ from PIL import Image, ImageDraw
 
 from . import security
 from .appstate import logs_dir
-from .discovery import discover_fixer
+from .discovery import discover_coordinator
 
 _AUTO = {"auto", "discover", "", None}
 
@@ -116,14 +116,14 @@ class _TrayIcon(pystray.Icon):
 
     @_guard
     def __call__(self) -> None:
-        self._tray._ensure_fixer()
+        self._tray._ensure_coordinator()
         webbrowser.open(self._tray._url("/"))
 
 
 class Tray:
-    def __init__(self, fixer: Optional[str], token: Optional[str]):
-        self._fixer_arg = fixer
-        self.fixer_url = "" if (fixer or "").strip().lower() in _AUTO else fixer.rstrip("/")
+    def __init__(self, coordinator: Optional[str], token: Optional[str]):
+        self._coordinator_arg = coordinator
+        self.coordinator_url = "" if (coordinator or "").strip().lower() in _AUTO else coordinator.rstrip("/")
         self.token = token if token is not None else security.resolve_token()
         self._stop = threading.Event()
         self._status = "starting…"
@@ -135,9 +135,9 @@ class Tray:
         return {"Authorization": f"Bearer {self.token}"} if self.token else {}
 
     def _base(self) -> str:
-        # Prefer the resolved/discovered fixer; fall back to the conventional
+        # Prefer the resolved/discovered coordinator; fall back to the conventional
         # local default only as a last resort.
-        return self.fixer_url or "http://127.0.0.1:8787"
+        return self.coordinator_url or "http://127.0.0.1:8787"
 
     def _url(self, path: str) -> str:
         base = self._base()
@@ -149,15 +149,15 @@ class Tray:
     def _open(self, path: str):
         @_guard
         def _cb(icon, item):
-            self._ensure_fixer()
+            self._ensure_coordinator()
             webbrowser.open(self._url(path))
         return _cb
 
-    def _ensure_fixer(self) -> None:
-        if not self.fixer_url:
-            url = discover_fixer(timeout=4.0)
+    def _ensure_coordinator(self) -> None:
+        if not self.coordinator_url:
+            url = discover_coordinator(timeout=4.0)
             if url:
-                self.fixer_url = url
+                self.coordinator_url = url
 
     # ----------------------------------------------------------------- menu
     def _menu(self):
@@ -173,7 +173,7 @@ class Tray:
             Item("Copy mesh token", self._copy_token, enabled=bool(self.token)),
             pystray.Menu.SEPARATOR,
             Item("Stop local runners (drain)", self._stop_runners),
-            Item("Stop local fixer (drain)", self._stop_fixer),
+            Item("Stop local coordinator (drain)", self._stop_coordinator),
             pystray.Menu.SEPARATOR,
             Item("Quit tray", self._quit),
         )
@@ -217,14 +217,14 @@ class Tray:
         self._notify(f"asked {n} runner(s) to drain")
 
     @_guard
-    def _stop_fixer(self, icon, item):
+    def _stop_coordinator(self, icon, item):
         from .processreg import list_registered, request_stop
         n = 0
         for p in list_registered():
-            if p.get("role") == "fixer":
-                if request_stop("fixer", int(p.get("pid", 0))):
+            if p.get("role") == "coordinator":
+                if request_stop("coordinator", int(p.get("pid", 0))):
                     n += 1
-        self._notify(f"asked {n} fixer(s) to drain")
+        self._notify(f"asked {n} coordinator(s) to drain")
 
     def _notify(self, msg: str):
         try:
@@ -243,7 +243,7 @@ class Tray:
     # --------------------------------------------------------------- poller
     def _poll(self) -> None:
         while not self._stop.wait(2.0):
-            self._ensure_fixer()
+            self._ensure_coordinator()
             base = self._base()
             try:
                 r = requests.get(f"{base}/status", timeout=4,
@@ -280,10 +280,10 @@ class Tray:
                         self._status += "\n" + " ".join(parts)
                 else:
                     self._live = False
-                    self._status = f"fixer returned {r.status_code}"
+                    self._status = f"coordinator returned {r.status_code}"
             except requests.RequestException:
                 self._live = False
-                self._status = "fixer unreachable"
+                self._status = "coordinator unreachable"
             try:
                 self.icon.icon = _make_icon(_GREEN if self._live else _GREY)
                 self.icon.title = f"KIROSHI — {self._status}"
@@ -331,5 +331,5 @@ class Tray:
         return 0
 
 
-def run_tray(fixer: Optional[str] = None, token: Optional[str] = None) -> int:
-    return Tray(fixer, token).run()
+def run_tray(coordinator: Optional[str] = None, token: Optional[str] = None) -> int:
+    return Tray(coordinator, token).run()

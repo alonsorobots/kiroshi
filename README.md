@@ -185,7 +185,8 @@ workers = 12
 capacity = 200
 ```
 
-Env overrides: `KIROSHI_FIXER_HOST`, `KIROSHI_FIXER_PORT`, `KIROSHI_READ_ROOT`,
+Env overrides: `KIROSHI_COORDINATOR_HOST`, `KIROSHI_COORDINATOR_PORT` (legacy
+`KIROSHI_FIXER_HOST`/`KIROSHI_FIXER_PORT` still honored), `KIROSHI_READ_ROOT`,
 `KIROSHI_WRITE_ROOT`, `KIROSHI_CONFIG`. For a NAS over SMB, also set
 `KIROSHI_NAS_USER` / `KIROSHI_NAS_PASS` (see [NAS / shared storage](#nas--shared-storage-over-smb)).
 

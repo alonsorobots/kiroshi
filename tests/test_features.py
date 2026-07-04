@@ -42,14 +42,14 @@ def test_extract_presented_token_variants():
     assert security.extract_presented_token({}, None) is None
 
 
-def test_ensure_fixer_token_persists(isolated_state):
-    t1 = security.ensure_fixer_token()
+def test_ensure_coordinator_token_persists(isolated_state):
+    t1 = security.ensure_coordinator_token()
     assert t1 and len(t1) > 16
     # a fresh resolve reads it back from the token file
     assert security.resolve_token() == t1
     # allow_insecure with no token configured => None (wide-open dev mesh)
     os.unlink(security.token_path())
-    assert security.ensure_fixer_token(allow_insecure=True) is None
+    assert security.ensure_coordinator_token(allow_insecure=True) is None
 
 
 # --------------------------------------------------- coordinator auth + API
@@ -61,7 +61,7 @@ def client(isolated_state):
 
     db = str(isolated_state / "jobs.db")
     store = JobStore(db, max_retries=3)
-    app = create_app(store, token="T0KEN", launch_command="kiroshi fixer")
+    app = create_app(store, token="T0KEN", launch_command="kiroshi coordinator")
     with TestClient(app) as c:
         yield c
 

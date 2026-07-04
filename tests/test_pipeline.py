@@ -114,7 +114,7 @@ def test_quorum_edge_requires_k():
 # ---- Coordinator dispatch with fake I/O ---------------------------------
 
 class _FakeMesh:
-    """In-memory stand-in for Fixers: tracks done-sets + seeded gigs."""
+    """In-memory stand-in for Coordinators: tracks done-sets + seeded gigs."""
     def __init__(self, done):
         self.done = done                 # {job: set(subjob_id)}
         self.seeded: dict[str, list] = {}  # {job: [gigs]}
@@ -161,7 +161,7 @@ def test_coordinator_each_seeds_downstream_delta():
     seeded = {g["subjob_id"] for g in mesh.seeded["g_slerp"]}
     assert seeded == {"A.npz", "B.npz"}
     # second tick: nothing new (downstream now has both) -> no dup growth
-    # (simulate the fixer dedup by feeding seeded back as "have")
+    # (simulate the coordinator dedup by feeding seeded back as "have")
     coord.tick()
     assert len(mesh.seeded["g_slerp"]) == 2
 
