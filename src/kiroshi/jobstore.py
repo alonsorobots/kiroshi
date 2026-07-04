@@ -64,6 +64,7 @@ class JobStore:
             if needs_migration(self._conn):
                 migrate(self._conn)
 
+            # Create tables (IF NOT EXISTS = no-op if already present)
             self._conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS subjobs (
@@ -83,11 +84,6 @@ class JobStore:
                     metrics        TEXT,
                     created_at     REAL NOT NULL
                 );
-                CREATE INDEX IF NOT EXISTS idx_subjobs_state ON subjobs(state);
-                CREATE INDEX IF NOT EXISTS idx_subjobs_lease ON subjobs(lease_id);
-                CREATE INDEX IF NOT EXISTS idx_subjobs_completed ON subjobs(completed_at);
-                CREATE INDEX IF NOT EXISTS idx_subjobs_job ON subjobs(job);
-                CREATE INDEX IF NOT EXISTS idx_subjobs_disk ON subjobs(disk);
                 -- Job metadata: one human-readable label per job, so the dashboard
                 -- can show "Converting X 30fps -> 4,8 fps" instead of the raw slug.
                 CREATE TABLE IF NOT EXISTS jobs (
@@ -95,6 +91,25 @@ class JobStore:
                     label       TEXT,
                     created_at  REAL NOT NULL
                 );
+                """
+            )
+            # Column-level migration: if subjobs table existed without disk/job
+            # columns (from a pre-rename DB that was migrated by dbmigrate but
+            # didn't have these columns), add them transparently BEFORE creating
+            # indexes that reference them.
+            sj_cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(subjobs)")}
+            if "disk" not in sj_cols:
+                self._conn.execute("ALTER TABLE subjobs ADD COLUMN disk TEXT")
+            if "job" not in sj_cols:
+                self._conn.execute("ALTER TABLE subjobs ADD COLUMN job TEXT")
+            # Now create indexes (columns are guaranteed to exist)
+            self._conn.executescript(
+                """
+                CREATE INDEX IF NOT EXISTS idx_subjobs_state ON subjobs(state);
+                CREATE INDEX IF NOT EXISTS idx_subjobs_lease ON subjobs(lease_id);
+                CREATE INDEX IF NOT EXISTS idx_subjobs_completed ON subjobs(completed_at);
+                CREATE INDEX IF NOT EXISTS idx_subjobs_job ON subjobs(job);
+                CREATE INDEX IF NOT EXISTS idx_subjobs_disk ON subjobs(disk);
                 """
             )
             self._conn.commit()
@@ -129,9 +144,9 @@ class JobStore:
         rows = []
         for g in gigs:
             jid = g["subjob_id"]
-            job = g.get("job") or job or _job_of(jid)
+            gj = g.get("job") or job or _job_of(jid)
             disk = g.get("disk")
-            rows.append((jid, jsonio.dumps(g.get("spec", {})), job, disk, now))
+            rows.append((jid, jsonio.dumps(g.get("spec", {})), gj, disk, now))
         with self._lock:
             before = self._conn.total_changes
             self._conn.executemany(
@@ -143,10 +158,10 @@ class JobStore:
             # row doesn't inflate the reported "inserted" count.
             inserted = self._conn.total_changes - before
             if label:
-                lbl_grp = self._label_group(gigs, job)
+                lbl_grp = self._label_job(gigs, job)
                 if lbl_grp:
                     self._conn.execute(
-                        "INSERT INTO subjobs (job, label, created_at) VALUES (?, ?, ?) "
+                        "INSERT INTO jobs (job, label, created_at) VALUES (?, ?, ?) "
                         "ON CONFLICT(job) DO UPDATE SET label=excluded.label",
                         (lbl_grp, label, now),
                     )
@@ -154,7 +169,7 @@ class JobStore:
             return inserted
 
     @staticmethod
-    def _label_group(gigs: list[dict[str, Any]],
+    def _label_job(gigs: list[dict[str, Any]],
                      job: Optional[str]) -> Optional[str]:
         """The job slug a batch-wide ``label`` should attach to.
 

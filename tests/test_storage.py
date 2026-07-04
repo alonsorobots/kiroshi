@@ -74,11 +74,11 @@ def test_disk_column_migrates_on_old_db(tmp_path):
     # A DB from before the `disk` column: every column the schema had EXCEPT disk.
     c = sqlite3.connect(str(db))
     c.execute(
-        "CREATE TABLE jobs (subjob_id TEXT PRIMARY KEY, spec TEXT, state TEXT, "
+        "CREATE TABLE subjobs (subjob_id TEXT PRIMARY KEY, spec TEXT, state TEXT, "
         "lease_id TEXT, runner_id TEXT, host TEXT, attempts INTEGER, "
         "leased_at REAL, lease_deadline REAL, completed_at REAL, error TEXT, "
         "metrics TEXT, created_at REAL, job TEXT)")
-    c.execute("INSERT INTO jobs (subjob_id,spec,state,created_at,job) "
+    c.execute("INSERT INTO subjobs (subjob_id,spec,state,created_at,job) "
               "VALUES ('x','{}','pending',1,'g')")
     c.commit()
     c.close()
@@ -170,8 +170,8 @@ def test_coordinator_seed_derives_disk(tmp_path):
         {"subjob_id": "shard_03/a", "spec": {"src_path": "shard_03/a.npz"}},
         {"subjob_id": "shard_12/b", "spec": {}},
     ]})
-    g3 = c.get("/job/shard_03/a", headers=H).json()
-    g12 = c.get("/job/shard_12/b", headers=H).json()
+    g3 = c.get("/subjob/shard_03/a", headers=H).json()
+    g12 = c.get("/subjob/shard_12/b", headers=H).json()
     assert g3["disk"] == "d1"
     assert g12["disk"] == "d2"
 

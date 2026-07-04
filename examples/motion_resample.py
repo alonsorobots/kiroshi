@@ -227,7 +227,7 @@ def _walk_matches(root: str, pattern: str) -> list[str]:
 
     We support the common ``**/<fileglob>`` form (match the filename at any
     depth) and otherwise match the root-relative POSIX path. Results are sorted
-    so ``job_id``s are deterministic and re-seeding stays idempotent.
+    so ``subjob_id``s are deterministic and re-seeding stays idempotent.
     """
     if pattern.startswith("**/"):
         filepat = pattern[3:]
@@ -297,7 +297,7 @@ def enumerate_gigs(args: dict[str, Any]) -> Iterator[dict[str, Any]]:
             {"target_fps": fps, "dst_path": f"{out_tmpl.format(fps=fps)}/{rel}"}
             for fps in fps_list
         ]
-        gig: dict[str, Any] = {"job_id": rel, "spec": {"src_path": rel, "targets": targets}}
+        gig: dict[str, Any] = {"subjob_id": rel, "spec": {"src_path": rel, "targets": targets}}
         if group:
             gig["group"] = group
         yield gig

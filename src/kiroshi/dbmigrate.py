@@ -50,8 +50,17 @@ def migrate(conn: sqlite3.Connection) -> bool:
     if not needs_migration(conn):
         return False
 
+    # Detect which columns exist in the old jobs table (some pre-disk DBs
+    # don't have the 'disk' column; some pre-grp DBs don't have 'grp').
+    old_cols = {r[1] for r in conn.execute("PRAGMA table_info(jobs)")}
+    has_disk = "disk" in old_cols
+    has_grp = "grp" in old_cols
+
     # Step 1: create subjobs from old jobs (BEFORE reusing the 'jobs' name)
-    conn.executescript("""
+    # Build the SELECT dynamically based on available columns.
+    disk_expr = "disk" if has_disk else "NULL"
+    grp_expr = "grp" if has_grp else "NULL"
+    conn.executescript(f"""
         CREATE TABLE IF NOT EXISTS subjobs (
             subjob_id      TEXT PRIMARY KEY,
             spec           TEXT NOT NULL,
@@ -74,7 +83,7 @@ def migrate(conn: sqlite3.Connection) -> bool:
              attempts, leased_at, lease_deadline, completed_at, error,
              metrics, created_at)
         SELECT
-            job_id, spec, grp, disk, state, lease_id, runner_id, host,
+            job_id, spec, {grp_expr}, {disk_expr}, state, lease_id, runner_id, host,
             attempts, leased_at, lease_deadline, completed_at, error,
             metrics, created_at
         FROM jobs;

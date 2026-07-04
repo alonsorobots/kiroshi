@@ -92,7 +92,7 @@ def test_group_runner_done_counts_unassigned_gigs_grouped_under_empty_key():
     s.seed([{"subjob_id": "u/1", "spec": {}}], job="u-camp")
     # Force a done row with a NULL runner_id directly.
     s._conn.execute(  # noqa: SLF001
-        "UPDATE jobs SET state='done', runner_id=NULL WHERE subjob_id='u/1'")
+        "UPDATE subjobs SET state='done', runner_id=NULL WHERE subjob_id='u/1'")
     s._conn.commit()  # noqa: SLF001
     counts = s.group_runner_done_counts()
     assert counts["u-camp"] == {"": 1}
@@ -111,7 +111,7 @@ def test_group_runner_done_counts_respects_limit_and_recency():
     counts = s.group_runner_done_counts(limit_groups=2)
     assert len(counts) == 2
     # most-recently-active groups win
-    assert set(counts) == {"grp4", "grp3"}
+    assert set(counts) == {"job4", "job3"}
 
 
 # ============================================================ coordinator sampler

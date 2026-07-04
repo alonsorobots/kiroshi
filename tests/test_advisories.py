@@ -413,7 +413,7 @@ def test_origin_flows_from_seed_to_advisory_via_detector():
         # We do this by reaching into the store directly — the coordinator's
         # origins_for lookup only cares about (job, disk) pairs.
         app.state.store._conn.execute(  # noqa: SLF001
-            "UPDATE jobs SET state='leased', disk='disk3' WHERE subjob_id=?",
+            "UPDATE subjobs SET state='leased', disk='disk3' WHERE subjob_id=?",
             ("camp/1",))
         app.state.store._conn.commit()  # noqa: SLF001
 

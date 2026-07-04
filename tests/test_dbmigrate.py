@@ -2,7 +2,11 @@
 
 The tricky part: the word "jobs" MOVES from the sub-job table to the job table.
 The migration must create `subjobs` from old `jobs` BEFORE reusing the `jobs`
-name for the old `jobs` data.
+name for the old `campaigns` data.
+
+NOTE: _make_old_db intentionally uses the OLD schema names (job_id, grp,
+campaigns) because it simulates a pre-migration database. The test assertions
+then check the NEW names (subjob_id, job, jobs) after migration runs.
 """
 from __future__ import annotations
 
@@ -19,13 +23,16 @@ from kiroshi.dbmigrate import needs_migration, migrate  # noqa: E402
 
 
 def _make_old_db(path: str) -> None:
-    """Create a synthetic OLD-schema DB with a few rows."""
+    """Create a synthetic OLD-schema DB with a few rows.
+
+    Uses OLD names deliberately: job_id, grp, campaigns.
+    """
     conn = sqlite3.connect(path)
     conn.executescript("""
         CREATE TABLE jobs (
-            subjob_id        TEXT PRIMARY KEY,
+            job_id        TEXT PRIMARY KEY,
             spec          TEXT NOT NULL,
-            job           TEXT,
+            grp           TEXT,
             disk          TEXT,
             state         TEXT NOT NULL DEFAULT 'pending',
             lease_id      TEXT,
@@ -39,24 +46,23 @@ def _make_old_db(path: str) -> None:
             metrics       TEXT,
             created_at    REAL NOT NULL
         );
-        CREATE TABLE jobs (
-            job        TEXT PRIMARY KEY,
+        CREATE TABLE campaigns (
+            grp        TEXT PRIMARY KEY,
             label      TEXT,
             created_at REAL NOT NULL
         );
         CREATE INDEX idx_jobs_state ON jobs(state);
-        CREATE INDEX idx_jobs_grp ON jobs(job);
+        CREATE INDEX idx_jobs_grp ON jobs(grp);
     """)
-    # Insert some test data
     conn.executemany(
-        "INSERT INTO jobs (subjob_id, spec, job, disk, state, created_at) "
+        "INSERT INTO jobs (job_id, spec, grp, disk, state, created_at) "
         "VALUES (?, '{}', ?, ?, ?, 1000.0)",
         [("clip_001", "reduce30", "disk1", "done"),
          ("clip_002", "reduce30", "disk1", "pending"),
          ("clip_003", "slerp", "cache_nvme", "failed")],
     )
     conn.executemany(
-        "INSERT INTO jobs (job, label, created_at) VALUES (?, ?, 1000.0)",
+        "INSERT INTO campaigns (grp, label, created_at) VALUES (?, ?, 1000.0)",
         [("reduce30", "Canonical 30fps -> 88-DoF"),
          ("slerp", "88-DoF@30 -> @4fps")],
     )
@@ -76,15 +82,14 @@ def test_needs_migration_on_new_schema(tmp_path):
     db = tmp_path / "test.db"
     _make_old_db(str(db))
     conn = sqlite3.connect(str(db))
-    migrate(conn)  # migrate first
-    assert needs_migration(conn) is False  # already migrated
+    migrate(conn)
+    assert needs_migration(conn) is False
     conn.close()
 
 
 def test_needs_migration_on_fresh_db(tmp_path):
     db = tmp_path / "fresh.db"
     conn = sqlite3.connect(str(db))
-    # No tables at all — not an old schema
     assert needs_migration(conn) is False
     conn.close()
 
@@ -94,7 +99,7 @@ def test_migrate_preserves_row_counts(tmp_path):
     _make_old_db(str(db))
     conn = sqlite3.connect(str(db))
     old_jobs_count = conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
-    old_campaigns_count = conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
+    old_campaigns_count = conn.execute("SELECT COUNT(*) FROM campaigns").fetchone()[0]
     migrate(conn)
     new_subjobs_count = conn.execute("SELECT COUNT(*) FROM subjobs").fetchone()[0]
     new_jobs_count = conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
@@ -107,18 +112,16 @@ def test_migrate_renames_columns_correctly(tmp_path):
     _make_old_db(str(db))
     conn = sqlite3.connect(str(db))
     migrate(conn)
-    # Check subjobs columns
     sj_cols = {r[1] for r in conn.execute("PRAGMA table_info(subjobs)")}
     assert "subjob_id" in sj_cols
     assert "job" in sj_cols
     assert "disk" in sj_cols
-    assert "subjob_id" not in sj_cols  # old name gone
-    assert "job" not in sj_cols     # old name gone
-    # Check jobs columns
+    assert "job_id" not in sj_cols
+    assert "grp" not in sj_cols
     j_cols = {r[1] for r in conn.execute("PRAGMA table_info(jobs)")}
     assert "job" in j_cols
     assert "label" in j_cols
-    assert "job" not in j_cols  # old name gone
+    assert "grp" not in j_cols
 
 
 def test_migrate_data_round_trips(tmp_path):
@@ -126,42 +129,35 @@ def test_migrate_data_round_trips(tmp_path):
     _make_old_db(str(db))
     conn = sqlite3.connect(str(db))
     migrate(conn)
-    # Check a specific sub-job
     row = conn.execute(
         "SELECT subjob_id, job, disk, state FROM subjobs WHERE subjob_id='clip_001'"
     ).fetchone()
     assert row[0] == "clip_001"
-    assert row[1] == "reduce30"  # was job
+    assert row[1] == "reduce30"
     assert row[2] == "disk1"
     assert row[3] == "done"
-    # Check a specific job
-    row = conn.execute(
-        "SELECT job, label FROM jobs WHERE job='slerp'"
-    ).fetchone()
+    row = conn.execute("SELECT job, label FROM jobs WHERE job='slerp'").fetchone()
     assert row[0] == "slerp"
     assert row[1] == "88-DoF@30 -> @4fps"
 
 
 def test_migrate_does_not_invert_counts(tmp_path):
-    """The critical trap: jobs↔jobs swap could invert job/sub-job counts.
-    Verify 3 sub-jobs stay as 3 subjobs (not 2) and 2 jobs stay as 2 jobs."""
     db = tmp_path / "test.db"
     _make_old_db(str(db))
     conn = sqlite3.connect(str(db))
     migrate(conn)
     subjobs = conn.execute("SELECT COUNT(*) FROM subjobs").fetchone()[0]
     jobs = conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
-    assert subjobs == 3, f"subjobs should be 3 (was old jobs), got {subjobs}"
-    assert jobs == 2, f"jobs should be 2 (was old jobs), got {jobs}"
+    assert subjobs == 3, f"subjobs should be 3, got {subjobs}"
+    assert jobs == 2, f"jobs should be 2, got {jobs}"
 
 
 def test_migrate_is_idempotent(tmp_path):
     db = tmp_path / "test.db"
     _make_old_db(str(db))
     conn = sqlite3.connect(str(db))
-    assert migrate(conn) is True  # first migration
-    assert migrate(conn) is False  # second is no-op
-    # Data still intact
+    assert migrate(conn) is True
+    assert migrate(conn) is False
     assert conn.execute("SELECT COUNT(*) FROM subjobs").fetchone()[0] == 3
     assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 2
 

@@ -143,19 +143,22 @@ def test_group_stats_and_migration(isolated_state):
     # old-schema DB with no `job` column gets migrated + backfilled on open
     db = str(isolated_state / "old.db")
     con = sqlite3.connect(db)
+    # OLD schema: table 'jobs' with 'job_id', 'grp' columns
     con.execute(
-        "CREATE TABLE jobs (subjob_id TEXT PRIMARY KEY, spec TEXT NOT NULL, "
+        "CREATE TABLE jobs (job_id TEXT PRIMARY KEY, spec TEXT NOT NULL, "
         "state TEXT NOT NULL DEFAULT 'pending', lease_id TEXT, runner_id TEXT, "
         "host TEXT, attempts INTEGER NOT NULL DEFAULT 0, leased_at REAL, "
         "lease_deadline REAL, completed_at REAL, error TEXT, metrics TEXT, "
-        "created_at REAL NOT NULL)")
-    con.execute("INSERT INTO jobs(subjob_id,spec,state,created_at) VALUES "
-                "('camp/a','{}','done',1.0)")
-    con.execute("INSERT INTO jobs(subjob_id,spec,state,created_at) VALUES "
-                "('camp/b','{}','pending',2.0)")
+        "created_at REAL NOT NULL, grp TEXT)")
+    con.execute("CREATE TABLE campaigns (grp TEXT PRIMARY KEY, label TEXT, created_at REAL NOT NULL)")
+    con.execute("INSERT INTO jobs(job_id,spec,state,created_at,grp) VALUES "
+                "('camp/a','{}','done',1.0,'camp')")
+    con.execute("INSERT INTO jobs(job_id,spec,state,created_at,grp) VALUES "
+                "('camp/b','{}','pending',2.0,'camp')")
     con.commit()
     con.close()
 
+    # JobStore auto-migrates old schema → new (subjobs + jobs tables)
     store = JobStore(db, max_retries=3)
     gs = {g["job"]: g for g in store.group_stats()}
     assert gs["camp"]["total"] == 2 and gs["camp"]["done"] == 1
@@ -180,9 +183,9 @@ def test_groups_endpoint_attaches_launch_commands(client):
 def test_job_detail_endpoint(client):
     H = {"Authorization": "Bearer T0KEN"}
     client.post("/seed", headers=H, json={"gigs": [{"subjob_id": "g/1", "spec": {"k": 9}}]})
-    d = client.get("/job/g/1", headers=H).json()
+    d = client.get("/subjob/g/1", headers=H).json()
     assert d["subjob_id"] == "g/1" and d["spec"] == {"k": 9} and d["state"] == "pending"
-    assert client.get("/job/missing", headers=H).status_code == 404
+    assert client.get("/subjob/missing", headers=H).status_code == 404
 
 
 # --------------------------------------------------- explicit campaign + label
