@@ -4,7 +4,7 @@ Lives **locally on the coordinator**. Workers never touch it; they coordinate ov
 HTTP. This avoids unreliable SQLite locking over SMB/network filesystems.
 
 Gig states: ``pending`` -> ``leased`` -> ``done`` | ``failed``.
-- ``seed`` is idempotent (INSERT OR IGNORE on job_id) — re-seeding is safe.
+- ``seed`` is idempotent (INSERT OR IGNORE on subjob_id) — re-seeding is safe.
 - ``lease`` atomically hands a batch of pending gigs to one Runner with a TTL.
 - ``complete`` marks done/failed; failures re-queue until the retry budget is spent.
 - ``reap`` returns expired leases to the pool (self-heal when a Runner dies).
@@ -23,17 +23,21 @@ from . import jsonio
 UNGROUPED = "(ungrouped)"
 
 
-def _group_of(job_id: str) -> str:
+def _job_of(subjob_id: str) -> str:
     """Campaign/group for a gig: everything before the last '/'. Gigs with no
     '/' are bucketed under ``(ungrouped)`` so every gig has a home."""
-    i = job_id.rfind("/")
-    return job_id[:i] if i > 0 else UNGROUPED
+    i = subjob_id.rfind("/")
+    return subjob_id[:i] if i > 0 else UNGROUPED
 
 
 @dataclass
 class LeaseResult:
     lease_id: Optional[str]
-    gigs: list[dict[str, Any]]  # [{job_id, spec}]
+    gigs: list[dict[str, Any]]  # [{subjob_id, spec}]
+    # Diagnostics explaining *why* this lease returned the count it did.
+    # ``None`` on the inert default (no fair-share, no disk budget) for callers
+    # that don't care; populated whenever a decision constraint was evaluated.
+    diag: Optional[dict[str, Any]] = None
 
 
 class JobStore:
@@ -46,7 +50,7 @@ class JobStore:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.execute("PRAGMA busy_timeout=5000")
-        # Register a REGEXP function so WHERE job_id REGEXP ? works in-DB
+        # Register a REGEXP function so WHERE subjob_id REGEXP ? works in-DB
         # (lets /jobs filter server-side without shipping 100k rows to grep).
         self._conn.create_function(
             "regexp", 2,
@@ -55,64 +59,56 @@ class JobStore:
 
     def _init_schema(self) -> None:
         with self._lock:
+            # Auto-migrate old-schema DBs (jobs→subjobs, campaigns→jobs)
+            from .dbmigrate import needs_migration, migrate
+            if needs_migration(self._conn):
+                migrate(self._conn)
+
             self._conn.executescript(
                 """
-                CREATE TABLE IF NOT EXISTS jobs (
-                    job_id        TEXT PRIMARY KEY,
-                    spec          TEXT NOT NULL,
-                    state         TEXT NOT NULL DEFAULT 'pending',
-                    lease_id      TEXT,
-                    runner_id     TEXT,
-                    host          TEXT,
-                    attempts      INTEGER NOT NULL DEFAULT 0,
-                    leased_at     REAL,
+                CREATE TABLE IF NOT EXISTS subjobs (
+                    subjob_id      TEXT PRIMARY KEY,
+                    spec           TEXT NOT NULL,
+                    job            TEXT,
+                    disk           TEXT,
+                    state          TEXT NOT NULL DEFAULT 'pending',
+                    lease_id       TEXT,
+                    runner_id      TEXT,
+                    host           TEXT,
+                    attempts       INTEGER NOT NULL DEFAULT 0,
+                    leased_at      REAL,
                     lease_deadline REAL,
-                    completed_at  REAL,
-                    error         TEXT,
-                    metrics       TEXT,
-                    created_at    REAL NOT NULL
+                    completed_at   REAL,
+                    error          TEXT,
+                    metrics        TEXT,
+                    created_at     REAL NOT NULL
                 );
-                CREATE INDEX IF NOT EXISTS idx_jobs_state ON jobs(state);
-                CREATE INDEX IF NOT EXISTS idx_jobs_lease ON jobs(lease_id);
-                CREATE INDEX IF NOT EXISTS idx_jobs_completed ON jobs(completed_at);
-                -- Campaign metadata: one human-readable label per group slug, so
-                -- the dashboard can head a campaign "Converting X 30fps -> 4,8 fps"
-                -- instead of showing the raw slug / per-clip rows. Optional: a group
-                -- with no label falls back to showing its slug.
-                CREATE TABLE IF NOT EXISTS campaigns (
-                    grp        TEXT PRIMARY KEY,
-                    label      TEXT,
-                    created_at REAL NOT NULL
+                CREATE INDEX IF NOT EXISTS idx_subjobs_state ON subjobs(state);
+                CREATE INDEX IF NOT EXISTS idx_subjobs_lease ON subjobs(lease_id);
+                CREATE INDEX IF NOT EXISTS idx_subjobs_completed ON subjobs(completed_at);
+                CREATE INDEX IF NOT EXISTS idx_subjobs_job ON subjobs(job);
+                CREATE INDEX IF NOT EXISTS idx_subjobs_disk ON subjobs(disk);
+                -- Job metadata: one human-readable label per job, so the dashboard
+                -- can show "Converting X 30fps -> 4,8 fps" instead of the raw slug.
+                CREATE TABLE IF NOT EXISTS jobs (
+                    job         TEXT PRIMARY KEY,
+                    label       TEXT,
+                    created_at  REAL NOT NULL
                 );
                 """
             )
-            # Migration: a `grp` column groups gigs into "jobs"/campaigns by the
-            # job_id prefix (everything before the last '/'), so the dashboard can
-            # show per-campaign progress + a rate curve. Added + backfilled here so
-            # databases from before this feature upgrade transparently.
-            cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(jobs)")}
-            if "grp" not in cols:
-                self._conn.execute("ALTER TABLE jobs ADD COLUMN grp TEXT")
-            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_grp ON jobs(grp)")
-            # Migration: a `disk` column tags each gig with the physical spindle its
-            # input lives on (PLAN §7.6), so /lease can enforce a global per-disk
-            # in-flight budget + round-robin across spindles. Nullable: gigs with no
-            # disk (no topology, or unmatched) are uncapped — the inert default.
-            if "disk" not in cols:
-                self._conn.execute("ALTER TABLE jobs ADD COLUMN disk TEXT")
-            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_disk ON jobs(disk)")
             self._conn.commit()
-            self._backfill_groups()
+            self._backfill_jobs()
 
-    def _backfill_groups(self) -> None:
+    def _backfill_jobs(self) -> None:
         rows = self._conn.execute(
-            "SELECT job_id FROM jobs WHERE grp IS NULL"
+            "SELECT subjob_id FROM subjobs WHERE job IS NULL"
         ).fetchall()
         if not rows:
             return
         self._conn.executemany(
-            "UPDATE jobs SET grp=? WHERE job_id=?",
-            [(_group_of(r["job_id"]), r["job_id"]) for r in rows],
+            "UPDATE subjobs SET job=? WHERE subjob_id=?",
+            [(_job_of(r["subjob_id"]), r["subjob_id"]) for r in rows],
         )
         self._conn.commit()
 
@@ -120,26 +116,26 @@ class JobStore:
     def seed(self, gigs: list[dict[str, Any]],
              group: Optional[str] = None,
              label: Optional[str] = None) -> int:
-        """Insert gigs idempotently. Each gig: {job_id, spec, group?}.
+        """Insert gigs idempotently. Each gig: {subjob_id, spec, group?}.
 
-        ``group`` (per-gig or batch-wide) overrides the job_id-prefix grouping, so
+        ``group`` (per-gig or batch-wide) overrides the subjob_id-prefix grouping, so
         a whole campaign can be seeded under one readable slug regardless of how
-        the ``job_id``s are shaped. ``label`` is a human-readable name for that
-        campaign, stored once in the ``campaigns`` table and shown in the UI.
+        the ``subjob_id``s are shaped. ``label`` is a human-readable name for that
+        campaign, stored once in the ``jobs`` table and shown in the UI.
 
         Returns # inserted.
         """
         now = time.time()
         rows = []
         for g in gigs:
-            jid = g["job_id"]
-            grp = g.get("group") or group or _group_of(jid)
+            jid = g["subjob_id"]
+            job = g.get("group") or group or _job_of(jid)
             disk = g.get("disk")
-            rows.append((jid, jsonio.dumps(g.get("spec", {})), grp, disk, now))
+            rows.append((jid, jsonio.dumps(g.get("spec", {})), job, disk, now))
         with self._lock:
             before = self._conn.total_changes
             self._conn.executemany(
-                "INSERT OR IGNORE INTO jobs (job_id, spec, grp, disk, created_at) "
+                "INSERT OR IGNORE INTO subjobs (subjob_id, spec, job, disk, created_at) "
                 "VALUES (?, ?, ?, ?, ?)",
                 rows,
             )
@@ -150,8 +146,8 @@ class JobStore:
                 lbl_grp = self._label_group(gigs, group)
                 if lbl_grp:
                     self._conn.execute(
-                        "INSERT INTO campaigns (grp, label, created_at) VALUES (?, ?, ?) "
-                        "ON CONFLICT(grp) DO UPDATE SET label=excluded.label",
+                        "INSERT INTO subjobs (job, label, created_at) VALUES (?, ?, ?) "
+                        "ON CONFLICT(job) DO UPDATE SET label=excluded.label",
                         (lbl_grp, label, now),
                     )
             self._conn.commit()
@@ -170,7 +166,7 @@ class JobStore:
             return group
         if not gigs:
             return None
-        eff = {g.get("group") or _group_of(g["job_id"]) for g in gigs}
+        eff = {g.get("group") or _job_of(g["subjob_id"]) for g in gigs}
         return next(iter(eff)) if len(eff) == 1 else None
 
     def mark_done_existing(self, job_ids: list[str]) -> int:
@@ -179,8 +175,8 @@ class JobStore:
         with self._lock:
             before = self._conn.total_changes
             self._conn.executemany(
-                "UPDATE jobs SET state='done', completed_at=?, error=NULL "
-                "WHERE job_id=? AND state!='done'",
+                "UPDATE subjobs SET state='done', completed_at=?, error=NULL "
+                "WHERE subjob_id=? AND state!='done'",
                 [(now, jid) for jid in job_ids],
             )
             self._conn.commit()
@@ -210,44 +206,103 @@ class JobStore:
         """
         now = time.time()
         lease_id = uuid.uuid4().hex
+        requested = capacity
         with self._lock:
+            # Pending count snapshot for diagnostics (cheap COUNT(*)).
+            pending_total = self._conn.execute(
+                "SELECT COUNT(*) AS c FROM subjobs WHERE state='pending'"
+            ).fetchone()["c"]
+
             # Fair-share ceiling: never let this host exceed its slice of the
             # fleet-wide in-flight budget. Applied uniformly to both the plain
             # and disk-aware paths by shrinking the effective capacity up-front.
+            host_inflight_before = 0
             if host_share is not None:
-                host_inflight = self._conn.execute(
-                    "SELECT COUNT(*) AS c FROM jobs WHERE state='leased' AND host=?",
+                host_inflight_before = self._conn.execute(
+                    "SELECT COUNT(*) AS c FROM subjobs WHERE state='leased' AND host=?",
                     (host,),
                 ).fetchone()["c"]
-                capacity = min(capacity, max(0, host_share - host_inflight))
+                capacity = min(capacity, max(0, host_share - host_inflight_before))
                 if capacity <= 0:
-                    return LeaseResult(lease_id=None, gigs=[])
+                    return LeaseResult(
+                        lease_id=None, gigs=[],
+                        diag=self._lease_diag(
+                            requested=requested, effective=capacity,
+                            granted=0, binding_reason="FAIR_SHARE_CAP",
+                            pending_total=pending_total,
+                            host_inflight_before=host_inflight_before,
+                            fair_share_ceiling=host_share,
+                            disk_concurrency=disk_concurrency,
+                            inflight=None, granted_here=None,
+                            ids=[]))
 
             if not disk_concurrency:
                 cur = self._conn.execute(
-                    "SELECT job_id, spec, disk FROM jobs WHERE state='pending' "
+                    "SELECT subjob_id, spec, disk FROM subjobs WHERE state='pending' "
                     "ORDER BY created_at LIMIT ?",
                     (capacity,),
                 )
                 rows = cur.fetchall()
                 if not rows:
-                    return LeaseResult(lease_id=None, gigs=[])
-                return self._finalize_lease(rows, lease_id, runner_id, host, now, ttl)
+                    return LeaseResult(
+                        lease_id=None, gigs=[],
+                        diag=self._lease_diag(
+                            requested=requested, effective=capacity,
+                            granted=0, binding_reason="NO_PENDING",
+                            pending_total=pending_total,
+                            host_inflight_before=host_inflight_before,
+                            fair_share_ceiling=host_share,
+                            disk_concurrency=disk_concurrency,
+                            inflight=None, granted_here=None,
+                            ids=[]))
+                ids = [r["subjob_id"] for r in rows]
+                # Binding constraint, judged against the runner's *request*: the
+                # plain path has no disk budget, so a shortfall is either the
+                # fair-share ceiling (host got its slice, not the whole request) or
+                # an empty queue. Distinguish them so a host parked at its
+                # fair-share slice doesn't read as a healthy GRANTED_FULL.
+                if (host_share is not None and capacity < requested
+                        and len(rows) >= capacity):
+                    reason = "FAIR_SHARE_CAP"
+                else:
+                    reason = "GRANTED_FULL"
+                res = self._finalize_lease(rows, lease_id, runner_id, host, now, ttl)
+                res.diag = self._lease_diag(
+                    requested=requested, effective=capacity,
+                    granted=len(rows), binding_reason=reason,
+                    pending_total=pending_total,
+                    host_inflight_before=host_inflight_before,
+                    fair_share_ceiling=host_share,
+                    disk_concurrency=disk_concurrency,
+                    inflight=None, granted_here=None,
+                    ids=ids)
+                return res
 
             # --- disk-aware path ---
             # 1. current in-flight per disk (leased gigs across the whole fleet)
             inflight: dict[Optional[str], int] = {}
             for r in self._conn.execute(
-                "SELECT disk, COUNT(*) AS c FROM jobs WHERE state='leased' GROUP BY disk"
+                "SELECT disk, COUNT(*) AS c FROM subjobs WHERE state='leased' GROUP BY disk"
             ):
                 inflight[r["disk"]] = r["c"]
+            inflight_before = dict(inflight)
             # 2. pending gigs with their disk, in creation order
             rows = self._conn.execute(
-                "SELECT job_id, spec, disk FROM jobs WHERE state='pending' "
+                "SELECT subjob_id, spec, disk FROM subjobs WHERE state='pending' "
                 "ORDER BY created_at"
             ).fetchall()
             if not rows:
-                return LeaseResult(lease_id=None, gigs=[])
+                return LeaseResult(
+                    lease_id=None, gigs=[],
+                    diag=self._lease_diag(
+                        requested=requested, effective=capacity,
+                        granted=0, binding_reason="NO_PENDING",
+                        pending_total=pending_total,
+                        host_inflight_before=host_inflight_before,
+                        fair_share_ceiling=host_share,
+                        disk_concurrency=disk_concurrency,
+                        inflight=inflight_before, granted_here=None,
+                        ids=[]))
 
             # 3. split into capped disks (in the budget map) vs uncapped (None / unknown)
             capped: dict[str, list] = {}
@@ -262,6 +317,7 @@ class JobStore:
             # 4. round-robin interleave: one per capped disk (if budget remains) +
             #    one from the uncapped stream, per round — keeps every spindle busy
             #    and never starves uncapped gigs.
+            granted_here: dict[str, int] = {d: 0 for d in disk_concurrency}
             iters = {d: iter(capped[d]) for d in capped}
             unc_iter = iter(uncapped)
             unc_active = bool(uncapped)
@@ -278,6 +334,7 @@ class JobStore:
                         del iters[d]
                         continue
                     inflight[d] = inflight.get(d, 0) + 1
+                    granted_here[d] = granted_here.get(d, 0) + 1
                     progressed = True
                     if len(selected) >= capacity:
                         break
@@ -290,25 +347,104 @@ class JobStore:
                 if not progressed:
                     break  # all capped disks saturated/exhausted and uncapped drained
 
+            ids = [r["subjob_id"] for r in selected]
+            # Binding constraint, judged against the runner's *request* (not the
+            # fair-share-shrunk `capacity`): a host that asks for 100 and gets 4
+            # because the spindles are capped must read as DISK_BUDGET_FULL. The
+            # old "were any disks full at the *start*" test mislabeled the first
+            # poller (which itself drains the budget) as GRANTED_FULL, making a
+            # plainly starved host look healthy in /decisions/summary.
+            if len(selected) >= requested:
+                reason = "GRANTED_FULL"
+            elif (host_share is not None and capacity < requested
+                    and len(selected) >= capacity):
+                # Fair-share ceiling (not lack of work) held the grant down.
+                reason = "FAIR_SHARE_CAP"
+            elif len(selected) < len(rows):
+                # Pending gigs left unleased -> the per-disk budget was the wall.
+                reason = "DISK_BUDGET_FULL"
+            else:
+                # Drained every pending gig we could see; just no more work.
+                reason = "GRANTED_FULL"
+
             if not selected:
-                return LeaseResult(lease_id=None, gigs=[])
-            return self._finalize_lease(selected, lease_id, runner_id, host, now, ttl)
+                return LeaseResult(
+                    lease_id=None, gigs=[],
+                    diag=self._lease_diag(
+                        requested=requested, effective=capacity,
+                        granted=0, binding_reason=reason,
+                        pending_total=pending_total,
+                        host_inflight_before=host_inflight_before,
+                        fair_share_ceiling=host_share,
+                        disk_concurrency=disk_concurrency,
+                        inflight=inflight_before, granted_here=granted_here,
+                        ids=[]))
+            res = self._finalize_lease(selected, lease_id, runner_id, host, now, ttl)
+            res.diag = self._lease_diag(
+                requested=requested, effective=capacity,
+                granted=len(selected), binding_reason=reason,
+                pending_total=pending_total,
+                host_inflight_before=host_inflight_before,
+                fair_share_ceiling=host_share,
+                disk_concurrency=disk_concurrency,
+                inflight=inflight_before, granted_here=granted_here,
+                ids=ids)
+            return res
+
+    @staticmethod
+    def _lease_diag(*, requested: int, effective: int, granted: int,
+                    binding_reason: str, pending_total: int,
+                    host_inflight_before: int,
+                    fair_share_ceiling: Optional[int],
+                    disk_concurrency: Optional[dict[str, int]],
+                    inflight: Optional[dict],
+                    granted_here: Optional[dict[str, int]],
+                    ids: list[str]) -> dict[str, Any]:
+        """Build the diagnostics dict attached to every LeaseResult.
+
+        Captures the state *before* the grant so a reviewer can reconstruct
+        *why* the coordinator returned the count it did — the binding
+        constraint, the fair-share ceiling, and the per-disk budget snapshot.
+        """
+        disk: dict[str, Any] = {}
+        if disk_concurrency:
+            inf = inflight or {}
+            gh = granted_here or {}
+            for d, budget_d in disk_concurrency.items():
+                ib = inf.get(d, 0)
+                disk[d] = {
+                    "budget": budget_d,
+                    "inflight_before": ib,
+                    "free": max(0, budget_d - ib),
+                    "granted_here": gh.get(d, 0),
+                }
+        return {
+            "requested_capacity": requested,
+            "effective_capacity": effective,
+            "granted": granted,
+            "binding_reason": binding_reason,
+            "pending_total": pending_total,
+            "host_inflight_before": host_inflight_before,
+            "fair_share_ceiling": fair_share_ceiling,
+            "disk": disk,
+            "granted_job_ids": ids[:32],
+        }
 
     def _finalize_lease(self, rows, lease_id, runner_id, host, now, ttl) -> LeaseResult:
-        ids = [r["job_id"] for r in rows]
+        ids = [r["subjob_id"] for r in rows]
         self._conn.executemany(
-            "UPDATE jobs SET state='leased', lease_id=?, runner_id=?, host=?, "
-            "leased_at=?, lease_deadline=?, attempts=attempts+1 WHERE job_id=?",
+            "UPDATE subjobs SET state='leased', lease_id=?, runner_id=?, host=?, "
+            "leased_at=?, lease_deadline=?, attempts=attempts+1 WHERE subjob_id=?",
             [(lease_id, runner_id, host, now, now + ttl, jid) for jid in ids],
         )
         self._conn.commit()
-        gigs = [{"job_id": r["job_id"], "spec": jsonio.loads(r["spec"]),
+        gigs = [{"subjob_id": r["subjob_id"], "spec": jsonio.loads(r["spec"]),
                  "disk": r["disk"]} for r in rows]
         return LeaseResult(lease_id=lease_id, gigs=gigs)
 
     # ------------------------------------------------------------ complete
     def complete(self, results: list[dict[str, Any]]) -> dict[str, int]:
-        """Apply a batch of results. Each: {job_id, status, error?, metrics?}.
+        """Apply a batch of results. Each: {subjob_id, status, error?, metrics?}.
 
         status 'ok'/'skipped' -> done. 'requeue' -> back to pending WITHOUT
         consuming the retry budget (an eviction under pressure, not a task
@@ -319,12 +455,12 @@ class JobStore:
         done = requeued = failed = 0
         with self._lock:
             for r in results:
-                jid = r["job_id"]
+                jid = r["subjob_id"]
                 status = r.get("status", "ok")
                 if status in ("ok", "skipped"):
                     self._conn.execute(
-                        "UPDATE jobs SET state='done', completed_at=?, error=NULL, "
-                        "metrics=?, lease_id=NULL, lease_deadline=NULL WHERE job_id=?",
+                        "UPDATE subjobs SET state='done', completed_at=?, error=NULL, "
+                        "metrics=?, lease_id=NULL, lease_deadline=NULL WHERE subjob_id=?",
                         (now, jsonio.dumps(r.get("metrics", {})), jid),
                     )
                     done += 1
@@ -334,28 +470,28 @@ class JobStore:
                     # retry budget and mark a healthy gig 'failed' — the task was
                     # preempted, not actually tried. error is cleared (not a fault).
                     self._conn.execute(
-                        "UPDATE jobs SET state='pending', error=NULL, "
+                        "UPDATE subjobs SET state='pending', error=NULL, "
                         "attempts=CASE WHEN attempts>0 THEN attempts-1 ELSE 0 END, "
-                        "lease_id=NULL, lease_deadline=NULL WHERE job_id=?",
+                        "lease_id=NULL, lease_deadline=NULL WHERE subjob_id=?",
                         (jid,),
                     )
                     requeued += 1
                 else:
                     row = self._conn.execute(
-                        "SELECT attempts FROM jobs WHERE job_id=?", (jid,)
+                        "SELECT attempts FROM subjobs WHERE subjob_id=?", (jid,)
                     ).fetchone()
                     attempts = row["attempts"] if row else 0
                     if attempts > self.max_retries:
                         self._conn.execute(
-                            "UPDATE jobs SET state='failed', completed_at=?, error=?, "
-                            "lease_id=NULL, lease_deadline=NULL WHERE job_id=?",
+                            "UPDATE subjobs SET state='failed', completed_at=?, error=?, "
+                            "lease_id=NULL, lease_deadline=NULL WHERE subjob_id=?",
                             (now, str(r.get("error", "unknown"))[:2000], jid),
                         )
                         failed += 1
                     else:
                         self._conn.execute(
-                            "UPDATE jobs SET state='pending', error=?, "
-                            "lease_id=NULL, lease_deadline=NULL WHERE job_id=?",
+                            "UPDATE subjobs SET state='pending', error=?, "
+                            "lease_id=NULL, lease_deadline=NULL WHERE subjob_id=?",
                             (str(r.get("error", "unknown"))[:2000], jid),
                         )
                         requeued += 1
@@ -368,7 +504,7 @@ class JobStore:
 
         Lets an operator recover from a *systematic* failure (a missing
         dependency, an unreachable NAS, a misconfigured root) after fixing the
-        root cause — without re-seeding under fresh ``job_id``s. ``leased`` is a
+        root cause — without re-seeding under fresh ``subjob_id``s. ``leased`` is a
         valid target too, to forcibly reclaim gigs from a wedged runner without
         waiting out the lease TTL.
         """
@@ -381,7 +517,7 @@ class JobStore:
         attempts_clause = ", attempts=0" if reset_attempts else ""
         with self._lock:
             cur = self._conn.execute(
-                f"UPDATE jobs SET state='pending', lease_id=NULL, runner_id=NULL, "
+                f"UPDATE subjobs SET state='pending', lease_id=NULL, runner_id=NULL, "
                 f"leased_at=NULL, lease_deadline=NULL, error=NULL{attempts_clause} "
                 f"WHERE state IN ({placeholders})",
                 states,
@@ -394,7 +530,7 @@ class JobStore:
         now = time.time()
         with self._lock:
             cur = self._conn.execute(
-                "UPDATE jobs SET lease_deadline=? WHERE lease_id=? AND state='leased'",
+                "UPDATE subjobs SET lease_deadline=? WHERE lease_id=? AND state='leased'",
                 (now + ttl, lease_id),
             )
             self._conn.commit()
@@ -406,7 +542,7 @@ class JobStore:
         now = time.time()
         with self._lock:
             cur = self._conn.execute(
-                "UPDATE jobs SET state='pending', lease_id=NULL, runner_id=NULL, "
+                "UPDATE subjobs SET state='pending', lease_id=NULL, runner_id=NULL, "
                 "lease_deadline=NULL WHERE state='leased' AND lease_deadline < ?",
                 (now,),
             )
@@ -420,23 +556,23 @@ class JobStore:
             counts = {
                 row["state"]: row["n"]
                 for row in self._conn.execute(
-                    "SELECT state, COUNT(*) AS n FROM jobs GROUP BY state"
+                    "SELECT state, COUNT(*) AS n FROM subjobs GROUP BY state"
                 )
             }
             recent = self._conn.execute(
-                "SELECT COUNT(*) AS n FROM jobs WHERE state='done' AND completed_at >= ?",
+                "SELECT COUNT(*) AS n FROM subjobs WHERE state='done' AND completed_at >= ?",
                 (now - window_s,),
             ).fetchone()["n"]
             per_host = [
                 {"host": row["host"] or "?", "in_flight": row["n"]}
                 for row in self._conn.execute(
-                    "SELECT host, COUNT(*) AS n FROM jobs WHERE state='leased' GROUP BY host"
+                    "SELECT host, COUNT(*) AS n FROM subjobs WHERE state='leased' GROUP BY host"
                 )
             ]
             per_host_recent = {
                 (row["host"] or "?"): row["n"]
                 for row in self._conn.execute(
-                    "SELECT host, COUNT(*) AS n FROM jobs "
+                    "SELECT host, COUNT(*) AS n FROM subjobs "
                     "WHERE state='done' AND completed_at >= ? GROUP BY host",
                     (now - window_s,),
                 )
@@ -447,14 +583,14 @@ class JobStore:
             disk_inflight = {
                 (row["disk"] or "(uncapped)"): row["n"]
                 for row in self._conn.execute(
-                    "SELECT disk, COUNT(*) AS n FROM jobs "
+                    "SELECT disk, COUNT(*) AS n FROM subjobs "
                     "WHERE state='leased' AND disk IS NOT NULL GROUP BY disk"
                 )
             }
             recent_errors = [
-                {"job_id": row["job_id"], "host": row["host"], "error": row["error"]}
+                {"subjob_id": row["subjob_id"], "host": row["host"], "error": row["error"]}
                 for row in self._conn.execute(
-                    "SELECT job_id, host, error FROM jobs WHERE state='failed' "
+                    "SELECT subjob_id, host, error FROM subjobs WHERE state='failed' "
                     "ORDER BY completed_at DESC LIMIT 20"
                 )
             ]
@@ -495,7 +631,7 @@ class JobStore:
             return {
                 row["disk"]: row["n"]
                 for row in self._conn.execute(
-                    "SELECT disk, COUNT(*) AS n FROM jobs "
+                    "SELECT disk, COUNT(*) AS n FROM subjobs "
                     "WHERE state='done' AND disk IS NOT NULL GROUP BY disk"
                 )
             }
@@ -503,8 +639,8 @@ class JobStore:
     def group_runner_done_counts(
         self, limit_groups: int = 40
     ) -> dict[str, dict[str, int]]:
-        """``{grp: {runner_id: done_count}}`` for the top ``limit_groups`` recently
-        active campaigns.
+        """``{job: {runner_id: done_count}}`` for the top ``limit_groups`` recently
+        active jobs.
 
         Used by the sampler so the job page can render a stacked area chart of
         per-node contribution over time (which computer contributed how much,
@@ -514,9 +650,9 @@ class JobStore:
         with self._lock:
             top = self._conn.execute(
                 """
-                SELECT j.grp AS grp
-                FROM jobs j
-                GROUP BY j.grp
+                SELECT j.job AS job
+                FROM subjobs j
+                GROUP BY j.job
                 ORDER BY COALESCE(MAX(j.completed_at),
                                   MAX(j.leased_at),
                                   MIN(j.created_at)) DESC
@@ -524,19 +660,19 @@ class JobStore:
                 """,
                 (int(limit_groups),),
             ).fetchall()
-            grps = [r["grp"] for r in top]
+            grps = [r["job"] for r in top]
             if not grps:
                 return {}
             placeholders = ",".join("?" for _ in grps)
             rows = self._conn.execute(
-                f"SELECT grp, COALESCE(runner_id,'') AS runner_id, "
-                f"COUNT(*) AS n FROM jobs WHERE state='done' "
-                f"AND grp IN ({placeholders}) GROUP BY grp, runner_id",
+                f"SELECT job, COALESCE(runner_id,'') AS runner_id, "
+                f"COUNT(*) AS n FROM subjobs WHERE state='done' "
+                f"AND job IN ({placeholders}) GROUP BY job, runner_id",
                 tuple(grps),
             ).fetchall()
         out: dict[str, dict[str, int]] = {g: {} for g in grps}
         for r in rows:
-            out[r["grp"]][r["runner_id"] or ""] = int(r["n"])
+            out[r["job"]][r["runner_id"] or ""] = int(r["n"])
         return out
 
     def disk_inflight_count(self, disk: str) -> int:
@@ -545,22 +681,22 @@ class JobStore:
         resource-acquire clients."""
         with self._lock:
             r = self._conn.execute(
-                "SELECT COUNT(*) AS c FROM jobs WHERE state='leased' AND disk=?",
+                "SELECT COUNT(*) AS c FROM subjobs WHERE state='leased' AND disk=?",
                 (disk,)).fetchone()
             return r["c"] if r else 0
 
-    _LIST_COLS = ("job_id", "state", "host", "runner_id", "attempts",
+    _LIST_COLS = ("subjob_id", "state", "host", "runner_id", "attempts",
                   "created_at", "leased_at", "completed_at", "error", "metrics",
-                  "grp", "disk")
+                  "job", "disk")
 
     def list_jobs(self, states: Optional[tuple[str, ...]] = None,
                   limit: int = 200, newest_first: bool = True,
-                  grp: Optional[str] = None,
+                  job: Optional[str] = None,
                   job_id_re: Optional[str] = None,
                   error_re: Optional[str] = None) -> list[dict[str, Any]]:
         """Return job rows (for the /jobs + /history views). Newest by activity.
 
-        ``grp`` optionally filters to one campaign (the ``grp`` column set at
+        ``job`` optionally filters to one campaign (the ``job`` column set at
         seed time). Without it, rows from every campaign are mixed (the existing
         behavior for the dashboard).
 
@@ -578,12 +714,12 @@ class JobStore:
         if states:
             clauses.append("state IN (%s)" % ",".join("?" for _ in states))
             params.extend(states)
-        if grp:
-            clauses.append("grp = ?")
-            params.append(grp)
+        if job:
+            clauses.append("job = ?")
+            params.append(job)
         if job_id_re is not None:
             re.compile(job_id_re)           # validate before query (raises re.error)
-            clauses.append("job_id REGEXP ?")
+            clauses.append("subjob_id REGEXP ?")
             params.append(job_id_re)
         if error_re is not None:
             re.compile(error_re)
@@ -593,7 +729,7 @@ class JobStore:
         params.append(int(limit))
         with self._lock:
             rows = self._conn.execute(
-                f"SELECT {cols} FROM jobs {where} ORDER BY {order_expr} LIMIT ?",
+                f"SELECT {cols} FROM subjobs {where} ORDER BY {order_expr} LIMIT ?",
                 params,
             ).fetchall()
         out = []
@@ -606,32 +742,32 @@ class JobStore:
             out.append(d)
         return out
 
-    def export_metrics(self, grp: Optional[str] = None,
+    def export_metrics(self, job: Optional[str] = None,
                        states: tuple[str, ...] = ("done",),
                        limit: int = 100000) -> list[dict[str, Any]]:
-        """Bulk export of (job_id, metrics, state) for result aggregation.
+        """Bulk export of (subjob_id, metrics, state) for result aggregation.
 
         Unlike :meth:`list_jobs` (dashboard-shaped, capped at 2000), this is
         for consumers that need to fold metrics across a whole campaign -- e.g.
         ranking 32k clips by worst-section MPJPE. Returns lightweight rows
-        (job_id, metrics, state, grp, disk) ordered by job_id (deterministic),
-        so a caller can page by job_id if the set is huge. ``limit`` defaults
+        (subjob_id, metrics, state, job, disk) ordered by subjob_id (deterministic),
+        so a caller can page by subjob_id if the set is huge. ``limit`` defaults
         high (100k) since a single campaign rarely exceeds that.
         """
-        cols = "job_id, metrics, state, grp, disk"
+        cols = "subjob_id, metrics, state, job, disk"
         params: list[Any] = []
         clauses: list[str] = []
         if states:
             clauses.append("state IN (%s)" % ",".join("?" for _ in states))
             params.extend(states)
-        if grp:
-            clauses.append("grp = ?")
-            params.append(grp)
+        if job:
+            clauses.append("job = ?")
+            params.append(job)
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
         params.append(int(limit))
         with self._lock:
             rows = self._conn.execute(
-                f"SELECT {cols} FROM jobs {where} ORDER BY job_id LIMIT ?",
+                f"SELECT {cols} FROM subjobs {where} ORDER BY subjob_id LIMIT ?",
                 params,
             ).fetchall()
         out = []
@@ -640,20 +776,20 @@ class JobStore:
                 m = jsonio.loads(r["metrics"]) if r["metrics"] else {}
             except Exception:  # noqa: BLE001
                 m = {}
-            out.append({"job_id": r["job_id"], "metrics": m,
-                        "state": r["state"], "grp": r["grp"], "disk": r["disk"]})
+            out.append({"subjob_id": r["subjob_id"], "metrics": m,
+                        "state": r["state"], "job": r["job"], "disk": r["disk"]})
         return out
 
     def group_stats(self, limit: int = 200) -> list[dict[str, Any]]:
         """Per-campaign rollup ("jobs" for the UI): counts by state + timing.
 
-        A "job" here is a group of gigs sharing a ``job_id`` prefix. Returns the
+        A "job" here is a group of gigs sharing a ``subjob_id`` prefix. Returns the
         most-recently-active groups first.
         """
         with self._lock:
             rows = self._conn.execute(
                 """
-                SELECT j.grp AS grp,
+                SELECT j.job AS job,
                        c.label AS label,
                        COUNT(*)                                   AS total,
                        SUM(j.state='done')                        AS done,
@@ -664,9 +800,9 @@ class JobStore:
                        MAX(j.leased_at)                           AS last_leased,
                        MAX(j.completed_at)                        AS last_completed,
                        GROUP_CONCAT(DISTINCT j.runner_id)         AS runner_ids
-                FROM jobs j
-                LEFT JOIN campaigns c ON c.grp = j.grp
-                GROUP BY j.grp
+                FROM subjobs j
+                LEFT JOIN jobs c ON c.job = j.job
+                GROUP BY j.job
                 ORDER BY COALESCE(MAX(j.completed_at), MAX(j.leased_at), MIN(j.created_at)) DESC
                 LIMIT ?
                 """,
@@ -682,11 +818,11 @@ class JobStore:
             out.append(d)
         return out
 
-    def job(self, job_id: str) -> Optional[dict[str, Any]]:
+    def job(self, subjob_id: str) -> Optional[dict[str, Any]]:
         cols = ", ".join(self._LIST_COLS + ("spec",))
         with self._lock:
             r = self._conn.execute(
-                f"SELECT {cols} FROM jobs WHERE job_id=?", (job_id,)
+                f"SELECT {cols} FROM subjobs WHERE subjob_id=?", (subjob_id,)
             ).fetchone()
         if not r:
             return None
