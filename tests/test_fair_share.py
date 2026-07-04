@@ -142,4 +142,6 @@ def test_plan_sync_uses_ssh_target_and_remapped_path():
                                   root=r"C:\Users\alons\Desktop\RESEARCH")}
     plans = plan_sync(hosts, repos=[r"C:\Users\admin\Desktop\RESEARCH\kiroshi"])
     assert plans[0].ssh_target == "alons@Aurora"
-    assert r"C:\Users\alons\Desktop\RESEARCH\kiroshi" in plans[0].steps[0].remote_cmd
+    # Path is remapped admin->alons AND normalized to forward-slash + double-quote
+    # so the command is safe for both cmd.exe and POSIX sh (see _quote_remote_path).
+    assert '"C:/Users/alons/Desktop/RESEARCH/kiroshi"' in plans[0].steps[0].remote_cmd

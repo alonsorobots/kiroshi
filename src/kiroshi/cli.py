@@ -21,7 +21,7 @@ import os
 import sys
 import time
 import uuid
-from typing import Optional
+from typing import Any, Optional
 
 from . import __version__
 from .config import current_host, load_config

@@ -226,7 +226,8 @@ def run(spec: dict[str, Any]) -> dict[str, Any]:
     # called acquire() bare (which only constructs the slot object) and then
     # __exit__ manually — which released nothing because __enter__ was never
     # called, silently disabling the mesh budget.
-    coordinator = os.environ.get("KIROSHI_FIXER")
+    # New name wins; KIROSHI_FIXER kept as a one-release fallback (rename compat).
+    coordinator = os.environ.get("KIROSHI_COORDINATOR") or os.environ.get("KIROSHI_FIXER")
     token = os.environ.get("KIROSHI_TOKEN")
     client = None
     if coordinator:
