@@ -125,7 +125,7 @@ def test_enumerate_gigs_walks_nested_tree(tmp_path):
         fps_set = {t["target_fps"] for t in g["spec"]["targets"]}
         assert fps_set == {4.0, 8.0}
     # deterministic ordering + ids => re-seeding is idempotent
-    assert [g["job_id"] for g in gigs] == [g["job_id"] for g in enumerate_gigs(enum_args)]
+    assert [g["subjob_id"] for g in gigs] == [g["subjob_id"] for g in enumerate_gigs(enum_args)]
     assert gigs[0]["spec"]["targets"][0]["dst_path"] == \
         "resampled_4fps/" + gigs[0]["spec"]["src_path"]
 

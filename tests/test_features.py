@@ -77,7 +77,7 @@ def test_unauthorized_without_token(client):
 def test_full_flow_with_token_surfaces_launch_command(client):
     H = {"Authorization": "Bearer T0KEN"}
     client.post("/seed", headers=H, json={"gigs": [
-        {"job_id": "j1", "spec": {}}, {"job_id": "j2", "spec": {}}]})
+        {"subjob_id": "j1", "spec": {}}, {"subjob_id": "j2", "spec": {}}]})
     client.post("/register", headers=H, json={
         "runner_id": "R1", "host": "host-b", "workers": 8, "task": "t:run",
         "launch_command": "kiroshi runner --workers 8 --task t:run --fixer auto"})
@@ -85,11 +85,11 @@ def test_full_flow_with_token_surfaces_launch_command(client):
                      json={"runner_id": "R1", "host": "host-b", "capacity": 10}).json()
     assert len(lz["gigs"]) == 2
     client.post("/complete", headers=H, json={"lease_id": lz["lease_id"], "results": [
-        {"job_id": "j1", "status": "ok"}, {"job_id": "j2", "status": "ok"}]})
+        {"subjob_id": "j1", "status": "ok"}, {"subjob_id": "j2", "status": "ok"}]})
 
     runners = client.get("/runners", headers=H).json()["runners"]
     assert runners[0]["launch_command"].startswith("kiroshi runner")
-    jobs = client.get("/jobs", headers=H).json()["jobs"]
+    jobs = client.get("/subjobs", headers=H).json()["jobs"]
     assert all(j["launch_command"].startswith("kiroshi runner") for j in jobs)
     hist = client.get("/history", headers=H).json()["jobs"]
     assert {j["state"] for j in hist} == {"done"}
@@ -100,9 +100,9 @@ def test_full_flow_with_token_surfaces_launch_command(client):
 # --------------------------------------------------- jobstore listing
 def test_list_jobs_and_job_detail(isolated_state):
     store = JobStore(str(isolated_state / "j.db"), max_retries=3)
-    store.seed([{"job_id": "a", "spec": {"x": 1}}, {"job_id": "b", "spec": {}}])
+    store.seed([{"subjob_id": "a", "spec": {"x": 1}}, {"subjob_id": "b", "spec": {}}])
     rows = store.list_jobs(limit=10)
-    assert {r["job_id"] for r in rows} == {"a", "b"}
+    assert {r["subjob_id"] for r in rows} == {"a", "b"}
     assert all(r["state"] == "pending" for r in rows)
     detail = store.job("a")
     assert detail and detail["spec"] == {"x": 1}
@@ -140,61 +140,61 @@ def test_request_stop_unknown_returns_false(isolated_state):
 def test_group_stats_and_migration(isolated_state):
     import sqlite3
 
-    # old-schema DB with no `grp` column gets migrated + backfilled on open
+    # old-schema DB with no `job` column gets migrated + backfilled on open
     db = str(isolated_state / "old.db")
     con = sqlite3.connect(db)
     con.execute(
-        "CREATE TABLE jobs (job_id TEXT PRIMARY KEY, spec TEXT NOT NULL, "
+        "CREATE TABLE jobs (subjob_id TEXT PRIMARY KEY, spec TEXT NOT NULL, "
         "state TEXT NOT NULL DEFAULT 'pending', lease_id TEXT, runner_id TEXT, "
         "host TEXT, attempts INTEGER NOT NULL DEFAULT 0, leased_at REAL, "
         "lease_deadline REAL, completed_at REAL, error TEXT, metrics TEXT, "
         "created_at REAL NOT NULL)")
-    con.execute("INSERT INTO jobs(job_id,spec,state,created_at) VALUES "
+    con.execute("INSERT INTO jobs(subjob_id,spec,state,created_at) VALUES "
                 "('camp/a','{}','done',1.0)")
-    con.execute("INSERT INTO jobs(job_id,spec,state,created_at) VALUES "
+    con.execute("INSERT INTO jobs(subjob_id,spec,state,created_at) VALUES "
                 "('camp/b','{}','pending',2.0)")
     con.commit()
     con.close()
 
     store = JobStore(db, max_retries=3)
-    gs = {g["grp"]: g for g in store.group_stats()}
+    gs = {g["job"]: g for g in store.group_stats()}
     assert gs["camp"]["total"] == 2 and gs["camp"]["done"] == 1
-    store.seed([{"job_id": "x2/q", "spec": {}}, {"job_id": "loose", "spec": {}}])
-    gs = {g["grp"]: g for g in store.group_stats()}
+    store.seed([{"subjob_id": "x2/q", "spec": {}}, {"subjob_id": "loose", "spec": {}}])
+    gs = {g["job"]: g for g in store.group_stats()}
     assert set(gs) == {"camp", "x2", "(ungrouped)"}
 
 
 def test_groups_endpoint_attaches_launch_commands(client):
     H = {"Authorization": "Bearer T0KEN"}
     client.post("/seed", headers=H, json={"gigs": [
-        {"job_id": "campA/1", "spec": {}}, {"job_id": "campA/2", "spec": {}}]})
+        {"subjob_id": "campA/1", "spec": {}}, {"subjob_id": "campA/2", "spec": {}}]})
     client.post("/register", headers=H, json={
         "runner_id": "R1", "host": "h", "task": "t:run", "workers": 4,
         "launch_command": "kiroshi runner --task t:run --workers 4"})
     client.post("/lease", headers=H, json={"runner_id": "R1", "host": "h", "capacity": 5})
     groups = client.get("/groups", headers=H).json()["groups"]
-    campA = next(g for g in groups if g["grp"] == "campA")
+    campA = next(g for g in groups if g["job"] == "campA")
     assert campA["launch_commands"] == ["kiroshi runner --task t:run --workers 4"]
 
 
 def test_job_detail_endpoint(client):
     H = {"Authorization": "Bearer T0KEN"}
-    client.post("/seed", headers=H, json={"gigs": [{"job_id": "g/1", "spec": {"k": 9}}]})
+    client.post("/seed", headers=H, json={"gigs": [{"subjob_id": "g/1", "spec": {"k": 9}}]})
     d = client.get("/job/g/1", headers=H).json()
-    assert d["job_id"] == "g/1" and d["spec"] == {"k": 9} and d["state"] == "pending"
+    assert d["subjob_id"] == "g/1" and d["spec"] == {"k": 9} and d["state"] == "pending"
     assert client.get("/job/missing", headers=H).status_code == 404
 
 
 # --------------------------------------------------- explicit campaign + label
 def test_explicit_group_overrides_job_id_prefix(isolated_state):
     store = JobStore(str(isolated_state / "g.db"), max_retries=3)
-    # job_ids have no shared prefix, but an explicit group collects them under one
+    # subjob_ids have no shared prefix, but an explicit job collects them under one
     # campaign — the fix for "thousands of per-clip jobs" in the dashboard.
     store.seed(
-        [{"job_id": "clipA.npz|4", "spec": {}}, {"job_id": "clipB.npz|8", "spec": {}}],
-        group="seamless-30to48", label="Converting Seamless Interactions 30fps -> 4,8 fps",
+        [{"subjob_id": "clipA.npz|4", "spec": {}}, {"subjob_id": "clipB.npz|8", "spec": {}}],
+        job="seamless-30to48", label="Converting Seamless Interactions 30fps -> 4,8 fps",
     )
-    gs = {g["grp"]: g for g in store.group_stats()}
+    gs = {g["job"]: g for g in store.group_stats()}
     assert set(gs) == {"seamless-30to48"}
     assert gs["seamless-30to48"]["total"] == 2
     assert gs["seamless-30to48"]["label"] == "Converting Seamless Interactions 30fps -> 4,8 fps"
@@ -202,9 +202,9 @@ def test_explicit_group_overrides_job_id_prefix(isolated_state):
 
 def test_label_skipped_for_mixed_batch_without_group(isolated_state):
     store = JobStore(str(isolated_state / "g2.db"), max_retries=3)
-    # No batch group + gigs resolve to different prefixes => no single label home.
+    # No batch job + gigs resolve to different prefixes => no single label home.
     store.seed(
-        [{"job_id": "campA/1", "spec": {}}, {"job_id": "campB/1", "spec": {}}],
+        [{"subjob_id": "campA/1", "spec": {}}, {"subjob_id": "campB/1", "spec": {}}],
         label="should not stick",
     )
     for g in store.group_stats():
@@ -214,11 +214,11 @@ def test_label_skipped_for_mixed_batch_without_group(isolated_state):
 def test_seed_endpoint_accepts_group_and_label(client):
     H = {"Authorization": "Bearer T0KEN"}
     client.post("/seed", headers=H, json={
-        "gigs": [{"job_id": "x/1", "spec": {}}, {"job_id": "y/2", "spec": {}}],
-        "group": "camp", "label": "My Campaign",
+        "gigs": [{"subjob_id": "x/1", "spec": {}}, {"subjob_id": "y/2", "spec": {}}],
+        "job": "camp", "label": "My Campaign",
     })
     groups = client.get("/groups", headers=H).json()["groups"]
-    camp = next(g for g in groups if g["grp"] == "camp")
+    camp = next(g for g in groups if g["job"] == "camp")
     assert camp["total"] == 2 and camp["label"] == "My Campaign"
 
 

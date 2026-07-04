@@ -24,7 +24,7 @@ def _nvme_disks():
 def test_untagged_gig_gets_disk_and_roots():
     """Gig with disk=None + topology with matching rule → roots injected."""
     disks = _nvme_disks()
-    gig = {"job_id": "shard_01/clip.npz", "disk": None,
+    gig = {"subjob_id": "shard_01/clip.npz", "disk": None,
            "spec": {"src_path": "shard_01/clip.npz"}}
     inject_roots([gig], disks)
     assert gig["disk"] == "cache_nvme"
@@ -35,7 +35,7 @@ def test_untagged_gig_gets_disk_and_roots():
 def test_untagged_gig_with_no_match_stays_inert():
     """Gig with disk=None + no matching rule → left untouched (inert)."""
     disks = [DiskConfig(id="d1", match="shard_99")]   # won't match shard_01
-    gig = {"job_id": "shard_01/clip.npz", "disk": None, "spec": {}}
+    gig = {"subjob_id": "shard_01/clip.npz", "disk": None, "spec": {}}
     inject_roots([gig], disks)
     assert gig["disk"] is None
     assert "read_root" not in gig["spec"]
@@ -45,7 +45,7 @@ def test_untagged_gig_with_no_match_stays_inert():
 def test_already_tagged_gig_not_re_derived():
     """Already-tagged gig → derive_disk NOT called, roots injected from existing disk."""
     disks = _nvme_disks()
-    gig = {"job_id": "shard_01/clip.npz", "disk": "cache_nvme",
+    gig = {"subjob_id": "shard_01/clip.npz", "disk": "cache_nvme",
            "spec": {"src_path": "shard_01/clip.npz"}}
     with patch("kiroshi.storage.derive_disk") as mock_dd:
         inject_roots([gig], disks)
@@ -55,7 +55,7 @@ def test_already_tagged_gig_not_re_derived():
 
 def test_no_topology_inert():
     """No disks → nothing happens (same as before)."""
-    gig = {"job_id": "x", "disk": None, "spec": {}}
+    gig = {"subjob_id": "x", "disk": None, "spec": {}}
     inject_roots([gig], [])
     assert gig["disk"] is None
     assert gig["spec"] == {}
@@ -64,7 +64,7 @@ def test_no_topology_inert():
 def test_re_derive_only_fires_for_none_disk():
     """Gigs with a non-None but unknown disk id are NOT re-derived (corrupt DB edge)."""
     disks = _nvme_disks()
-    gig = {"job_id": "shard_01/clip.npz", "disk": "ghost_disk", "spec": {}}
+    gig = {"subjob_id": "shard_01/clip.npz", "disk": "ghost_disk", "spec": {}}
     with patch("kiroshi.storage.derive_disk") as mock_dd:
         inject_roots([gig], disks)
         mock_dd.assert_not_called()

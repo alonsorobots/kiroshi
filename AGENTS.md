@@ -23,12 +23,27 @@ There is **no central scheduler guessing what to run** — you seed gigs, runner
 pull them. For *dependent* multi-stage work, declare a **pipeline** (below) so
 the staggering is first-class instead of hand-rolled.
 
+## Where things live (read before adding a feature)
+
+**This is a monorepo. Everything Kiroshi lives here** — don't create or edit a
+separate `kiroshi-mcp` / `kiroshi-cursor` repo (both are RETIRED; folding them
+back in is why this note exists).
+
+- **Coordinator / jobstore / leasing / decision-log** → `src/kiroshi/` (e.g.
+  `coordinator.py`, `jobstore.py`). New Fixer HTTP endpoints go here.
+- **MCP server + tools** (`kiroshi mcp`, extra `[mcp]`) → `src/kiroshi/mcp_server.py`.
+  When you add a Fixer endpoint an agent should reach, add the thin tool here in
+  the *same* commit, and document it in `capabilities.py` + this file.
+- **Vendor-specific integrations** (Cursor bridge, future Slack/etc.) →
+  `src/kiroshi/integrations/`, each behind its own optional extra
+  (`[cursor]`, …) so headless nodes stay lean and core stays runtime-neutral.
+
 ## Subcommands (task → command → when)
 
 | task | command | when to use / NOT |
 |---|---|---|
-| Run one task across the mesh | `kiroshi run <task> --enumerate --lan` | Quick one-shot; the "front door." Avoid for long campaigns — use fixer+runner+seed for durability/resume. |
-| Run the coordinator | `kiroshi fixer --db X.db --port 8800` | One per mesh. State persists in the `.db`; kill/restart is safe and resumes. **Gotcha:** a split-brain guard refuses to start if another Fixer is discoverable — use `--force-second-fixer` only when deliberately running a second one (e.g. a parallel campaign on a new port). |
+| Run one task across the mesh | `kiroshi run <task> --enumerate --lan` | Quick one-shot; the "front door." Avoid for long campaigns — seed into the persistent Fixer as a group (below) for durability/resume. |
+| Run the coordinator | *(already running — don't start another)* | **There is ONE Fixer for the whole mesh** — the persistent `kiroshi-fixer` service (port 8787, beacons, `--fixer auto` finds it, topology-aware). You almost never start a Fixer by hand. Every campaign is a GROUP inside this one Fixer, not a new port. `--force-second-fixer` is for deliberately isolated *meshes* (different NAS/topology), NEVER for "a parallel campaign" — that fragments the queue + disk budget and breaks `auto`/MCP. See "Campaign model" below. |
 | Run a worker | `kiroshi runner --fixer <url> --task <m:f> --workers N` | Bind ONE task per runner. `--capacity` caps how many gigs it holds leased (prevents hoarding the whole disk budget). `--syspath` adds import roots for the task code. |
 | Enqueue gigs | `kiroshi seed --fixer <url> --jobs gigs.jsonl --group <slug> --label "<desc>"` | Dedups by `job_id`. Use `--group` to name a campaign (dashboard + `/metrics/export` filter on it). |
 | Stage data between tiers | `kiroshi stage --from <src> --to <dst> [--pattern glob] [--fixer <url>]` | Budgeted, resumable parallel copy (HDD→NVMe, remote fetch, prefetch). Shares the mesh I/O budget via ResourceClient; skips already-copied files. Local mode (no `--fixer`) runs in-process like `kiroshi run`; mesh mode seeds gigs for a `kiroshi.staging:run` runner. |
@@ -200,11 +215,78 @@ The codes an agent will actually see:
 Severities: `SEVERITY_INFO`, `SEVERITY_WARN`, `SEVERITY_CRIT`. Every advisory
 has a stable `fingerprint` so a dashboard can dedup across polls.
 
+## Coordination decision log — debugging underutilization
+
+When a node is idle or throughput is lower than expected, the **decision log**
+tells you *why* the coordinator gave each host the gigs it did. Three endpoints
+(also available as MCP tools):
+
+1. **`GET /decisions/summary`** (MCP: `scheduling_summary`) — the first call.
+   Shows per-host grant ratio over a window and which hosts are **starved**
+   (requested > 0 but grant_ratio ≈ 0). Each host's `main_reason` is the
+   dominant binding constraint.
+
+2. **`GET /lease/decisions`** (MCP: `lease_decisions`) — raw per-lease-call
+   records: requested vs granted, `binding_reason`, fair-share ceiling,
+   per-disk budget snapshot. Filter by `host` or `reason`.
+
+3. **`GET /job/trace?job_id=...`** (MCP: `job_trace`) — one gig's full
+   coordination timeline: SEEDED → LEASED → COMPLETED/FAILED/EXPIRED.
+
+The `binding_reason` enum disambiguates the cause at a glance:
+
+| reason | meaning | action |
+|---|---|---|
+| `GRANTED_FULL` | host got everything it asked for | healthy — no action |
+| `NO_PENDING` | nothing pending in the queue | campaign is done or not seeded |
+| `FAIR_SHARE_CAP` | host already holds its proportional slice | expected with fair-share on; not a bug |
+| `DISK_BUDGET_FULL` | all candidate disks at their in-flight cap | add disks, raise `concurrency`, or stage to NVMe |
+| `CAPACITY_ZERO` | runner asked for 0 (spinning up/draining) | transient — check runner health |
+
+The `/status` JSON also carries a `scheduling` block (same data as
+`/decisions/summary` with a 120s window) for one-glance dashboard visibility.
+
+## Campaign model — ONE Fixer, campaigns are groups
+
+The mesh has **one** long-lived Fixer: the `kiroshi-fixer` Windows service on
+Chronos (port 8787, `C:\ProgramData\Kiroshi\jobs.db`, beacons, topology-aware
+via `C:\ProgramData\Kiroshi\kiroshi.toml`). It IS "Kiroshi." Everything —
+`--fixer auto`, Cursor/Kilo MCP, the dashboard — points at this one.
+
+A "campaign" (reduce30, slerp, dvq, …) is **not a new Fixer/port/db**. It's a
+`--group` inside the persistent Fixer. To launch one:
+
+```bash
+# 1) seed the gigs into the persistent Fixer as a named group
+kiroshi seed --fixer auto --jobs gigs.jsonl --group reduce30 --label "88-DoF reduce"
+# 2) start runners anywhere, pointed at the same one Fixer
+kiroshi runner --fixer auto --task scripts.mesh.tasks.reduce_pose:run --workers N
+# 3) observe everything (all groups) in one place
+kiroshi status --fixer auto           # or MCP status / the dashboard
+```
+
+Groups give per-campaign dashboards, `/metrics/export?grp=…`, `--group` filters
+on `jobs`/`requeue`, and pipeline edges — all the isolation a campaign needs,
+with none of the fragmentation. **Do NOT** spin `kiroshi fixer … --port 88xx
+--force-second-fixer --no-beacon` per campaign: that was the old anti-pattern
+(it made `auto`/MCP resolve to an empty Fixer and split the disk budget). The
+storage topology lives on the persistent Fixer once, so campaigns inherit the
+`cache_nvme` budget automatically.
+
+> Migration note: any pre-existing per-campaign Fixer (e.g. reduce30 on 8800)
+> can keep running until it drains — don't migrate a live queue. The *next*
+> campaign seeds into 8787 with `--group`, and the old port retires itself.
+
 ## Gotchas an agent MUST know
 
 1. **Split-brain guard.** A Fixer refuses to start if another is discoverable
-   on the LAN. Use `--force-second-fixer` ONLY when deliberately running a
-   second campaign on a different port; otherwise find and stop the existing one.
+   on the LAN. This is a FEATURE: one mesh = one Fixer. `--force-second-fixer`
+   is for deliberately isolated *meshes* (a different NAS / disjoint topology),
+   NOT for campaigns — running a second Fixer "for a parallel campaign" splits
+   the queue + per-disk budget in two (both saturate the shared NAS) and makes
+   the campaign invisible to `--fixer auto` / MCP. Campaigns are GROUPS in the
+   one persistent Fixer (see "Campaign model"). If you hit the guard, you almost
+   certainly want `--group`, not a second Fixer.
 2. **Cache-only vs array SMB shares (Unraid).** A share configured
    `shareUseCache=only` may STILL route writes to an HDD array if the share
    folder already physically exists on a parity disk. **Prefer a direct

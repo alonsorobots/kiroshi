@@ -344,8 +344,8 @@ def test_seed_captures_origin_by_group():
     c, app = _http_client()
     with c:
         r = c.post("/seed", json={
-            "gigs": [{"job_id": "grpA/1", "spec": {}}],
-            "group": "grpA",
+            "gigs": [{"subjob_id": "grpA/1", "spec": {}}],
+            "job": "grpA",
             "origin": {"kind": "test", "agent_id": "AGT",
                        "callback": "http://127.0.0.1:0/x"},
         })
@@ -354,7 +354,7 @@ def test_seed_captures_origin_by_group():
 
         # Re-seed with the SAME origin — should not duplicate.
         c.post("/seed", json={
-            "gigs": [{"job_id": "grpA/2", "spec": {}}], "group": "grpA",
+            "gigs": [{"subjob_id": "grpA/2", "spec": {}}], "job": "grpA",
             "origin": {"kind": "test", "agent_id": "AGT",
                        "callback": "http://127.0.0.1:0/x"},
         })
@@ -382,7 +382,7 @@ def test_lease_response_carries_disk_scoped_advisories():
     c, app = _http_client()
     with c:
         c.post("/seed", json={
-            "gigs": [{"job_id": "g/1", "spec": {}}],
+            "gigs": [{"subjob_id": "g/1", "spec": {}}],
         })
         app.state.advisories.fire(
             severity="warn", code="nas.thrash", disk="disk3",
@@ -405,15 +405,15 @@ def test_origin_flows_from_seed_to_advisory_via_detector():
     c, app = _http_client()
     with c:
         c.post("/seed", json={
-            "gigs": [{"job_id": "camp/1", "spec": {}, "group": "camp"}],
-            "group": "camp",
+            "gigs": [{"subjob_id": "camp/1", "spec": {}, "job": "camp"}],
+            "job": "camp",
             "origin": {"kind": "test", "callback": "http://127.0.0.1:0/x"},
         })
         # Fake the gig into "leased on disk3" so origins_for("disk3") finds it.
         # We do this by reaching into the store directly — the coordinator's
-        # origins_for lookup only cares about (grp, disk) pairs.
+        # origins_for lookup only cares about (job, disk) pairs.
         app.state.store._conn.execute(  # noqa: SLF001
-            "UPDATE jobs SET state='leased', disk='disk3' WHERE job_id=?",
+            "UPDATE jobs SET state='leased', disk='disk3' WHERE subjob_id=?",
             ("camp/1",))
         app.state.store._conn.commit()  # noqa: SLF001
 

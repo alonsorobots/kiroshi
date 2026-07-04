@@ -25,6 +25,12 @@ def _skip_or_import():
     return mcp_server
 
 
+def test_build_server_returns_non_none():
+    m = _skip_or_import()
+    app = m.build_server("http://example")
+    assert app is not None, "build_server() must return the FastMCP app (regression: missing return)"
+
+
 def test_build_server_registers_expected_tools():
     m = _skip_or_import()
     app = m.build_server()
@@ -54,7 +60,8 @@ def test_build_server_registers_expected_tools():
     if tool_names:
         must = {"status", "list_advisories", "seed_gigs", "export_metrics",
                 "validate_pipeline", "tick_pipeline", "search_jobs",
-                "requeue", "ps", "stop"}
+                "requeue", "ps", "stop",
+                "lease_decisions", "job_trace", "scheduling_summary"}
         missing = must - tool_names
         assert not missing, f"MCP server missing pillar tools: {missing}"
 

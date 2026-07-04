@@ -90,7 +90,7 @@ def _init_worker(task_ref: str, extra_syspath: list[str]) -> None:
 
 
 def _run_one(payload: tuple[str, dict, int, float]) -> dict[str, Any]:
-    job_id, spec, retries, backoff = payload
+    subjob_id, spec, retries, backoff = payload
     from .profiler import GigProfiler
     last_err: Optional[BaseException] = None
     for attempt in range(retries + 1):
@@ -99,7 +99,7 @@ def _run_one(payload: tuple[str, dict, int, float]) -> dict[str, Any]:
         try:
             result = _TASK_FN(spec) or {}  # type: ignore[misc]
             out = {
-                "job_id": job_id,
+                "subjob_id": subjob_id,
                 "status": result.get("status", "ok"),
                 "metrics": result.get("metrics", {}),
                 "error": None,
@@ -119,16 +119,16 @@ def _run_one(payload: tuple[str, dict, int, float]) -> dict[str, Any]:
     # C-level leaks you can't patch; the real fix is evicting the accumulator).
     if _GC_BETWEEN_TASKS:
         gc.collect()
-    return {"job_id": job_id, "status": "error", "error": repr(last_err), "metrics": {}}
+    return {"subjob_id": subjob_id, "status": "error", "error": repr(last_err), "metrics": {}}
 
 
-def _err(job_id: str, msg: str) -> dict[str, Any]:
-    return {"job_id": job_id, "status": "error", "error": msg, "metrics": {}}
+def _err(subjob_id: str, msg: str) -> dict[str, Any]:
+    return {"subjob_id": subjob_id, "status": "error", "error": msg, "metrics": {}}
 
 
-def _requeue(job_id: str, reason: str) -> dict[str, Any]:
+def _requeue(subjob_id: str, reason: str) -> dict[str, Any]:
     """An evicted gig: the Fixer returns it to ``pending`` without burning retries."""
-    return {"job_id": job_id, "status": "requeue", "error": reason, "metrics": {}}
+    return {"subjob_id": subjob_id, "status": "requeue", "error": reason, "metrics": {}}
 
 
 def _tree_kill(proc) -> None:
@@ -261,7 +261,7 @@ class LocalPool:
         max_pending = max_pending or max(1, self.workers * 2)
         idx = 0
         results: list[dict[str, Any]] = []
-        inflight: dict[Any, list] = {}  # future -> [job_id, submit_time]
+        inflight: dict[Any, list] = {}  # future -> [subjob_id, submit_time]
         evicting = False  # True once pause_cb fired: stop refilling, drain running
 
         def submit_next() -> bool:
@@ -272,9 +272,9 @@ class LocalPool:
             idx += 1
             fut = self._pool.submit(  # type: ignore[union-attr]
                 _run_one,
-                (g["job_id"], g.get("spec", {}), self.item_retries, self.item_backoff),
+                (g["subjob_id"], g.get("spec", {}), self.item_retries, self.item_backoff),
             )
-            inflight[fut] = [g["job_id"], time.time()]
+            inflight[fut] = [g["subjob_id"], time.time()]
             return True
 
         def refill(stagger: float = 0.0) -> None:

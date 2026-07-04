@@ -60,8 +60,8 @@ def test_concurrency_map_only_caps_declared_disks():
 def test_seed_persists_disk(tmp_path):
     store = JobStore(str(tmp_path / "s.db"), max_retries=3)
     store.seed([
-        {"job_id": "shard_01/a", "spec": {}, "disk": "d1"},
-        {"job_id": "shard_09/b", "spec": {}},  # no disk -> NULL (uncapped)
+        {"subjob_id": "shard_01/a", "spec": {}, "disk": "d1"},
+        {"subjob_id": "shard_09/b", "spec": {}},  # no disk -> NULL (uncapped)
     ])
     assert store.job("shard_01/a")["disk"] == "d1"
     assert store.job("shard_09/b")["disk"] is None
@@ -74,11 +74,11 @@ def test_disk_column_migrates_on_old_db(tmp_path):
     # A DB from before the `disk` column: every column the schema had EXCEPT disk.
     c = sqlite3.connect(str(db))
     c.execute(
-        "CREATE TABLE jobs (job_id TEXT PRIMARY KEY, spec TEXT, state TEXT, "
+        "CREATE TABLE jobs (subjob_id TEXT PRIMARY KEY, spec TEXT, state TEXT, "
         "lease_id TEXT, runner_id TEXT, host TEXT, attempts INTEGER, "
         "leased_at REAL, lease_deadline REAL, completed_at REAL, error TEXT, "
-        "metrics TEXT, created_at REAL, grp TEXT)")
-    c.execute("INSERT INTO jobs (job_id,spec,state,created_at,grp) "
+        "metrics TEXT, created_at REAL, job TEXT)")
+    c.execute("INSERT INTO jobs (subjob_id,spec,state,created_at,job) "
               "VALUES ('x','{}','pending',1,'g')")
     c.commit()
     c.close()
@@ -92,7 +92,7 @@ def _seed_many(store, n_per_disk, disks=("d1", "d2")):
     gigs = []
     for d in disks:
         for i in range(n_per_disk):
-            gigs.append({"job_id": f"{d}/g{i}", "spec": {}, "disk": d})
+            gigs.append({"subjob_id": f"{d}/g{i}", "spec": {}, "disk": d})
     store.seed(gigs)
 
 
@@ -140,7 +140,7 @@ def test_second_lease_blocked_while_first_holds_budget(tmp_path):
     b = store.lease("B", "h", 10, 60, disk_concurrency=budget)
     assert b.gigs == []       # both disks saturated fleet-wide -> nothing left to lease
     # A completes -> budget frees -> B can now lease
-    store.complete([{"job_id": g["job_id"], "status": "ok", "metrics": {}}
+    store.complete([{"subjob_id": g["subjob_id"], "status": "ok", "metrics": {}}
                     for g in a.gigs])
     b2 = store.lease("B", "h", 10, 60, disk_concurrency=budget)
     assert len(b2.gigs) == 4
@@ -150,7 +150,7 @@ def test_unknown_disk_is_uncapped(tmp_path):
     # a gig whose disk is NOT in the budget map is uncapped (safe default: only
     # declared disks are capped) — never starved by a missing topology entry.
     store = JobStore(str(tmp_path / "l5.db"), max_retries=3)
-    store.seed([{"job_id": f"dx/g{i}", "spec": {}, "disk": "dx"} for i in range(6)])
+    store.seed([{"subjob_id": f"dx/g{i}", "spec": {}, "disk": "dx"} for i in range(6)])
     res = store.lease("r", "h", 6, 60, disk_concurrency={"d1": 2})  # 'dx' not in map
     assert len(res.gigs) == 6
 
@@ -167,8 +167,8 @@ def test_coordinator_seed_derives_disk(tmp_path):
     c = TestClient(app)
     H = {"Authorization": "Bearer T"}
     c.post("/seed", headers=H, json={"gigs": [
-        {"job_id": "shard_03/a", "spec": {"src_path": "shard_03/a.npz"}},
-        {"job_id": "shard_12/b", "spec": {}},
+        {"subjob_id": "shard_03/a", "spec": {"src_path": "shard_03/a.npz"}},
+        {"subjob_id": "shard_12/b", "spec": {}},
     ]})
     g3 = c.get("/job/shard_03/a", headers=H).json()
     g12 = c.get("/job/shard_12/b", headers=H).json()
@@ -185,9 +185,9 @@ def test_inject_roots_stamps_disk_paths():
              DiskConfig(id="d2", read="//nas/disk2_direct/data",
                         write="//nas/disk2/data")]
     gigs = [
-        {"job_id": "shard_01/a", "disk": "d1", "spec": {"src_path": "shard_01/a.npz"}},
-        {"job_id": "shard_09/b", "disk": "d2", "spec": {}},
-        {"job_id": "x/c", "disk": None, "spec": {}},   # no disk -> inert
+        {"subjob_id": "shard_01/a", "disk": "d1", "spec": {"src_path": "shard_01/a.npz"}},
+        {"subjob_id": "shard_09/b", "disk": "d2", "spec": {}},
+        {"subjob_id": "x/c", "disk": None, "spec": {}},   # no disk -> inert
     ]
     inject_roots(gigs, disks)
     assert gigs[0]["spec"]["read_root"] == "//nas/disk1_direct/data"
@@ -199,7 +199,7 @@ def test_inject_roots_stamps_disk_paths():
 def test_inject_roots_inert_without_topology():
     from kiroshi.storage import inject_roots
 
-    gigs = [{"job_id": "a", "disk": None, "spec": {}}]
+    gigs = [{"subjob_id": "a", "disk": None, "spec": {}}]
     inject_roots(gigs, [])  # no disks
     assert gigs[0]["spec"] == {}
 
@@ -219,7 +219,7 @@ def test_lease_injects_dual_path_roots(tmp_path):
     c = TestClient(app)
     H = {"Authorization": "Bearer T"}
     c.post("/seed", headers=H, json={"gigs": [
-        {"job_id": "shard_01/a", "spec": {"src_path": "shard_01/a.npz"}}]})
+        {"subjob_id": "shard_01/a", "spec": {"src_path": "shard_01/a.npz"}}]})
     lease = c.post("/lease", headers=H, json={
         "runner_id": "r", "host": "h", "capacity": 4, "heartbeat_interval": 30}).json()
     g = lease["gigs"][0]
@@ -251,9 +251,9 @@ def test_confined_join_refuses_escape_and_handles_unc(tmp_path):
 def test_stats_includes_disk_inflight(tmp_path):
     store = JobStore(str(tmp_path / "obs.db"), max_retries=3)
     store.seed([
-        {"job_id": "shard_01/a", "spec": {}, "disk": "d1"},
-        {"job_id": "shard_01/b", "spec": {}, "disk": "d1"},
-        {"job_id": "shard_09/c", "spec": {}, "disk": "d2"},
+        {"subjob_id": "shard_01/a", "spec": {}, "disk": "d1"},
+        {"subjob_id": "shard_01/b", "spec": {}, "disk": "d1"},
+        {"subjob_id": "shard_09/c", "spec": {}, "disk": "d2"},
     ])
     store.lease("r", "h", 10, 60, disk_concurrency={"d1": 4, "d2": 4})
     st = store.stats()
@@ -264,11 +264,11 @@ def test_stats_includes_disk_inflight(tmp_path):
 def test_disk_done_counts(tmp_path):
     store = JobStore(str(tmp_path / "obs2.db"), max_retries=3)
     store.seed([
-        {"job_id": "shard_01/a", "spec": {}, "disk": "d1"},
-        {"job_id": "shard_09/b", "spec": {}, "disk": "d2"},
+        {"subjob_id": "shard_01/a", "spec": {}, "disk": "d1"},
+        {"subjob_id": "shard_09/b", "spec": {}, "disk": "d2"},
     ])
     store.lease("r", "h", 10, 60)
-    store.complete([{"job_id": "shard_01/a", "status": "ok", "metrics": {}}])
+    store.complete([{"subjob_id": "shard_01/a", "status": "ok", "metrics": {}}])
     counts = store.disk_done_counts()
     assert counts == {"d1": 1}  # d2 still pending
 

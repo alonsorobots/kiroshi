@@ -2,7 +2,7 @@
 
 The tricky part: the word "jobs" MOVES from the sub-job table to the job table.
 The migration must create `subjobs` from old `jobs` BEFORE reusing the `jobs`
-name for the old `campaigns` data.
+name for the old `jobs` data.
 """
 from __future__ import annotations
 
@@ -23,9 +23,9 @@ def _make_old_db(path: str) -> None:
     conn = sqlite3.connect(path)
     conn.executescript("""
         CREATE TABLE jobs (
-            job_id        TEXT PRIMARY KEY,
+            subjob_id        TEXT PRIMARY KEY,
             spec          TEXT NOT NULL,
-            grp           TEXT,
+            job           TEXT,
             disk          TEXT,
             state         TEXT NOT NULL DEFAULT 'pending',
             lease_id      TEXT,
@@ -39,24 +39,24 @@ def _make_old_db(path: str) -> None:
             metrics       TEXT,
             created_at    REAL NOT NULL
         );
-        CREATE TABLE campaigns (
-            grp        TEXT PRIMARY KEY,
+        CREATE TABLE jobs (
+            job        TEXT PRIMARY KEY,
             label      TEXT,
             created_at REAL NOT NULL
         );
         CREATE INDEX idx_jobs_state ON jobs(state);
-        CREATE INDEX idx_jobs_grp ON jobs(grp);
+        CREATE INDEX idx_jobs_grp ON jobs(job);
     """)
     # Insert some test data
     conn.executemany(
-        "INSERT INTO jobs (job_id, spec, grp, disk, state, created_at) "
+        "INSERT INTO jobs (subjob_id, spec, job, disk, state, created_at) "
         "VALUES (?, '{}', ?, ?, ?, 1000.0)",
         [("clip_001", "reduce30", "disk1", "done"),
          ("clip_002", "reduce30", "disk1", "pending"),
          ("clip_003", "slerp", "cache_nvme", "failed")],
     )
     conn.executemany(
-        "INSERT INTO campaigns (grp, label, created_at) VALUES (?, ?, 1000.0)",
+        "INSERT INTO jobs (job, label, created_at) VALUES (?, ?, 1000.0)",
         [("reduce30", "Canonical 30fps -> 88-DoF"),
          ("slerp", "88-DoF@30 -> @4fps")],
     )
@@ -94,7 +94,7 @@ def test_migrate_preserves_row_counts(tmp_path):
     _make_old_db(str(db))
     conn = sqlite3.connect(str(db))
     old_jobs_count = conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
-    old_campaigns_count = conn.execute("SELECT COUNT(*) FROM campaigns").fetchone()[0]
+    old_campaigns_count = conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
     migrate(conn)
     new_subjobs_count = conn.execute("SELECT COUNT(*) FROM subjobs").fetchone()[0]
     new_jobs_count = conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
@@ -112,13 +112,13 @@ def test_migrate_renames_columns_correctly(tmp_path):
     assert "subjob_id" in sj_cols
     assert "job" in sj_cols
     assert "disk" in sj_cols
-    assert "job_id" not in sj_cols  # old name gone
-    assert "grp" not in sj_cols     # old name gone
+    assert "subjob_id" not in sj_cols  # old name gone
+    assert "job" not in sj_cols     # old name gone
     # Check jobs columns
     j_cols = {r[1] for r in conn.execute("PRAGMA table_info(jobs)")}
     assert "job" in j_cols
     assert "label" in j_cols
-    assert "grp" not in j_cols  # old name gone
+    assert "job" not in j_cols  # old name gone
 
 
 def test_migrate_data_round_trips(tmp_path):
@@ -131,7 +131,7 @@ def test_migrate_data_round_trips(tmp_path):
         "SELECT subjob_id, job, disk, state FROM subjobs WHERE subjob_id='clip_001'"
     ).fetchone()
     assert row[0] == "clip_001"
-    assert row[1] == "reduce30"  # was grp
+    assert row[1] == "reduce30"  # was job
     assert row[2] == "disk1"
     assert row[3] == "done"
     # Check a specific job
@@ -143,7 +143,7 @@ def test_migrate_data_round_trips(tmp_path):
 
 
 def test_migrate_does_not_invert_counts(tmp_path):
-    """The critical trap: jobs↔campaigns swap could invert job/sub-job counts.
+    """The critical trap: jobs↔jobs swap could invert job/sub-job counts.
     Verify 3 sub-jobs stay as 3 subjobs (not 2) and 2 jobs stay as 2 jobs."""
     db = tmp_path / "test.db"
     _make_old_db(str(db))
@@ -152,7 +152,7 @@ def test_migrate_does_not_invert_counts(tmp_path):
     subjobs = conn.execute("SELECT COUNT(*) FROM subjobs").fetchone()[0]
     jobs = conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
     assert subjobs == 3, f"subjobs should be 3 (was old jobs), got {subjobs}"
-    assert jobs == 2, f"jobs should be 2 (was old campaigns), got {jobs}"
+    assert jobs == 2, f"jobs should be 2 (was old jobs), got {jobs}"
 
 
 def test_migrate_is_idempotent(tmp_path):

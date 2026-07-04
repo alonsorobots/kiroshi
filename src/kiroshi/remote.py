@@ -425,6 +425,7 @@ def _resolve(args, cfg: MeshConfig) -> dict:
     """Build the effective remote-launch config from CLI args + kiroshi.local.toml."""
     host = args.host
     hc = cfg.host(host)  # case-insensitive [hosts.<Host>] lookup
+    ssh_target = getattr(hc, "ssh_target", None) or host
     remote_python = args.python or hc.python or "python"
     fixer = args.fixer or f"http://{_lan_ip()}:{cfg.fixer_port}"
     workers = args.workers or hc.workers
@@ -435,6 +436,7 @@ def _resolve(args, cfg: MeshConfig) -> dict:
     slug = "".join(c if c.isalnum() else "-" for c in (args.group or "runner")).strip("-")
     return {
         "host": host,
+        "ssh_target": ssh_target,
         "python": remote_python,
         "fixer": fixer.rstrip("/"),
         "task": args.task or "",
@@ -616,7 +618,7 @@ def run_remote(args) -> int:
     # --- 1. preflight (always) ------------------------------------------------
     pre_cfg = {k: eff[k] for k in ("task", "syspath", "fixer", "token",
                                    "read_root", "write_root")}
-    rc, out, err = _ssh_python(host, eff["python"],
+    rc, out, err = _ssh_python(eff["ssh_target"], eff["python"],
                                _embed(pre_cfg) + _PREFLIGHT, timeout=60)
     if rc != 0 and not _marker_json(out, "PREFLIGHT="):
         print(f"[remote] could not reach {host} or run its interpreter "
@@ -640,7 +642,7 @@ def run_remote(args) -> int:
     prov_cfg = {k: eff[k] for k in ("python", "fixer", "task", "workers",
                                     "syspath", "read_root", "write_root",
                                     "token", "task_name", "slug", "user")}
-    rc, out, err = _ssh_python(host, eff["python"],
+    rc, out, err = _ssh_python(eff["ssh_target"], eff["python"],
                                _embed(prov_cfg) + _PROVISION, timeout=90)
     prov = _marker_json(out, "PROVISION=")
     if not prov:

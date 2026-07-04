@@ -24,7 +24,7 @@ UNGROUPED = "(ungrouped)"
 
 
 def _job_of(subjob_id: str) -> str:
-    """Campaign/group for a gig: everything before the last '/'. Gigs with no
+    """Campaign/job for a gig: everything before the last '/'. Gigs with no
     '/' are bucketed under ``(ungrouped)`` so every gig has a home."""
     i = subjob_id.rfind("/")
     return subjob_id[:i] if i > 0 else UNGROUPED
@@ -114,11 +114,11 @@ class JobStore:
 
     # ---------------------------------------------------------------- seed
     def seed(self, gigs: list[dict[str, Any]],
-             group: Optional[str] = None,
+             job: Optional[str] = None,
              label: Optional[str] = None) -> int:
-        """Insert gigs idempotently. Each gig: {subjob_id, spec, group?}.
+        """Insert gigs idempotently. Each gig: {subjob_id, spec, job?}.
 
-        ``group`` (per-gig or batch-wide) overrides the subjob_id-prefix grouping, so
+        ``job`` (per-gig or batch-wide) overrides the subjob_id-prefix grouping, so
         a whole campaign can be seeded under one readable slug regardless of how
         the ``subjob_id``s are shaped. ``label`` is a human-readable name for that
         campaign, stored once in the ``jobs`` table and shown in the UI.
@@ -129,7 +129,7 @@ class JobStore:
         rows = []
         for g in gigs:
             jid = g["subjob_id"]
-            job = g.get("group") or group or _job_of(jid)
+            job = g.get("job") or job or _job_of(jid)
             disk = g.get("disk")
             rows.append((jid, jsonio.dumps(g.get("spec", {})), job, disk, now))
         with self._lock:
@@ -143,7 +143,7 @@ class JobStore:
             # row doesn't inflate the reported "inserted" count.
             inserted = self._conn.total_changes - before
             if label:
-                lbl_grp = self._label_group(gigs, group)
+                lbl_grp = self._label_group(gigs, job)
                 if lbl_grp:
                     self._conn.execute(
                         "INSERT INTO subjobs (job, label, created_at) VALUES (?, ?, ?) "
@@ -155,21 +155,21 @@ class JobStore:
 
     @staticmethod
     def _label_group(gigs: list[dict[str, Any]],
-                     group: Optional[str]) -> Optional[str]:
-        """The group slug a batch-wide ``label`` should attach to.
+                     job: Optional[str]) -> Optional[str]:
+        """The job slug a batch-wide ``label`` should attach to.
 
-        An explicit batch ``group`` wins. Otherwise, if every gig resolves to the
-        same effective group, that one is used; a mixed batch has no single home
+        An explicit batch ``job`` wins. Otherwise, if every gig resolves to the
+        same effective job, that one is used; a mixed batch has no single home
         for the label, so we return None (and skip labelling rather than mislabel).
         """
-        if group:
-            return group
+        if job:
+            return job
         if not gigs:
             return None
-        eff = {g.get("group") or _job_of(g["subjob_id"]) for g in gigs}
+        eff = {g.get("job") or _job_of(g["subjob_id"]) for g in gigs}
         return next(iter(eff)) if len(eff) == 1 else None
 
-    def mark_done_existing(self, job_ids: list[str]) -> int:
+    def mark_done_existing(self, subjob_ids: list[str]) -> int:
         """Mark gigs done without execution (e.g. output already exists = resume)."""
         now = time.time()
         with self._lock:
@@ -177,7 +177,7 @@ class JobStore:
             self._conn.executemany(
                 "UPDATE subjobs SET state='done', completed_at=?, error=NULL "
                 "WHERE subjob_id=? AND state!='done'",
-                [(now, jid) for jid in job_ids],
+                [(now, jid) for jid in subjob_ids],
             )
             self._conn.commit()
             return self._conn.total_changes - before
@@ -427,7 +427,7 @@ class JobStore:
             "host_inflight_before": host_inflight_before,
             "fair_share_ceiling": fair_share_ceiling,
             "disk": disk,
-            "granted_job_ids": ids[:32],
+            "granted_subjob_ids": ids[:32],
         }
 
     def _finalize_lease(self, rows, lease_id, runner_id, host, now, ttl) -> LeaseResult:
@@ -692,7 +692,7 @@ class JobStore:
     def list_jobs(self, states: Optional[tuple[str, ...]] = None,
                   limit: int = 200, newest_first: bool = True,
                   job: Optional[str] = None,
-                  job_id_re: Optional[str] = None,
+                  subjob_id_re: Optional[str] = None,
                   error_re: Optional[str] = None) -> list[dict[str, Any]]:
         """Return job rows (for the /jobs + /history views). Newest by activity.
 
@@ -700,7 +700,7 @@ class JobStore:
         seed time). Without it, rows from every campaign are mixed (the existing
         behavior for the dashboard).
 
-        ``job_id_re`` / ``error_re`` optionally apply a regex filter **server-side**
+        ``subjob_id_re`` / ``error_re`` optionally apply a regex filter **server-side**
         via the registered REGEXP function (so a 100k-gig campaign doesn't ship
         all rows to the client to grep). Patterns are validated with
         ``re.compile`` before the query runs — a bad pattern raises ``re.error``
@@ -717,10 +717,10 @@ class JobStore:
         if job:
             clauses.append("job = ?")
             params.append(job)
-        if job_id_re is not None:
-            re.compile(job_id_re)           # validate before query (raises re.error)
+        if subjob_id_re is not None:
+            re.compile(subjob_id_re)           # validate before query (raises re.error)
             clauses.append("subjob_id REGEXP ?")
-            params.append(job_id_re)
+            params.append(subjob_id_re)
         if error_re is not None:
             re.compile(error_re)
             clauses.append("error REGEXP ?")
@@ -783,7 +783,7 @@ class JobStore:
     def group_stats(self, limit: int = 200) -> list[dict[str, Any]]:
         """Per-campaign rollup ("jobs" for the UI): counts by state + timing.
 
-        A "job" here is a group of gigs sharing a ``subjob_id`` prefix. Returns the
+        A "job" here is a job of gigs sharing a ``subjob_id`` prefix. Returns the
         most-recently-active groups first.
         """
         with self._lock:

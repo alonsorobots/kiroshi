@@ -43,7 +43,7 @@ def test_requeue_tool_calls_fixer_endpoint():
     # max_retries=0 so a single error immediately marks the gig 'failed'
     client = _build_client(max_retries=0)
     # seed a gig
-    client.post("/seed", json={"gigs": [{"job_id": "g1", "spec": {}}]})
+    client.post("/seed", json={"gigs": [{"subjob_id": "g1", "spec": {}}]})
     # lease it
     lease = client.post("/lease", json={"runner_id": "r1", "host": "h", "capacity": 5})
     lid = lease.json()["lease_id"]
@@ -51,7 +51,7 @@ def test_requeue_tool_calls_fixer_endpoint():
     assert len(gigs) == 1, f"expected 1 leased gig, got {len(gigs)}"
     # mark it failed (max_retries=0 → single error → failed)
     client.post("/complete", json={"lease_id": lid, "results": [
-        {"job_id": "g1", "status": "error", "error": "boom"}]})
+        {"subjob_id": "g1", "status": "error", "error": "boom"}]})
     # verify it's failed
     st = client.get("/status").json()
     assert st["failed"] == 1, f"expected 1 failed, got {st['failed']}"

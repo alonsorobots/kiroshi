@@ -43,7 +43,7 @@ def test_gigs_from_items_globs_files(tmp_path):
     assert len(gigs) == 2
     assert all(g["spec"]["path"].endswith(".txt") for g in gigs)
     # deterministic + each carries a path spec
-    assert gigs == sorted(gigs, key=lambda g: g["job_id"])
+    assert gigs == sorted(gigs, key=lambda g: g["subjob_id"])
 
 
 # --------------------------------------------------------- three-state bar
@@ -101,11 +101,11 @@ def test_module_of():
 def test_seed_count_excludes_campaign_label_row(tmp_path):
     store = JobStore(str(tmp_path / "c.db"), max_retries=3)
     n = store.seed(
-        [{"job_id": "x/1", "spec": {}}, {"job_id": "x/2", "spec": {}}],
-        group="x", label="My Campaign",
+        [{"subjob_id": "x/1", "spec": {}}, {"subjob_id": "x/2", "spec": {}}],
+        job="x", label="My Campaign",
     )
-    assert n == 2  # not 3 — the campaigns upsert must not be counted
+    assert n == 2  # not 3 — the jobs upsert must not be counted
     # re-seed is idempotent -> 0 new even though the label upserts again
     assert store.seed(
-        [{"job_id": "x/1", "spec": {}}], group="x", label="My Campaign",
+        [{"subjob_id": "x/1", "spec": {}}], job="x", label="My Campaign",
     ) == 0

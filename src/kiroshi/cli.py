@@ -51,11 +51,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     prun.add_argument("--items", default=None,
                       help="Glob of input files; one gig per match (spec={'path':...}).")
     prun.add_argument("--jobs", default=None,
-                      help="JSONL gig file (each line {job_id, spec}).")
+                      help="JSONL gig file (each line {subjob_id, spec}).")
     prun.add_argument("--enumerate", action="store_true",
                       help="Call the task module's enumerate_gigs(args) with the "
                            "args given after a literal '--'.")
-    prun.add_argument("--group", default=None, help="Campaign slug (groups gigs in the UI).")
+    prun.add_argument("--job", default=None, help="Campaign slug (groups gigs in the UI).")
     prun.add_argument("--label", default=None,
                       help="Human-readable campaign name for the dashboard header.")
     prun.add_argument("--origin", default=None,
@@ -153,10 +153,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     prem.add_argument("--write-root", default=None, help="Remote KIROSHI_WRITE_ROOT.")
     prem.add_argument("--token", default=None,
                       help="Mesh token (default: resolved from local env/token file).")
-    prem.add_argument("--group", default=None,
+    prem.add_argument("--job", default=None,
                       help="Campaign slug (names the launcher/log/task).")
     prem.add_argument("--task-name", default=None,
-                      help="Scheduled Task name on the remote (default derived from --group).")
+                      help="Scheduled Task name on the remote (default derived from --job).")
     prem.add_argument("--force", action="store_true",
                       help="Launch even if preflight reports problems.")
     prem.add_argument("--no-verify", action="store_true",
@@ -219,16 +219,16 @@ def main(argv: Optional[list[str]] = None) -> int:
     ps = sub.add_parser("seed", help="Enqueue gigs into the Fixer.")
     ps.add_argument("--fixer", default=cfg.fixer_url, help="Fixer base URL, or 'auto'.")
     ps.add_argument("--jobs", default=None,
-                    help="JSONL file; each line {\"job_id\":..., \"spec\":{...}}.")
+                    help="JSONL file; each line {\"subjob_id\":..., \"spec\":{...}}.")
     ps.add_argument("--demo", type=int, default=0, help="Seed N demo sleep gigs.")
     ps.add_argument("--batch", type=int, default=1000, help="POST batch size.")
-    ps.add_argument("--group", default=None,
+    ps.add_argument("--job", default=None,
                     help="Campaign slug; all gigs are grouped under it in the dashboard "
-                         "(overrides the job_id-prefix grouping).")
+                         "(overrides the subjob_id-prefix grouping).")
     ps.add_argument("--label", default=None,
                     help="Human-readable campaign name shown in the dashboard header "
                          "(e.g. 'Converting Seamless Interactions 30fps -> 4,8 fps'). "
-                         "Pairs with --group (or a single shared group in --jobs).")
+                         "Pairs with --job (or a single shared job in --jobs).")
     ps.add_argument("--origin", default=None,
                     help="Opaque JSON attribution blob (M9); if it has a `callback` "
                          "URL, structured advisories about this campaign's spindle "
@@ -279,7 +279,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     pst.add_argument("--workers", type=int, default=0,
                      help="Local worker processes (default: cpu_count). "
                           "Mesh mode: start a runner separately.")
-    pst.add_argument("--group", default=None,
+    pst.add_argument("--job", default=None,
                      help="Campaign slug (mesh mode only). Default: 'stage-<timestamp>'.")
     pst.add_argument("--token", default=None, help="Mesh auth token.")
     pst.add_argument("--gig-timeout", type=int, default=300,
@@ -288,15 +288,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     # ---- jobs (search/list jobs by regex) ----
     pj = sub.add_parser(
         "jobs",
-        help="Search/list jobs by regex on job_id or error, filtered by state/group.")
+        help="Search/list jobs by regex on subjob_id or error, filtered by state/job.")
     pj.add_argument("--fixer", default=cfg.fixer_url, help="Fixer base URL, or 'auto'.")
     pj.add_argument("--grep", default=None,
-                    help="Regex to match against job_id (default) or error (--field error).")
-    pj.add_argument("--field", choices=["job_id", "error"], default="job_id",
-                    help="Which column --grep matches (default: job_id).")
+                    help="Regex to match against subjob_id (default) or error (--field error).")
+    pj.add_argument("--field", choices=["subjob_id", "error"], default="subjob_id",
+                    help="Which column --grep matches (default: subjob_id).")
     pj.add_argument("--state", default=None,
                     help="Comma-separated states to filter (e.g. 'failed,leased').")
-    pj.add_argument("--group", default=None, help="Campaign slug filter.")
+    pj.add_argument("--job", default=None, help="Campaign slug filter.")
     pj.add_argument("--limit", type=int, default=200,
                     help="Max rows to return (server caps at 2000).")
     pj.add_argument("--token", default=None, help="Mesh auth token.")
@@ -312,10 +312,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     pbr.add_argument("--dir", default=None,
                      help="Output directory to scan (uses file mtimes).")
     pbr.add_argument("--fixer", default=None,
-                     help="Fixer URL — use with --group to derive throughput from "
+                     help="Fixer URL — use with --job to derive throughput from "
                           "per-gig completed_at timestamps over HTTP (no FS access needed).")
-    pbr.add_argument("--group", default=None,
-                     help="Campaign slug (with --fixer). Filters /jobs to this group.")
+    pbr.add_argument("--job", default=None,
+                     help="Campaign slug (with --fixer). Filters /jobs to this job.")
     pbr.add_argument("--pattern", default="*",
                      help="Filename glob (with --dir only; default: all).")
     pbr.add_argument("--no-recursive", action="store_true",
@@ -801,7 +801,7 @@ def _cmd_run(args) -> int:
         jobs=args.jobs,
         enumerate_=args.enumerate,
         task_args=getattr(args, "_passthrough", []),
-        group=args.group,
+        job=args.job,
         label=args.label,
         origin=_resolve_origin(getattr(args, "origin", None)),
         workers=args.workers,
@@ -909,8 +909,8 @@ def _cmd_seed(args) -> int:
 
     def post(gigs: list[dict]) -> None:
         body: dict = {"gigs": gigs}
-        if args.group:
-            body["group"] = args.group
+        if args.job:
+            body["job"] = args.job
         if args.label:
             body["label"] = args.label
         if origin:
@@ -925,7 +925,7 @@ def _cmd_seed(args) -> int:
     total = 0
     if args.demo > 0:
         for i in range(args.demo):
-            buf.append({"job_id": f"demo-{i:06d}", "spec": {"seconds": 0.05}})
+            buf.append({"subjob_id": f"demo-{i:06d}", "spec": {"seconds": 0.05}})
             if len(buf) >= args.batch:
                 post(buf)
                 total += len(buf)
@@ -937,7 +937,7 @@ def _cmd_seed(args) -> int:
                 if not line:
                     continue
                 g = json.loads(line)
-                g.setdefault("job_id", uuid.uuid4().hex)
+                g.setdefault("subjob_id", uuid.uuid4().hex)
                 g.setdefault("spec", {})
                 buf.append(g)
                 if len(buf) >= args.batch:
@@ -980,7 +980,7 @@ def _cmd_pipeline(args) -> int:
               f"poll={pipe.poll_s}s")
         for name, s in pipe.stages.items():
             extra = f" command={'yes' if s.command else 'no'}" if s.command else ""
-            print(f"  stage {name:12s} fixer={s.fixer} group={s.group}{extra}")
+            print(f"  stage {name:12s} fixer={s.fixer} job={s.job}{extra}")
         for e in pipe.edges:
             tag = e.kind + (f":{e.k}" if e.kind == "quorum" else "")
             gate = f" gate={e.artifact}" if e.artifact else ""
@@ -1050,12 +1050,12 @@ def _cmd_bench(args) -> int:
         if args.fixer:
             # HTTP mode: derive true throughput from per-gig completed_at over
             # /jobs. NOTE: /jobs is hard-capped at 2000 rows (most-recent-first),
-            # so for campaigns > 2000 done gigs this is a SAMPLE of the tail, not
+            # so for jobs > 2000 done gigs this is a SAMPLE of the tail, not
             # the whole run — we say so in the output. For a total count use
             # /status; for the full mtime-based rate use --dir on the outputs.
             LIMIT = 2000
             import requests
-            params = {"state": "done", "limit": LIMIT, "grp": args.group or ""}
+            params = {"state": "done", "limit": LIMIT, "job": args.job or ""}
             if args.token:
                 params["token"] = args.token
             try:
@@ -1070,14 +1070,14 @@ def _cmd_bench(args) -> int:
             times = [row["completed_at"] for row in rows
                      if row.get("completed_at")]
             if not times:
-                print(f"[bench rate] no completed gigs found for group "
-                      f"{args.group!r} on {args.fixer}.")
+                print(f"[bench rate] no completed gigs found for job "
+                      f"{args.job!r} on {args.fixer}.")
                 return 0
             span = max(0.0, max(times) - min(times))
             n = len(times)
             sampled = " (SAMPLE: most-recent 2000 gigs — use --dir for whole run)" \
                 if n >= LIMIT else ""
-            print(f"[bench rate] group={args.group}  fixer={args.fixer}{sampled}")
+            print(f"[bench rate] job={args.job}  fixer={args.fixer}{sampled}")
             if span > 0:
                 print(f"  {n} completed gigs, span={span:.1f}s, "
                       f"true rate={n / span:.2f} gigs/s")
@@ -1085,7 +1085,7 @@ def _cmd_bench(args) -> int:
                 print(f"  {n} completed gigs, span=0s, rate=n/a")
             return 0
         if not args.dir:
-            print("[bench rate] --dir or --fixer+--group is required.",
+            print("[bench rate] --dir or --fixer+--job is required.",
                   file=sys.stderr)
             return 2
         rate = bench.rate_from_dir(
@@ -1136,19 +1136,19 @@ def _cmd_bench(args) -> int:
 
 
 def _cmd_jobs(args) -> int:
-    """Search/list jobs by regex on job_id or error, filtered by state/group."""
+    """Search/list jobs by regex on subjob_id or error, filtered by state/job."""
     import requests
     fixer = _resolve_fixer_arg(args.fixer)
     params: dict[str, Any] = {"limit": min(max(args.limit, 1), 2000)}
     if args.state:
         params["state"] = args.state
-    if args.group:
-        params["grp"] = args.group
+    if args.job:
+        params["job"] = args.job
     if args.grep:
         if args.field == "error":
             params["error_re"] = args.grep
         else:
-            params["job_id_re"] = args.grep
+            params["subjob_id_re"] = args.grep
     if args.token:
         params["token"] = args.token
     try:
@@ -1172,7 +1172,7 @@ def _cmd_jobs(args) -> int:
     print(f"{'JOB_ID':40s} {'STATE':10s} {'ATT':>3s} {'DISK':8s} ERROR")
     print("-" * 80)
     for row in rows:
-        jid = (row.get("job_id") or "")[:40]
+        jid = (row.get("subjob_id") or "")[:40]
         state = row.get("state", "")[:10]
         att = str(row.get("attempts", ""))
         disk = str(row.get("disk") or "")[:8]
@@ -1214,9 +1214,9 @@ def _cmd_stage(args) -> int:
         if not gigs:
             print("[stage] no files found to stage.", file=sys.stderr)
             return 1
-        group = args.group or f"stage-{int(time.time())}"
+        job = args.job or f"stage-{int(time.time())}"
         import requests
-        payload = {"gigs": gigs, "group": group,
+        payload = {"gigs": gigs, "job": job,
                    "label": f"stage: {args.src_root} -> {args.dst_root}"}
         params = {"token": args.token} if args.token else {}
         try:
@@ -1227,7 +1227,7 @@ def _cmd_stage(args) -> int:
             print(f"[stage] FAILED to seed to {args.fixer}: {exc}",
                   file=sys.stderr)
             return 1
-        print(f"[stage] seeded {len(gigs)} gigs to {args.fixer} (group={group}).")
+        print(f"[stage] seeded {len(gigs)} gigs to {args.fixer} (job={job}).")
         print(f"  Start a runner:  kiroshi runner --fixer {args.fixer} "
               f"--task kiroshi.staging:run --workers N "
               f"--syspath <kiroshi-src> --syspath <kiroshi-src>/src")

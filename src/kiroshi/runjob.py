@@ -70,7 +70,7 @@ def _read_jsonl(path: str) -> Iterator[dict[str, Any]]:
             if not line:
                 continue
             g = json.loads(line)
-            g.setdefault("job_id", uuid.uuid4().hex)
+            g.setdefault("subjob_id", uuid.uuid4().hex)
             g.setdefault("spec", {})
             yield g
 
@@ -79,12 +79,12 @@ def _gigs_from_items(pattern: str) -> list[dict[str, Any]]:
     """One gig per file matching a local glob. spec = {'path': <match>}.
 
     Local filesystem only — for UNC/NAS enumeration use the task's
-    ``enumerate_gigs`` hook (which can walk SMB via kfs). Deterministic job_ids
+    ``enumerate_gigs`` hook (which can walk SMB via kfs). Deterministic subjob_ids
     (the path) keep re-runs idempotent.
     """
     matches = sorted(_glob.glob(pattern, recursive=True))
     return [
-        {"job_id": m.replace("\\", "/"), "spec": {"path": m}}
+        {"subjob_id": m.replace("\\", "/"), "spec": {"path": m}}
         for m in matches
         if os.path.isfile(m)
     ]
@@ -161,7 +161,7 @@ def run_job(
     jobs: Optional[str] = None,
     enumerate_: bool = False,
     task_args: Optional[list[str]] = None,
-    group: Optional[str] = None,
+    job: Optional[str] = None,
     label: Optional[str] = None,
     workers: int = 0,
     capacity: int = 200,
@@ -280,7 +280,7 @@ def run_job(
     if disks:
         for g in gigs:
             if not g.get("disk"):
-                d = derive_disk(g["job_id"], g.get("spec", {}), disks)
+                d = derive_disk(g["subjob_id"], g.get("spec", {}), disks)
                 if d:
                     g["disk"] = d
 
@@ -299,10 +299,10 @@ def run_job(
 
     # --- persistent run DB (self-heal/resume survive a launcher restart) ---
     if not db:
-        db = str(state_dir() / f"run-{_slug(group or task_ref)}.db")
+        db = str(state_dir() / f"run-{_slug(job or task_ref)}.db")
 
     store = JobStore(db, max_retries=max_retries)
-    inserted = store.seed(gigs, group=group, label=label)
+    inserted = store.seed(gigs, job=job, label=label)
 
     disp_host = current_host() if lan else "127.0.0.1"
     url = f"http://{disp_host}:{port}/"
@@ -350,11 +350,11 @@ def run_job(
     # can be attributed (and, if `callback` is present, webhook'd back to
     # whoever launched this run). Same in-memory shape as the /seed endpoint's
     # ``origins_by_group`` map — the seed already happened in-process above,
-    # so we just record the origin here for the same group.
+    # so we just record the origin here for the same job.
     if origin:
         from .jobstore import UNGROUPED
 
-        grp = group or UNGROUPED
+        grp = job or UNGROUPED
         app.state.origins_by_group.setdefault(grp, []).append(dict(origin))
     config = uvicorn.Config(app, host=host, port=port, log_level="warning")
     server = uvicorn.Server(config)

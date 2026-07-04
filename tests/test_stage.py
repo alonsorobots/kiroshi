@@ -35,7 +35,7 @@ def test_enumerate_yields_one_gig_per_file():
         _make_tree(src)
         gigs = list(staging.enumerate_gigs(
             {"from": str(src), "to": "/out", "pattern": "*"}))
-        names = sorted(g["job_id"] for g in gigs)
+        names = sorted(g["subjob_id"] for g in gigs)
         assert names == ["a.txt", "b.log", "sub/c.txt", "sub/d.log"], names
 
 
@@ -45,7 +45,7 @@ def test_enumerate_pattern_filter():
         _make_tree(src)
         gigs = list(staging.enumerate_gigs(
             {"from": str(src), "to": "/out", "pattern": "*.txt"}))
-        names = sorted(g["job_id"] for g in gigs)
+        names = sorted(g["subjob_id"] for g in gigs)
         assert names == ["a.txt", "sub/c.txt"], names
         assert not any(".log" in n for n in names)
 

@@ -81,16 +81,16 @@ def test_render_spec_substitutes_stem_and_clip():
     got = render_spec(tpl, "CLIP")
     assert got == {"src_path": "CLIP.npz", "dst_path": "out/CLIP.npz", "root": "R", "n": 3}
 
-def test_build_gigs_shapes_job_ids():
+def test_build_gigs_shapes_subjob_ids():
     gigs = build_gigs(["A", "B"], "{clip}", {"src_path": "{clip}"})
     assert gigs == [
-        {"job_id": "A.npz", "spec": {"src_path": "A.npz"}},
-        {"job_id": "B.npz", "spec": {"src_path": "B.npz"}},
+        {"subjob_id": "A.npz", "spec": {"src_path": "A.npz"}},
+        {"subjob_id": "B.npz", "spec": {"src_path": "B.npz"}},
     ]
 
 def test_build_gigs_resolution_fanout_prefix():
     gigs = build_gigs(["A"], "high-{clip}", {"src_path": "{clip}", "res": "high"})
-    assert gigs[0]["job_id"] == "high-A.npz"
+    assert gigs[0]["subjob_id"] == "high-A.npz"
     assert gigs[0]["spec"]["src_path"] == "A.npz"
 
 
@@ -116,25 +116,25 @@ def test_quorum_edge_requires_k():
 class _FakeMesh:
     """In-memory stand-in for Fixers: tracks done-sets + seeded gigs."""
     def __init__(self, done):
-        self.done = done                 # {group: set(job_id)}
-        self.seeded: dict[str, list] = {}  # {group: [gigs]}
+        self.done = done                 # {job: set(subjob_id)}
+        self.seeded: dict[str, list] = {}  # {job: [gigs]}
         self.ran: list[list[str]] = []
 
     def get(self, url):
-        # parse grp + state out of the query
-        grp = url.split("grp=")[1].split("&")[0]
+        # parse job + state out of the query
+        job = url.split("job=")[1].split("&")[0]
         if "/status" in url:
-            return {"done": len(self.done.get(grp, set())), "total": 999999}
+            return {"done": len(self.done.get(job, set())), "total": 999999}
         # /metrics/export
         if "state=done" in url:
-            ids = self.done.get(grp, set())
+            ids = self.done.get(job, set())
         else:
-            ids = set(g["job_id"] for g in self.seeded.get(grp, []))
-        return {"rows": [{"job_id": j} for j in ids]}
+            ids = set(g["subjob_id"] for g in self.seeded.get(job, []))
+        return {"rows": [{"subjob_id": j} for j in ids]}
 
     def post(self, url, payload):
-        grp = payload["group"]
-        self.seeded.setdefault(grp, []).extend(payload["gigs"])
+        job = payload["job"]
+        self.seeded.setdefault(job, []).extend(payload["gigs"])
 
     def run(self, cmd):
         self.ran.append(cmd)
@@ -145,7 +145,7 @@ def _pipe():
     stages = {
         "reduce30": Stage("reduce30", "http://f", "g_reduce"),
         "slerp": Stage("slerp", "http://f", "g_slerp",
-                       job_id_template="{clip}",
+                       subjob_id_template="{clip}",
                        spec_template={"src_path": "{clip}", "dst_path": "s/{clip}"}),
     }
     edges = [Edge("reduce30", "slerp", "each")]
@@ -158,7 +158,7 @@ def test_coordinator_each_seeds_downstream_delta():
     coord = PipelineCoordinator(pipe, log=lambda m: None,
                                 http_get=mesh.get, http_post=mesh.post, runner=mesh.run)
     coord.tick()
-    seeded = {g["job_id"] for g in mesh.seeded["g_slerp"]}
+    seeded = {g["subjob_id"] for g in mesh.seeded["g_slerp"]}
     assert seeded == {"A.npz", "B.npz"}
     # second tick: nothing new (downstream now has both) -> no dup growth
     # (simulate the fixer dedup by feeding seeded back as "have")

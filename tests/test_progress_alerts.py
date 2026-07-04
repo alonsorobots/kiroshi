@@ -3,7 +3,7 @@
 Covers the Python-testable surface added for:
 
 1. Stacked per-node progress chart + plateau alerts:
-   - ``JobStore.group_runner_done_counts`` — the per-runner/per-group done
+   - ``JobStore.group_runner_done_counts`` — the per-runner/per-job done
      breakdown the sampler snapshots into the metrics ring so the job page
      can draw a stacked area "who contributed what" chart.
    - the coordinator sampler now attaches ``groups_by_runner`` to every
@@ -41,22 +41,22 @@ def _store_with_done() -> JobStore:
     """A store where two runners have completed gigs across two groups."""
     d = tempfile.mkdtemp()
     s = JobStore(Path(d) / "t.db", max_retries=3)
-    # group "worker1-camp": 3 gigs, all done by runner "worker1"
-    s.seed([{"job_id": "c/1", "spec": {}}, {"job_id": "c/2", "spec": {}},
-            {"job_id": "c/3", "spec": {}}], group="worker1-camp")
+    # job "worker1-camp": 3 gigs, all done by runner "worker1"
+    s.seed([{"subjob_id": "c/1", "spec": {}}, {"subjob_id": "c/2", "spec": {}},
+            {"subjob_id": "c/3", "spec": {}}], job="worker1-camp")
     lease = s.lease(runner_id="worker1", host="h", capacity=10, ttl=60.0)
-    s.complete([{"job_id": j, "status": "ok", "metrics": {}}
-                for j in (g["job_id"] for g in lease.gigs)])
-    # group "mixed-camp": 4 gigs split between runner "athena" and runner "zeus"
-    s.seed([{"job_id": "m/1", "spec": {}}, {"job_id": "m/2", "spec": {}},
-            {"job_id": "m/3", "spec": {}}, {"job_id": "m/4", "spec": {}}],
-           group="mixed-camp")
+    s.complete([{"subjob_id": j, "status": "ok", "metrics": {}}
+                for j in (g["subjob_id"] for g in lease.gigs)])
+    # job "mixed-camp": 4 gigs split between runner "athena" and runner "zeus"
+    s.seed([{"subjob_id": "m/1", "spec": {}}, {"subjob_id": "m/2", "spec": {}},
+            {"subjob_id": "m/3", "spec": {}}, {"subjob_id": "m/4", "spec": {}}],
+           job="mixed-camp")
     a = s.lease(runner_id="athena", host="h", capacity=2, ttl=60.0)
-    s.complete([{"job_id": j, "status": "ok", "metrics": {}}
-                for j in (g["job_id"] for g in a.gigs)])
+    s.complete([{"subjob_id": j, "status": "ok", "metrics": {}}
+                for j in (g["subjob_id"] for g in a.gigs)])
     z = s.lease(runner_id="zeus", host="h", capacity=2, ttl=60.0)
-    s.complete([{"job_id": j, "status": "ok", "metrics": {}}
-                for j in (g["job_id"] for g in z.gigs)])
+    s.complete([{"subjob_id": j, "status": "ok", "metrics": {}}
+                for j in (g["subjob_id"] for g in z.gigs)])
     return s
 
 
@@ -70,7 +70,7 @@ def test_group_runner_done_counts_attributes_per_runner_per_group():
 def test_group_runner_done_counts_only_counts_done_state():
     s = _store_with_done()
     # lease but don't complete a new pending gig -> should not appear in counts
-    s.seed([{"job_id": "c/4", "spec": {}}], group="worker1-camp")
+    s.seed([{"subjob_id": "c/4", "spec": {}}], job="worker1-camp")
     s.lease(runner_id="worker1", host="h", capacity=1, ttl=60.0)
     counts = s.group_runner_done_counts()
     assert counts["worker1-camp"] == {"worker1": 3}  # the leased-but-undone gig excluded
@@ -79,7 +79,7 @@ def test_group_runner_done_counts_only_counts_done_state():
 def test_group_runner_done_counts_empty_when_nothing_done():
     d = tempfile.mkdtemp()
     s = JobStore(Path(d) / "t.db", max_retries=3)
-    s.seed([{"job_id": "g/1", "spec": {}}], group="g")
+    s.seed([{"subjob_id": "g/1", "spec": {}}], job="g")
     assert s.group_runner_done_counts() == {"g": {}}
 
 
@@ -89,10 +89,10 @@ def test_group_runner_done_counts_unassigned_gigs_grouped_under_empty_key():
     them — early-seeded rows pre-date runner tracking."""
     d = tempfile.mkdtemp()
     s = JobStore(Path(d) / "t.db", max_retries=3)
-    s.seed([{"job_id": "u/1", "spec": {}}], group="u-camp")
+    s.seed([{"subjob_id": "u/1", "spec": {}}], job="u-camp")
     # Force a done row with a NULL runner_id directly.
     s._conn.execute(  # noqa: SLF001
-        "UPDATE jobs SET state='done', runner_id=NULL WHERE job_id='u/1'")
+        "UPDATE jobs SET state='done', runner_id=NULL WHERE subjob_id='u/1'")
     s._conn.commit()  # noqa: SLF001
     counts = s.group_runner_done_counts()
     assert counts["u-camp"] == {"": 1}
@@ -103,9 +103,9 @@ def test_group_runner_done_counts_respects_limit_and_recency():
     d = tempfile.mkdtemp()
     s = JobStore(Path(d) / "t.db", max_retries=3)
     for i in range(5):
-        s.seed([{"job_id": f"grp{i}/1", "spec": {}}], group=f"grp{i}")
+        s.seed([{"subjob_id": f"job{i}/1", "spec": {}}], job=f"job{i}")
         lease = s.lease(runner_id="r", host="h", capacity=1, ttl=60.0)
-        s.complete([{"job_id": g["job_id"], "status": "ok", "metrics": {}}
+        s.complete([{"subjob_id": g["subjob_id"], "status": "ok", "metrics": {}}
                     for g in lease.gigs])
         time.sleep(0.005)  # stagger completion timestamps
     counts = s.group_runner_done_counts(limit_groups=2)
@@ -127,20 +127,20 @@ def _coord_client(**kw):
 
 
 def test_metrics_history_sample_includes_groups_by_runner():
-    """The 2s sampler must snapshot per-runner per-group done counts into each
+    """The 2s sampler must snapshot per-runner per-job done counts into each
     metrics sample so the job page can render the stacked contribution chart."""
     c, app = _coord_client()
     with c:
-        # seed + complete some work attributed to two runners in one group
+        # seed + complete some work attributed to two runners in one job
         c.post("/seed", json={
-            "gigs": [{"job_id": "camp/1", "spec": {}},
-                     {"job_id": "camp/2", "spec": {}}], "group": "camp"})
+            "gigs": [{"subjob_id": "camp/1", "spec": {}},
+                     {"subjob_id": "camp/2", "spec": {}}], "job": "camp"})
         lease = c.post("/lease", json={
             "runner_id": "worker1", "host": "h", "capacity": 2}).json()
         c.post("/complete", json={
             "lease_id": lease["lease_id"],
-            "results": [{"job_id": j, "status": "ok", "metrics": {}}
-                        for j in (g["job_id"] for g in lease["gigs"])]})
+            "results": [{"subjob_id": j, "status": "ok", "metrics": {}}
+                        for j in (g["subjob_id"] for g in lease["gigs"])]})
 
         # Wait (bounded) for the background sampler to emit a sample that
         # reflects the completed work (not an earlier pre-completion sample).

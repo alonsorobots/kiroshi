@@ -137,7 +137,7 @@ if __name__ == "__main__":
 def test_posix_setsid_failure_does_not_register_reap():
     """Regression (Opus finding B): if os.setsid() fails, the atexit killpg
     hook must NOT be registered — otherwise a normal runner exit would
-    SIGKILL the launching shell's entire process group."""
+    SIGKILL the launching shell's entire process job."""
     import atexit
     from unittest.mock import patch
     import kiroshi.proctree as pt

@@ -84,11 +84,11 @@ def _free_udp_port() -> int:
 # ----------------------------------------------------------------- requeue
 def test_requeue_failed_to_pending():
     store = _store()
-    store.seed([{"job_id": "a", "spec": {}}, {"job_id": "b", "spec": {}}])
+    store.seed([{"subjob_id": "a", "spec": {}}, {"subjob_id": "b", "spec": {}}])
     lease = store.lease("r1", "h", capacity=10, ttl=60)
     # exhaust retries so both end up failed
     for _ in range(store.max_retries + 2):
-        results = [{"job_id": g["job_id"], "status": "error", "error": "boom"}
+        results = [{"subjob_id": g["subjob_id"], "status": "error", "error": "boom"}
                    for g in lease.gigs]
         store.complete(results)
         lease = store.lease("r1", "h", capacity=10, ttl=60)
@@ -105,7 +105,7 @@ def test_requeue_failed_to_pending():
 
 def test_requeue_leased_reclaims():
     store = _store()
-    store.seed([{"job_id": "a", "spec": {}}])
+    store.seed([{"subjob_id": "a", "spec": {}}])
     store.lease("r1", "h", capacity=10, ttl=600)  # long TTL, not reaped
     assert store.stats()["leased"] == 1
     n = store.requeue(("leased",), reset_attempts=False)
@@ -115,7 +115,7 @@ def test_requeue_leased_reclaims():
 
 def test_requeue_ignores_unknown_state():
     store = _store()
-    store.seed([{"job_id": "a", "spec": {}}])
+    store.seed([{"subjob_id": "a", "spec": {}}])
     assert store.requeue(("bogus",)) == 0
 
 

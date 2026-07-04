@@ -53,7 +53,7 @@ def test_ttl_is_capped():
 def test_heartbeat_extends_with_same_adaptive_ttl():
     with _client(lease_ttl=120.0, lease_miss_tolerance=4.0) as c:
         # seed one gig so the lease holds something
-        c.post("/seed", json={"gigs": [{"job_id": "g1", "spec": {}}]})
+        c.post("/seed", json={"gigs": [{"subjob_id": "g1", "spec": {}}]})
         lease = c.post("/lease", json={"runner_id": "r1", "host": "h", "capacity": 5,
                                        "heartbeat_interval": 40.0}).json()
         hb = c.post("/heartbeat", json={"lease_id": lease["lease_id"], "runner_id": "r1",

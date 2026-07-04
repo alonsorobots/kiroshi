@@ -26,7 +26,7 @@ TaskFn = Callable[[Dict[str, Any]], Dict[str, Any]]
 # The enumeration contract (see PLAN §7.5). A task module MAY define a
 # module-level ``enumerate_gigs(args: dict) -> Iterator[dict]`` that turns the
 # pass-through ``--`` args from ``kiroshi run`` into gigs. Each yielded gig is a
-# ``{"job_id": str, "spec": dict, "group"?: str}`` dict — exactly the shape
+# ``{"subjob_id": str, "spec": dict, "job"?: str}`` dict — exactly the shape
 # ``/seed`` and :meth:`JobStore.seed` accept. This lets a task own its own
 # fan-out (e.g. one source read -> a 4-fps and an 8-fps gig) which a generic
 # ``--items`` globber can't infer.

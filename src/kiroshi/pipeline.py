@@ -50,15 +50,15 @@ except ModuleNotFoundError:  # pragma: no cover
 # PURE CORE  (no I/O — unit-tested)
 # --------------------------------------------------------------------------
 
-def item_key(job_id: str) -> str:
+def item_key(subjob_id: str) -> str:
     """Correlate the same logical item across stages.
 
-    Stages carry an item under different job_ids (``shard_03/a/b/CLIP.npz``
+    Stages carry an item under different subjob_ids (``shard_03/a/b/CLIP.npz``
     in reduce30, ``CLIP.npz`` in slerp, ``high-CLIP.npz`` in dvq). The stable
     key is the clip stem: basename, drop a leading ``<res>-`` fan-out prefix,
     drop the extension.
     """
-    name = PurePosixPath(str(job_id)).name
+    name = PurePosixPath(str(subjob_id)).name
     # strip a fan-out prefix like "high-", "low-", "mid-" (res tags)
     if "-" in name:
         head, rest = name.split("-", 1)
@@ -121,13 +121,13 @@ def render_spec(template: dict[str, Any], stem: str) -> dict[str, Any]:
     return out
 
 
-def build_gigs(stems: list[str], job_id_template: str, spec_template: dict[str, Any],
+def build_gigs(stems: list[str], subjob_id_template: str, spec_template: dict[str, Any],
                ) -> list[dict[str, Any]]:
     """Turn a list of item stems into concrete gigs for one downstream stage."""
     gigs = []
     for stem in stems:
-        jid = job_id_template.replace("{stem}", stem).replace("{clip}", f"{stem}.npz")
-        gigs.append({"job_id": jid, "spec": render_spec(spec_template, stem)})
+        jid = subjob_id_template.replace("{stem}", stem).replace("{clip}", f"{stem}.npz")
+        gigs.append({"subjob_id": jid, "spec": render_spec(spec_template, stem)})
     return gigs
 
 
@@ -139,11 +139,11 @@ def build_gigs(stems: list[str], job_id_template: str, spec_template: dict[str, 
 class Stage:
     name: str
     fixer: str                              # base URL of the Fixer hosting this stage
-    group: str                              # campaign group slug on that Fixer
+    job: str                              # campaign job slug on that Fixer
     task: Optional[str] = None              # task ident (informational; runners bind it)
     label: str = ""
     # For gig-producing stages: how to shape a downstream gig.
-    job_id_template: str = "{clip}"
+    subjob_id_template: str = "{clip}"
     spec_template: dict[str, Any] = field(default_factory=dict)
     # For a barrier/reduce stage: a shell command to run once the quorum trips.
     command: Optional[list[str]] = None
@@ -168,10 +168,10 @@ class Pipeline:
             stages[name] = Stage(
                 name=name,
                 fixer=s["fixer"],
-                group=s["group"],
+                job=s["job"],
                 task=s.get("task"),
                 label=s.get("label", ""),
-                job_id_template=s.get("job_id_template", "{clip}"),
+                subjob_id_template=s.get("subjob_id_template", "{clip}"),
                 spec_template=s.get("spec", {}),
                 command=s.get("command"),
                 produces=tuple(s.get("produces", [])),
@@ -221,20 +221,20 @@ class PipelineCoordinator:
 
     # -- HTTP helpers --
     def _done_keys(self, stage: Stage) -> set[str]:
-        url = (f"{stage.fixer}/metrics/export?grp={stage.group}"
+        url = (f"{stage.fixer}/metrics/export?job={stage.job}"
                f"&state=done&limit=300000&token={self.pipe.token}")
         rows = self._get(url).get("rows", [])
-        return {item_key(r["job_id"]) for r in rows}
+        return {item_key(r["subjob_id"]) for r in rows}
 
     def _have_keys(self, stage: Stage) -> set[str]:
         # everything already seeded downstream, any state
-        url = (f"{stage.fixer}/metrics/export?grp={stage.group}"
+        url = (f"{stage.fixer}/metrics/export?job={stage.job}"
                f"&state=pending,leased,done,failed&limit=300000&token={self.pipe.token}")
         rows = self._get(url).get("rows", [])
-        return {item_key(r["job_id"]) for r in rows}
+        return {item_key(r["subjob_id"]) for r in rows}
 
     def _done_count(self, stage: Stage) -> int:
-        url = f"{stage.fixer}/status?token={self.pipe.token}&grp={stage.group}"
+        url = f"{stage.fixer}/status?token={self.pipe.token}&job={stage.job}"
         try:
             return int(self._get(url).get("done", 0))
         except Exception:
@@ -245,7 +245,7 @@ class PipelineCoordinator:
         BATCH = 1000
         for i in range(0, len(gigs), BATCH):
             self._post(url, {"gigs": gigs[i:i+BATCH],
-                             "group": stage.group, "label": stage.label})
+                             "job": stage.job, "label": stage.label})
 
     # -- one tick over all edges --
     def tick(self) -> None:
@@ -282,7 +282,7 @@ class PipelineCoordinator:
         if not stems:
             self.log(f"A {up.name}->{down.name}: idle (up_done={len(up_done)})")
             return
-        gigs = build_gigs(stems, down.job_id_template, down.spec_template)
+        gigs = build_gigs(stems, down.subjob_id_template, down.spec_template)
         self._seed(down, gigs)
         self.log(f"A {up.name}->{down.name}: seeded {len(gigs)}")
 
@@ -293,7 +293,7 @@ class PipelineCoordinator:
         up_total = 0
         if edge.kind == "all":
             try:
-                url = f"{up.fixer}/status?token={self.pipe.token}&grp={up.group}"
+                url = f"{up.fixer}/status?token={self.pipe.token}&job={up.job}"
                 up_total = int(self._get(url).get("total", 0))
             except Exception:
                 up_total = 0

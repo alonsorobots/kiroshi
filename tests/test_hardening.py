@@ -31,7 +31,7 @@ PATHS = [SRC, ROOT]
 
 
 def _gigs(specs):
-    return [{"job_id": f"j{i}", "spec": s} for i, s in enumerate(specs)]
+    return [{"subjob_id": f"j{i}", "spec": s} for i, s in enumerate(specs)]
 
 
 def _counts(results):

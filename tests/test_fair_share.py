@@ -17,7 +17,7 @@ def _store(n: int):
     from kiroshi.jobstore import JobStore
 
     s = JobStore(":memory:", max_retries=3)
-    s.seed([{"job_id": f"g{i}", "spec": {}} for i in range(n)])
+    s.seed([{"subjob_id": f"g{i}", "spec": {}} for i in range(n)])
     return s
 
 
@@ -95,3 +95,51 @@ def test_resolve_selftest_absent_returns_none(tmp_path, monkeypatch):
     from kiroshi.tasks import resolve_selftest
 
     assert resolve_selftest("mytask_none:run") is None
+
+
+# ------------------------------------------- per-host SSH identity (Aurora fix)
+def test_ssh_target_uses_configured_user():
+    from kiroshi.config import HostConfig
+
+    hc = HostConfig(name="Aurora", user="alons")
+    assert hc.ssh_target == "alons@aurora" or hc.ssh_target == "alons@Aurora"
+
+
+def test_ssh_target_defaults_to_host_when_no_user():
+    from kiroshi.config import HostConfig
+
+    hc = HostConfig(name="Demeter")
+    assert hc.ssh_target == "Demeter"
+
+
+def test_ssh_target_honors_explicit_ssh_host():
+    from kiroshi.config import HostConfig
+
+    hc = HostConfig(name="Aurora", user="alons", ssh_host="aurora.lan")
+    assert hc.ssh_target == "alons@aurora.lan"
+
+
+def test_remap_repo_swaps_root_for_node_user():
+    from kiroshi.remote_sync import _remap_repo
+
+    out = _remap_repo(r"C:\Users\admin\Desktop\RESEARCH\Pose_MBPE",
+                      r"C:\Users\alons\Desktop\RESEARCH")
+    assert out == r"C:\Users\alons\Desktop\RESEARCH\Pose_MBPE"
+
+
+def test_remap_repo_no_root_is_verbatim():
+    from kiroshi.remote_sync import _remap_repo
+
+    p = r"C:\Users\admin\Desktop\RESEARCH\kiroshi"
+    assert _remap_repo(p, None) == p
+
+
+def test_plan_sync_uses_ssh_target_and_remapped_path():
+    from kiroshi.config import HostConfig
+    from kiroshi.remote_sync import plan_sync
+
+    hosts = {"Aurora": HostConfig(name="Aurora", user="alons",
+                                  root=r"C:\Users\alons\Desktop\RESEARCH")}
+    plans = plan_sync(hosts, repos=[r"C:\Users\admin\Desktop\RESEARCH\kiroshi"])
+    assert plans[0].ssh_target == "alons@Aurora"
+    assert r"C:\Users\alons\Desktop\RESEARCH\kiroshi" in plans[0].steps[0].remote_cmd

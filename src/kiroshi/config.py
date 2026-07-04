@@ -54,6 +54,18 @@ class HostConfig:
     capacity: int = AUTO_CAPACITY
     read_root: Optional[str] = None
     write_root: Optional[str] = None
+    # SSH identity for `kiroshi remote` / `remote sync`. Without these, the tools
+    # fall back to ``ssh <name>`` (→ the *current* user) and this machine's path
+    # layout — which silently guesses wrong whenever a node's login differs
+    # (e.g. Aurora logs in as ``alons``, not the local ``admin``). Set them once:
+    #   user     — the remote SSH/login user (→ ssh user@host + C:\Users\user\...)
+    #   ssh_host — the SSH target host if it differs from the config name
+    #   root     — the directory that holds the repos on that node, e.g.
+    #              C:\Users\alons\Desktop\RESEARCH (used to remap repo paths so a
+    #              sync targets the node's real checkout, not the coordinator's).
+    user: Optional[str] = None
+    ssh_host: Optional[str] = None
+    root: Optional[str] = None
     extra: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -61,6 +73,13 @@ class HostConfig:
         # given. Keeps a Runner from hoarding the queue while still prefetching.
         if self.capacity is None or self.capacity < 0:
             self.capacity = max(1, int(self.workers)) + CAPACITY_BUFFER
+
+    @property
+    def ssh_target(self) -> str:
+        """The argument to pass to ``ssh``: ``user@host`` when a user is set,
+        else just the host (name or explicit ``ssh_host``)."""
+        host = self.ssh_host or self.name
+        return f"{self.user}@{host}" if self.user else host
 
 
 @dataclass
@@ -141,8 +160,12 @@ def load_config(path: Optional[str] = None) -> MeshConfig:
                 capacity=int(hc.get("capacity", DEFAULT_CAPACITY)),
                 read_root=hc.get("read_root"),
                 write_root=hc.get("write_root"),
+                user=hc.get("user"),
+                ssh_host=hc.get("ssh_host"),
+                root=hc.get("root"),
                 extra={k: v for k, v in hc.items()
-                       if k not in {"python", "workers", "capacity", "read_root", "write_root"}},
+                       if k not in {"python", "workers", "capacity", "read_root",
+                                    "write_root", "user", "ssh_host", "root"}},
             )
         # Storage topology: [[storage.disk]] sections (opt-in NAS sharding).
         from .storage import DiskConfig

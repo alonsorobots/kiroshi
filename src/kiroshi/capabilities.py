@@ -20,8 +20,8 @@ CAPABILITIES: list[dict[str, Any]] = [
         "name": "run",
         "purpose": "One-shot 'front door': starts a local Fixer + Runner in one process, seeds, runs, exits. Optional --lan binds the Fixer to the LAN so other machines can join with 'kiroshi remote'.",
         "command": "kiroshi run <module:fn> --items ... | --jobs gigs.jsonl | --enumerate",
-        "when_to_use": "Quick campaigns and dev iteration on a single machine (or a small ad-hoc mesh with --lan). --enumerate uses the task's own 'enumerate_gigs' hook to fan out gigs (no external gig file).",
-        "when_not": "Long-running production campaigns — prefer separate fixer + runner + seed so the state DB and workers can be restarted independently.",
+        "when_to_use": "Quick jobs and dev iteration on a single machine (or a small ad-hoc mesh with --lan). --enumerate uses the task's own 'enumerate_gigs' hook to fan out gigs (no external gig file).",
+        "when_not": "Long-running production jobs — prefer separate fixer + runner + seed so the state DB and workers can be restarted independently.",
     },
     {
         "name": "fixer",
@@ -39,9 +39,9 @@ CAPABILITIES: list[dict[str, Any]] = [
     },
     {
         "name": "seed",
-        "purpose": "Enqueue gigs into a Fixer (dedups by job_id).",
-        "command": "kiroshi seed --fixer <url> --jobs gigs.jsonl --group <slug>",
-        "when_to_use": "Stage a campaign. Re-running is safe (idempotent dedup). Use --group for dashboard/metrics filtering.",
+        "purpose": "Enqueue gigs into a Fixer (dedups by subjob_id).",
+        "command": "kiroshi seed --fixer <url> --jobs gigs.jsonl --job <slug>",
+        "when_to_use": "Stage a campaign. Re-running is safe (idempotent dedup). Use --job for dashboard/metrics filtering.",
         "when_not": "Don't hand-roll per-gig POSTs; the CLI batches + dedups.",
     },
     {
@@ -67,9 +67,9 @@ CAPABILITIES: list[dict[str, Any]] = [
     },
     {
         "name": "jobs",
-        "purpose": "Search/list jobs by regex on job_id or error, filtered by state/group. Server-side filtered (no 100k-row download).",
-        "command": "kiroshi jobs --fixer <url> --grep <regex> [--field job_id|error] [--state failed] [--group <slug>]",
-        "when_to_use": "Find specific gigs on a large campaign without listing all of them — e.g. 'every failed gig whose error mentions PermissionError' or 'every job_id under shard_03/.*P08'.",
+        "purpose": "Search/list jobs by regex on subjob_id or error, filtered by state/job. Server-side filtered (no 100k-row download).",
+        "command": "kiroshi jobs --fixer <url> --grep <regex> [--field subjob_id|error] [--state failed] [--job <slug>]",
+        "when_to_use": "Find specific gigs on a large campaign without listing all of them — e.g. 'every failed gig whose error mentions PermissionError' or 'every subjob_id under shard_03/.*P08'.",
         "when_not": "For aggregate counts use 'kiroshi status'; for bulk metrics export use /metrics/export.",
     },
     {
@@ -103,9 +103,9 @@ CAPABILITIES: list[dict[str, Any]] = [
     {
         "name": "bench",
         "purpose": "True throughput reporting (from output mtimes or per-gig completed_at over HTTP) + concurrency calibration from samples.",
-        "command": "kiroshi bench rate --dir <outputs> | --fixer <url> --group <slug>  |  kiroshi bench calibrate --samples '1=50,2=95,4=140,8=150'",
+        "command": "kiroshi bench rate --dir <outputs> | --fixer <url> --job <slug>  |  kiroshi bench calibrate --samples '1=50,2=95,4=140,8=150'",
         "when_to_use": "rate --dir: honest throughput from output-file mtimes (FS access). rate --fixer: same, from /jobs completed_at (no FS access). calibrate: turn nas-benchmark samples into a per-disk concurrency recommendation.",
-        "when_not": "calibrate needs representative samples — don't calibrate on a cold cache. rate --fixer needs the Fixer reachable + a valid group.",
+        "when_not": "calibrate needs representative samples — don't calibrate on a cold cache. rate --fixer needs the Fixer reachable + a valid job.",
     },
     {
         "name": "nas.shard",
@@ -208,9 +208,37 @@ CAPABILITIES: list[dict[str, Any]] = [
     {
         "name": "metrics.export",
         "purpose": "Bulk per-gig metrics for a whole campaign (up to 100k rows).",
-        "command": "GET /metrics/export?grp=<g>&state=done&limit=100000",
+        "command": "GET /metrics/export?job=<g>&state=done&limit=100000",
         "when_to_use": "Find which items a stage has finished (the pipeline coordinator uses this). Aggregate results across a campaign.",
         "when_not": "Not for live leasing — use /status for counts.",
+    },
+    {
+        "name": "campaign.health",
+        "purpose": "Paragraph-form diagnosis of ONE campaign: progress %, active advisories on its spindles, and recent errors — shaped to paste straight into an agent's context.",
+        "command": "MCP tool: campaign_health(subjob_id)  (composes /groups + /advisories + /status)",
+        "when_to_use": "The fastest 'how did my run go?' check before touching a script again — one call yields a quotable summary plus structured job/advisory/error fields.",
+        "when_not": "For fleet-wide scheduling health use 'decisions.summary'; for a single gig's lifecycle use 'job.trace'.",
+    },
+    {
+        "name": "lease.decisions",
+        "purpose": "Per-lease-call decision log: why each host got N gigs (requested vs granted, binding_reason, per-disk budget snapshot).",
+        "command": "GET /lease/decisions?host=<h>&reason=<r>&limit=100  (MCP tool: lease_decisions)",
+        "when_to_use": "Debug node starvation or underutilization — see exactly which constraint (FAIR_SHARE_CAP / DISK_BUDGET_FULL / NO_PENDING) blocked a host from getting work.",
+        "when_not": "For aggregate fleet health use 'decisions.summary' first; for a single gig's history use 'job.trace'.",
+    },
+    {
+        "name": "job.trace",
+        "purpose": "Coordination timeline for one job/gig: seeded -> leased -> completed/failed/expired events + current DB row.",
+        "command": "GET /job/trace?subjob_id=<id>  (MCP tool: job_trace)",
+        "when_to_use": "Trace a single gig's full lifecycle through the coordinator — which host leased it, when it completed or failed, how many attempts.",
+        "when_not": "For fleet-wide or per-host questions use 'lease.decisions' or 'decisions.summary'.",
+    },
+    {
+        "name": "decisions.summary",
+        "purpose": "Aggregated scheduling health over a time window: per-host grant ratio, main binding reason, and which hosts are STARVED.",
+        "command": "GET /decisions/summary?window_s=300  (MCP tool: scheduling_summary)",
+        "when_to_use": "The first call when diagnosing underutilization — instantly shows if any host is being starved and why. Also appears as the 'scheduling' block on /status.",
+        "when_not": "For per-gig detail use 'job.trace'; for raw decision records use 'lease.decisions'.",
     },
 ]
 

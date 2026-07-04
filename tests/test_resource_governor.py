@@ -152,7 +152,7 @@ def test_budget_unified_gigs_plus_slots(app_with_parity):
     app, store = app_with_parity
     client = TestClient(app)
     # seed 3 pending gigs on disk1 (disk stamped directly)
-    store.seed([{"job_id": f"shard_01/clip{i}", "spec": {}, "disk": "disk1"}
+    store.seed([{"subjob_id": f"shard_01/clip{i}", "spec": {}, "disk": "disk1"}
                 for i in range(3)])
 
     # hold 1 external read slot on disk1

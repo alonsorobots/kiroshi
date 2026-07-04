@@ -32,17 +32,17 @@ _OPEN_PATHS = frozenset({"/", "/favicon.ico", "/healthz", "/auth/challenge"})
 
 
 class SeedGig(BaseModel):
-    job_id: str
+    subjob_id: str
     spec: dict[str, Any] = Field(default_factory=dict)
-    group: Optional[str] = None
+    job: Optional[str] = None
 
 
 class SeedReq(BaseModel):
     gigs: list[SeedGig]
     # Batch-wide campaign slug + human-readable label, applied to every gig that
-    # doesn't carry its own `group`. Lets `kiroshi seed --group X --label "..."` head
-    # a whole campaign in the dashboard instead of fragmenting it per job_id prefix.
-    group: Optional[str] = None
+    # doesn't carry its own `job`. Lets `kiroshi seed --job X --label "..."` head
+    # a whole campaign in the dashboard instead of fragmenting it per subjob_id prefix.
+    job: Optional[str] = None
     label: Optional[str] = None
     # Opaque attribution blob — carried as-is, never interpreted by Kiroshi except
     # for the optional ``callback`` URL used by the advisory webhook. Lets a
@@ -62,7 +62,7 @@ class LeaseReq(BaseModel):
 
 
 class ResultItem(BaseModel):
-    job_id: str
+    subjob_id: str
     status: str = "ok"
     error: Optional[str] = None
     metrics: dict[str, Any] = Field(default_factory=dict)
@@ -116,6 +116,8 @@ def create_app(
     advisory_sustain_s: float = 60.0,
     advisory_webhook_interval_s: float = 2.0,
     fair_share: bool = False,
+    decision_ring: int = 5000,
+    jobevent_ring: int = 50000,
 ) -> FastAPI:
     app = FastAPI(title="Kiroshi Fixer", version="0.0.1")
     app.state.store = store
@@ -153,6 +155,16 @@ def create_app(
     # per-disk budget exists to divide.
     app.state.fair_share = fair_share
 
+    # --- Coordination decision ledger (observability) ---
+    # Bounded ring buffers recording *why* every /lease call returned the count
+    # it did (LeaseDecision) and per-job coordination transitions (JobEvent).
+    # In-memory only — no DB schema change. See COORDINATION_DECISION_LOG plan.
+    app.state.lease_decisions: deque = deque(maxlen=decision_ring)
+    app.state.job_events: deque = deque(maxlen=jobevent_ring)
+    app.state.job_event_index: dict[str, deque] = {}
+    app.state.jobevent_ring = jobevent_ring  # also bounds the index dict below
+    app.state._last_lease_log: dict[str, float] = {}  # host -> ts for throttle
+
     # Warn about likely-misconfigured disk topologies at boot so a bad match
     # rule surfaces immediately instead of as 129k runtime "READ_ROOT not set".
     for _w in validate_disks(app.state.disks):
@@ -188,7 +200,7 @@ def create_app(
     from . import advisories as _adv_mod
 
     app.state.advisories = _adv_mod.AdvisoryStore()
-    # grp -> list[origin_dict], deduped by identity of (kind, agent_id, callback).
+    # job -> list[origin_dict], deduped by identity of (kind, agent_id, callback).
     # Merged from every /seed request that carries an origin.
     app.state.origins_by_group: dict[str, list[dict[str, Any]]] = {}
     app.state.enable_advisories = enable_advisories
@@ -197,7 +209,7 @@ def create_app(
         """Union of origins whose in-flight (leased/pending) gigs land on ``disk``.
 
         For fleet-wide advisories (``disk is None``) it's the union across every
-        group with any pending/leased work. Cheap enough at Kiroshi scale (the
+        job with any pending/leased work. Cheap enough at Kiroshi scale (the
         detector runs every 10s and leased-set size is capped by budget)."""
         origins_map = app.state.origins_by_group
         if not origins_map:
@@ -210,7 +222,7 @@ def create_app(
         for row in rows:
             if disk is not None and row.get("disk") != disk:
                 continue
-            g = row.get("grp")
+            g = row.get("job")
             if g:
                 grps.add(g)
         seen: set[tuple] = set()
@@ -320,22 +332,25 @@ def create_app(
                 n = store.reap()
                 if n:
                     print(f"[fixer] reaped {n} expired lease(s) -> pending", flush=True)
+                    # The reaped gigs are now 'pending' again; emit a summary
+                    # event (per-gig identification isn't available post-reap).
+                    _job_event("(reaper)", "REAPED", count=n)
             except Exception as e:  # pragma: no cover
                 print(f"[fixer] reaper error: {e}", flush=True)
 
     def _sampler() -> None:
         # Sample throughput/counts into the ring buffer so the dashboard can draw
         # an at-field-style rate curve over time (TRUE rate from /status window).
-        # Also snapshot per-group done counts (top groups) so each "job" gets its
+        # Also snapshot per-job done counts (top groups) so each "job" gets its
         # own progress-over-time curve, and per-disk done counts (N6) so each
         # spindle gets its own throughput sparkline.
         while not app.state._stop.wait(2.0):
             try:
                 s = store.stats()
-                groups = {g["grp"]: g["done"]
+                groups = {g["job"]: g["done"]
                           for g in store.group_stats(limit=40)}
                 disk_done = store.disk_done_counts() if app.state.disks else {}
-                # Per-runner contribution per group so the job page can render
+                # Per-runner contribution per job so the job page can render
                 # a stacked-area "who is contributing what" chart and detect
                 # per-node plateaus (a computer that stopped making progress).
                 groups_by_runner = store.group_runner_done_counts(
@@ -387,29 +402,36 @@ def create_app(
 
             for g in gigs:
                 if not g.get("disk"):
-                    d = derive_disk(g["job_id"], g.get("spec", {}), disks)
+                    d = derive_disk(g["subjob_id"], g.get("spec", {}), disks)
                     if d:
                         g["disk"] = d
-        inserted = store.seed(gigs, group=req.group, label=req.label)
-        # M9: remember which origin(s) seeded which group, so an advisory that
+        inserted = store.seed(gigs, job=req.job, label=req.label)
+        # Record SEEDED job events (capped for bulk seeds).
+        new_ids = [g["subjob_id"] for g in gigs]
+        if len(new_ids) <= 5000:
+            for jid in new_ids:
+                _job_event(jid, "SEEDED")
+        else:
+            _job_event("(bulk)", "SEEDED_BULK", count=len(new_ids))
+        # M9: remember which origin(s) seeded which job, so an advisory that
         # trips on a spindle can name (and optionally webhook back to) whoever
         # launched the work. Deduped by (kind, agent_id, callback) so re-seeding
         # doesn't stack copies of the same launcher.
         if req.origin:
-            # Any group referenced by this seed request should carry the origin.
+            # Any job referenced by this seed request should carry the origin.
             grps: set[str] = set()
-            if req.group:
-                grps.add(req.group)
+            if req.job:
+                grps.add(req.job)
             for g in gigs:
-                gg = g.get("group") or req.group
+                gg = g.get("job") or req.job
                 if gg:
                     grps.add(gg)
             if not grps:
-                # Ungrouped gigs live under the sentinel group name from jobstore.
+                # Ungrouped gigs live under the sentinel job name from jobstore.
                 from .jobstore import UNGROUPED
                 grps.add(UNGROUPED)
-            for grp in grps:
-                lst = app.state.origins_by_group.setdefault(grp, [])
+            for job in grps:
+                lst = app.state.origins_by_group.setdefault(job, [])
                 key = (req.origin.get("kind"),
                        req.origin.get("agent_id"),
                        req.origin.get("callback"))
@@ -433,6 +455,26 @@ def create_app(
             r["last_seen"] = now
             if host and host != "?":
                 r["host"] = host
+
+    def _job_event(subjob_id: str, event: str, **fields) -> None:
+        """Record a per-job coordination transition in the bounded ring buffer +
+        a per-job index for O(1) trace lookup. No-op effect on the store.
+
+        Both the events ring AND the index dict are bounded — a long-lived Fixer
+        processing millions of gigs across jobs must not leak memory, so the
+        index evicts its oldest-tracked subjob_ids once it exceeds the ring size."""
+        ts = time.time()
+        rec = {"ts": ts, "subjob_id": subjob_id, "event": event, **fields}
+        app.state.job_events.append(rec)
+        index = app.state.job_event_index
+        idx = index.get(subjob_id)
+        if idx is None:
+            idx = deque(maxlen=20)
+            index[subjob_id] = idx
+            # dict preserves insertion order -> pop oldest-tracked jobs first.
+            while len(index) > app.state.jobevent_ring:
+                index.pop(next(iter(index)), None)
+        idx.append(rec)
 
     @app.post("/register")
     def register(req: RegisterReq) -> dict[str, Any]:
@@ -477,16 +519,16 @@ def create_app(
             g["has_custom_page"] = _has_custom_job_page()
         return {"groups": rows, "ts": time.time()}
 
-    @app.get("/jobs")
+    @app.get("/subjobs")
     def jobs(state: Optional[str] = None, limit: int = 200,
-             grp: Optional[str] = None,
-             job_id_re: Optional[str] = None,
+             job: Optional[str] = None,
+             subjob_id_re: Optional[str] = None,
              error_re: Optional[str] = None) -> dict[str, Any]:
         states = tuple(s.strip() for s in state.split(",")) if state else None
         try:
             rows = store.list_jobs(
-                states=states, limit=min(max(limit, 1), 2000), grp=grp,
-                job_id_re=job_id_re, error_re=error_re)
+                states=states, limit=min(max(limit, 1), 2000), job=job,
+                subjob_id_re=subjob_id_re, error_re=error_re)
         except re.error as exc:
             from fastapi.responses import JSONResponse
             return JSONResponse(
@@ -495,20 +537,20 @@ def create_app(
         return {"jobs": _attach_launch(rows), "runners": _runner_index(), "ts": time.time()}
 
     @app.get("/metrics/export")
-    def metrics_export(grp: Optional[str] = None,
+    def metrics_export(job: Optional[str] = None,
                        state: Optional[str] = "done",
                        limit: int = 100000) -> dict[str, Any]:
         """Bulk per-gig metrics for result aggregation across a campaign.
 
-        Returns ``{rows: [{job_id, metrics, state, grp, disk}], count, ts}``.
+        Returns ``{rows: [{subjob_id, metrics, state, job, disk}], count, ts}``.
         Unlike ``/jobs`` (dashboard-shaped, capped at 2000), this streams up to
         ``limit`` (default 100k) lightweight rows so a consumer can fold metrics
         across a whole campaign -- e.g. ranking every clip by worst-section
-        error. ``grp`` filters to one campaign; ``state`` defaults to ``done``.
-        Ordered by job_id for deterministic paging.
+        error. ``job`` filters to one campaign; ``state`` defaults to ``done``.
+        Ordered by subjob_id for deterministic paging.
         """
         states = tuple(s.strip() for s in state.split(",")) if state else None
-        rows = store.export_metrics(grp=grp, states=states,
+        rows = store.export_metrics(job=job, states=states,
                                     limit=min(max(limit, 1), 200000))
         return {"rows": rows, "count": len(rows), "ts": time.time()}
 
@@ -586,6 +628,52 @@ def create_app(
         import math
         return max(1, math.ceil(my_w / total_w * total_budget))
 
+    def _record_lease_decision(req: "LeaseReq", res, ttl: float) -> None:
+        """Build a LeaseDecision record from the lease result's diag and append
+        it to the ring buffer. Emit LEASED JobEvents for each granted gig.
+        Throttled console log when the host got fewer gigs than requested."""
+        diag = res.diag or {}
+        ts = time.time()
+        decision = {
+            "ts": ts,
+            "runner_id": req.runner_id,
+            "host": req.host,
+            "requested_capacity": diag.get("requested_capacity", req.capacity),
+            "effective_capacity": diag.get("effective_capacity", req.capacity),
+            "granted": diag.get("granted", len(res.gigs)),
+            "lease_id": res.lease_id,
+            "binding_reason": diag.get("binding_reason", "GRANTED_FULL"),
+            "pending_total": diag.get("pending_total", 0),
+            "fair_share_ceiling": diag.get("fair_share_ceiling"),
+            "host_inflight_before": diag.get("host_inflight_before", 0),
+            "disk": diag.get("disk", {}),
+            "granted_subjob_ids": diag.get("granted_subjob_ids", []),
+            "ttl": ttl,
+        }
+        app.state.lease_decisions.append(decision)
+
+        # Emit a LEASED event for *every* leased gig — not the 32-capped
+        # granted_subjob_ids used for the compact decision record — so job_trace is
+        # complete. Bounded by the per-lease grant size (workers+buffer, further
+        # capped by the disk budget) and by the index eviction in _job_event.
+        for g in res.gigs:
+            _job_event(g["subjob_id"], "LEASED", host=req.host,
+                       runner_id=req.runner_id, lease_id=res.lease_id)
+
+        # Throttled log: at most 1 line per host per ~10s when under-granted.
+        granted = decision["granted"]
+        requested = decision["requested_capacity"]
+        if granted < requested and requested > 0:
+            host = req.host
+            last = app.state._last_lease_log.get(host, 0.0)
+            if ts - last >= 10.0:
+                app.state._last_lease_log[host] = ts
+                free_map = {d: s["free"] for d, s in decision["disk"].items()}
+                print(f"[fixer][lease] host={host} req={requested} "
+                      f"granted={granted} reason={decision['binding_reason']} "
+                      f"free={free_map} pending={decision['pending_total']}",
+                      flush=True)
+
     @app.post("/lease")
     def lease(req: LeaseReq) -> dict[str, Any]:
         _touch_runner(req.runner_id, req.host)
@@ -617,11 +705,21 @@ def create_app(
         }
         if adv_out:
             payload["advisories"] = adv_out
+
+        # --- Record the lease decision for observability ---
+        _record_lease_decision(req, res, ttl)
+
         return payload
 
     @app.post("/complete")
     def complete(req: CompleteReq) -> dict[str, int]:
-        return store.complete([r.model_dump() for r in req.results])
+        results = [r.model_dump() for r in req.results]
+        for r in results:
+            status = r.get("status", "ok")
+            event = "COMPLETED" if status in ("ok", "skipped") else "FAILED"
+            _job_event(r["subjob_id"], event, status=status,
+                       error=r.get("error"))
+        return store.complete(results)
 
     @app.post("/heartbeat")
     def heartbeat(req: HeartbeatReq) -> dict[str, Any]:
@@ -686,7 +784,84 @@ def create_app(
                 "global_write_inflight": app.state.global_write_inflight,
                 "active_resource_slots": len(app.state.resource_slots),
             }
+        # Scheduling observability block: per-host grant ratio in the last ~120s.
+        st["scheduling"] = _scheduling_summary(window_s=120.0)
         return JSONResponse(st)
+
+    # ================================================================
+    # Coordination decision ledger (observability endpoints)
+    # ================================================================
+
+    def _scheduling_summary(window_s: float = 300.0) -> dict[str, Any]:
+        """Aggregate recent lease decisions into per-host stats. The 'is anyone
+        starving?' view: a host with requested>0 and grant_ratio≈0 is starved."""
+        now = time.time()
+        cutoff = now - window_s
+        per_host: dict[str, dict[str, Any]] = {}
+        for d in app.state.lease_decisions:
+            if d["ts"] < cutoff:
+                continue
+            h = d["host"]
+            agg = per_host.setdefault(h, {
+                "requested": 0, "granted": 0, "decisions": 0,
+                "reasons": {},
+            })
+            agg["requested"] += d["requested_capacity"]
+            agg["granted"] += d["granted"]
+            agg["decisions"] += 1
+            reason = d["binding_reason"]
+            agg["reasons"][reason] = agg["reasons"].get(reason, 0) + 1
+        starved: list[str] = []
+        for h, agg in per_host.items():
+            req = agg["requested"]
+            granted = agg["granted"]
+            agg["grant_ratio"] = round(granted / req, 3) if req > 0 else 1.0
+            top = max(agg["reasons"], key=agg["reasons"].get) if agg["reasons"] else ""
+            agg["main_reason"] = top
+            if req > 0 and agg["grant_ratio"] < 0.05 and agg["decisions"] >= 2:
+                starved.append(h)
+        return {
+            "window_s": window_s,
+            "per_host": per_host,
+            "starved_hosts": starved,
+            "ts": now,
+        }
+
+    @app.get("/lease/decisions")
+    def lease_decisions(
+        host: Optional[str] = None,
+        reason: Optional[str] = None,
+        since: Optional[float] = None,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        """Recent lease decisions (newest-first). Filter by host / reason / since."""
+        limit = min(max(limit, 1), 2000)
+        out = []
+        for d in reversed(app.state.lease_decisions):
+            if host and d["host"] != host:
+                continue
+            if reason and d["binding_reason"] != reason:
+                continue
+            if since and d["ts"] < since:
+                continue
+            out.append(d)
+            if len(out) >= limit:
+                break
+        return {"decisions": out, "count": len(out), "ts": time.time()}
+
+    @app.get("/subjob/trace")
+    def job_trace(subjob_id: str) -> dict[str, Any]:
+        """Coordination timeline for one job/gig: seeded/leased/completed/
+        failed/requeued/expired events, plus the job's current DB row."""
+        events = list(app.state.job_event_index.get(subjob_id, []))
+        row = store.job(subjob_id)
+        return {"subjob_id": subjob_id, "events": events, "current": row,
+                "ts": time.time()}
+
+    @app.get("/decisions/summary")
+    def decisions_summary(window_s: float = 300.0) -> dict[str, Any]:
+        """Aggregated scheduling health: per-host grant ratio + starved hosts."""
+        return _scheduling_summary(window_s=window_s)
 
     @app.get("/advisories")
     def advisories_list(
@@ -731,11 +906,11 @@ def create_app(
             "budget": app.state.disk_concurrency,
         }
 
-    @app.get("/job/{job_id:path}")
-    def job_detail(job_id: str) -> JSONResponse:
-        d = store.job(job_id)
+    @app.get("/subjob/{subjob_id:path}")
+    def job_detail(subjob_id: str) -> JSONResponse:
+        d = store.job(subjob_id)
         if d is None:
-            return JSONResponse({"error": "not found", "job_id": job_id}, status_code=404)
+            return JSONResponse({"error": "not found", "subjob_id": subjob_id}, status_code=404)
         r = app.state.runners.get(d.get("runner_id")) if d.get("runner_id") else None
         d["launch_command"] = r.get("launch_command", "") if r else ""
         d["runner_log_path"] = r.get("log_path") if r else None

@@ -22,17 +22,17 @@ from kiroshi.jobstore import JobStore  # noqa: E402
 # --------------------------------------------------- requeue status (jobstore)
 def test_requeue_status_returns_to_pending_without_burning_retries(tmp_path):
     store = JobStore(str(tmp_path / "r.db"), max_retries=2)
-    store.seed([{"job_id": "g1", "spec": {}}, {"job_id": "g2", "spec": {}}])
+    store.seed([{"subjob_id": "g1", "spec": {}}, {"subjob_id": "g2", "spec": {}}])
     # lease both so they're "leased"
     res = store.lease("r1", "host", 10, 60)
-    jids = {g["job_id"] for g in res.gigs}
+    jids = {g["subjob_id"] for g in res.gigs}
     assert jids == {"g1", "g2"}
 
     # evict g1 (requeue) — must go back to pending, attempts untouched
     # fail g2 (error) — must consume a retry (attempts++) and also go pending
     out = store.complete([
-        {"job_id": "g1", "status": "requeue", "error": "evicted: pause", "metrics": {}},
-        {"job_id": "g2", "status": "error", "error": "boom", "metrics": {}},
+        {"subjob_id": "g1", "status": "requeue", "error": "evicted: pause", "metrics": {}},
+        {"subjob_id": "g2", "status": "error", "error": "boom", "metrics": {}},
     ])
     assert out["requeued"] == 2 and out["done"] == 0 and out["failed"] == 0
 
@@ -51,13 +51,13 @@ def test_requeue_does_not_eventually_fail_from_repeated_evictions(tmp_path):
     # The whole point: an at-field pause that flaps on/off must NOT exhaust the
     # retry budget and mark a healthy gig 'failed'. Evict the same gig 5x.
     store = JobStore(str(tmp_path / "r2.db"), max_retries=2)
-    store.seed([{"job_id": "g", "spec": {}}])
+    store.seed([{"subjob_id": "g", "spec": {}}])
     for _ in range(5):
         store.lease("r", "h", 10, 60)
-        out = store.complete([{"job_id": "g", "status": "requeue",
+        out = store.complete([{"subjob_id": "g", "status": "requeue",
                                "error": "evicted", "metrics": {}}])
         assert out["failed"] == 0
-    rows = {r["job_id"]: r for r in (store.job("g"),)}
+    rows = {r["subjob_id"]: r for r in (store.job("g"),)}
     assert rows["g"]["state"] == "pending" and rows["g"]["attempts"] == 0
 
 
@@ -68,7 +68,7 @@ def test_pool_pause_cb_evicts_queued_keeps_running():
     pool = LocalPool(task_ref="examples.sleep_task:run", workers=1)
     try:
         # 6 gigs: 1 worker, so at most 1 runs at a time; the other 5 sit queued.
-        gigs = [{"job_id": f"g{i}", "spec": {"seconds": 3.0}} for i in range(6)]
+        gigs = [{"subjob_id": f"g{i}", "spec": {"seconds": 3.0}} for i in range(6)]
 
         fired = {"v": False}
 
@@ -85,7 +85,7 @@ def test_pool_pause_cb_evicts_queued_keeps_running():
         )
         elapsed = time.time() - t0
 
-        by_id = {r["job_id"]: r for r in results}
+        by_id = {r["subjob_id"]: r for r in results}
         assert len(results) == 6                      # no gig lost
         oks = [j for j, r in by_id.items() if r["status"] == "ok"]
         evicted = [j for j, r in by_id.items() if r["status"] == "requeue"]

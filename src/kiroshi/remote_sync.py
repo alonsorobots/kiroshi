@@ -31,8 +31,23 @@ import shlex
 import socket
 import subprocess
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Callable, Iterable, Optional
+
+
+def _remap_repo(local_path: str, root: Optional[str]) -> str:
+    """Map a coordinator-local repo path to the same repo on a remote whose
+    checkout lives under a different ``root`` (e.g. a different Windows user).
+
+    ``C:\\Users\\admin\\...\\kiroshi`` + root ``C:\\Users\\alons\\...\\RESEARCH``
+    -> ``C:\\Users\\alons\\...\\RESEARCH\\kiroshi``. With no ``root`` the path is
+    used verbatim (nodes that mirror the coordinator's layout — unchanged).
+    """
+    if not root:
+        return local_path
+    name = PureWindowsPath(local_path).name or Path(local_path).name
+    sep = "\\" if ("\\" in root or ":" in root) else "/"
+    return root.rstrip("/\\") + sep + name
 
 
 def _default_repos() -> tuple[str, ...]:
@@ -70,6 +85,11 @@ class HostPlan:
     steps: list[SyncStep] = field(default_factory=list)
     skipped: bool = False
     skip_reason: str = ""
+    ssh_target: str = ""   # ssh argument (user@host); defaults to host
+
+    def __post_init__(self) -> None:
+        if not self.ssh_target:
+            self.ssh_target = self.host
 
 
 def _repo_pull_cmd(repo: str) -> str:
@@ -113,20 +133,24 @@ def plan_sync(hosts: dict[str, Any],
                                   skipped=True, skip_reason="local host (nothing to sync)"))
             continue
         python = getattr(hc, "python", None)
+        ssh_target = getattr(hc, "ssh_target", None) or name
+        root = getattr(hc, "root", None)
         steps: list[SyncStep] = []
         for repo in repos:
-            steps.append(SyncStep("pull", f"git pull (ff-only) {repo}",
-                                  _repo_pull_cmd(repo)))
+            remote_repo = _remap_repo(repo, root)
+            steps.append(SyncStep("pull", f"git pull (ff-only) {remote_repo}",
+                                  _repo_pull_cmd(remote_repo)))
             if reinstall:
-                steps.append(SyncStep("reinstall", f"pip install -e {repo}",
-                                      _reinstall_cmd(repo, python)))
+                steps.append(SyncStep("reinstall", f"pip install -e {remote_repo}",
+                                      _reinstall_cmd(remote_repo, python)))
         if restart:
             steps.append(SyncStep("restart",
                                   "signal runners to exit (auto-restart wrapper respawns)",
                                   _restart_cmd(name)))
         if not steps:
             steps.append(SyncStep("note", "no repos to sync (empty --repos)", None))
-        plans.append(HostPlan(host=name, python=python, steps=steps))
+        plans.append(HostPlan(host=name, python=python, steps=steps,
+                              ssh_target=ssh_target))
     return plans
 
 
@@ -143,7 +167,7 @@ def render_plan(plans: list[HostPlan]) -> str:
             if s.remote_cmd is None:
                 lines.append(f"  # {s.description}")
             else:
-                lines.append(f"  $ ssh {p.host} {s.remote_cmd}")
+                lines.append(f"  $ ssh {p.ssh_target} {s.remote_cmd}")
     return "\n".join(lines)
 
 
@@ -179,10 +203,10 @@ def execute_plan(plans: list[HostPlan], dry_run: bool = True,
                 out(f"  # {s.description}")
                 continue
             if dry_run:
-                out(f"  DRY: ssh {p.host} {s.remote_cmd}")
+                out(f"  DRY: ssh {p.ssh_target} {s.remote_cmd}")
                 continue
-            out(f"  RUN: ssh {p.host} {s.remote_cmd}")
-            rc, so, se = ssh(p.host, s.remote_cmd)
+            out(f"  RUN: ssh {p.ssh_target} {s.remote_cmd}")
+            rc, so, se = ssh(p.ssh_target, s.remote_cmd)
             if rc != 0:
                 failures += 1
                 out(f"    FAIL rc={rc} {se.strip()[:400]}")

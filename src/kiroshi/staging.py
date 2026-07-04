@@ -172,7 +172,7 @@ def enumerate_gigs(args: dict[str, Any]) -> Iterator[dict[str, Any]]:
             full = str(dirpath).rstrip("/\\") + sep + fn
             rel = _rel(full)
             yield {
-                "job_id": rel,
+                "subjob_id": rel,
                 "spec": {
                     "src_path": rel,
                     "dst_path": rel,          # same rel under dst_root

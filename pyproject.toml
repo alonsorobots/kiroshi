@@ -38,6 +38,11 @@ smb = ["smbprotocol>=1.12"]
 # as typed tools/resources to MCP-compatible LLM agents. Optional so the core
 # install has no extra weight for headless nodes.
 mcp = ["mcp>=1.0"]
+# Cursor advisory bridge (`kiroshi cursor-bridge`, kiroshi.integrations.cursor_bridge)
+# — turns Fixer advisories into follow-up prompts to the Cursor agent that
+# launched a campaign. Vendor-specific, so it lives behind this extra and core
+# stays runtime-neutral. (Consolidated from the retired `kiroshi-cursor` repo.)
+cursor = ["cursor-sdk>=0.1"]
 profiler = ["psutil>=5.9"]
 gpu = ["pynvml>=11.0"]
 dev = ["pytest>=8.0", "ruff>=0.4", "numpy>=1.24", "httpx>=0.27"]

@@ -31,7 +31,6 @@ is ``mcp>=1.0``.
 """
 from __future__ import annotations
 
-import json
 import os
 import sys
 import time
@@ -130,11 +129,32 @@ def build_server(default_fixer: Optional[str] = None,
         return _read_text(DOCS_PIPELINE)
 
     # ---- Tools (thin wrappers over existing HTTP) --------------------
+    _auto_cache: dict[str, str] = {}  # discovered fixer URL, resolved once
+
     def _fx(fixer: Optional[str]) -> str:
-        f = fixer or default_fixer or os.environ.get("KIROSHI_FIXER")
-        if not f:
-            raise ValueError("no fixer URL — pass 'fixer' or set KIROSHI_FIXER")
-        return f
+        """Resolve the Fixer URL for a tool call.
+
+        Order: explicit per-call ``fixer`` -> server default -> ``KIROSHI_FIXER``
+        env -> LAN beacon discovery. An empty value or the literal ``"auto"``
+        forces discovery, so one config (``--fixer auto``) is portable across
+        every node and survives host/port/campaign changes without hardcoding an
+        address. Discovery is lazy (first use) + cached, so IDEs that launch the
+        MCP server at startup don't pay a UDP round-trip until a tool is called."""
+        for cand in (fixer, default_fixer, os.environ.get("KIROSHI_FIXER")):
+            c = (cand or "").strip()
+            if c and c.lower() != "auto":
+                return c
+        cached = _auto_cache.get("url")
+        if cached:
+            return cached
+        from .discovery import discover_fixer
+        url = discover_fixer(timeout=6.0)
+        if not url:
+            raise ValueError(
+                "no fixer URL: LAN discovery heard no beacon. Pass "
+                "--fixer http://HOST:PORT, set KIROSHI_FIXER, or start a Fixer.")
+        _auto_cache["url"] = url
+        return url
 
     def _tk(token: Optional[str]) -> Optional[str]:
         return token or default_token or os.environ.get("KIROSHI_TOKEN")
@@ -164,40 +184,40 @@ def build_server(default_fixer: Optional[str] = None,
         return _get(_fx(fixer), "/storage", _tk(token))
 
     @app.tool(description="Enqueue gigs into a Fixer. `gigs` is a list of "
-                          "{job_id, spec}; duplicates by job_id are ignored.")
-    def seed_gigs(gigs: list[dict], group: str, label: str = "",
+                          "{subjob_id, spec}; duplicates by subjob_id are ignored.")
+    def seed_gigs(gigs: list[dict], job: str, label: str = "",
                   fixer: Optional[str] = None,
                   token: Optional[str] = None) -> dict:
         return _post(_fx(fixer), "/seed", _tk(token),
-                     {"gigs": gigs, "group": group, "label": label})
+                     {"gigs": gigs, "job": job, "label": label})
 
-    @app.tool(description="Search jobs by regex on job_id (default) or error, "
-                          "filtered by state/group. Returns matching job rows "
-                          "(job_id, state, attempts, error, metrics, etc.).")
-    def search_jobs(regex: str = "", field: str = "job_id",
-                    state: str = "", group: str = "", limit: int = 200,
+    @app.tool(description="Search jobs by regex on subjob_id (default) or error, "
+                          "filtered by state/job. Returns matching job rows "
+                          "(subjob_id, state, attempts, error, metrics, etc.).")
+    def search_jobs(regex: str = "", field: str = "subjob_id",
+                    state: str = "", job: str = "", limit: int = 200,
                     fixer: Optional[str] = None,
                     token: Optional[str] = None) -> dict:
         params = {"limit": min(max(limit, 1), 2000)}
         if state:
             params["state"] = state
-        if group:
-            params["grp"] = group
+        if job:
+            params["job"] = job
         if regex:
             if field == "error":
                 params["error_re"] = regex
             else:
-                params["job_id_re"] = regex
-        return _get(_fx(fixer), "/jobs", _tk(token), **params)
+                params["subjob_id_re"] = regex
+        return _get(_fx(fixer), "/subjobs", _tk(token), **params)
 
     @app.tool(description="Return a lightweight rows list for one campaign — "
                           "the fastest way to know which items a stage has "
                           "finished. state defaults to 'done'.")
-    def export_metrics(group: str, state: str = "done", limit: int = 100000,
+    def export_metrics(job: str, state: str = "done", limit: int = 100000,
                        fixer: Optional[str] = None,
                        token: Optional[str] = None) -> dict:
         return _get(_fx(fixer), "/metrics/export", _tk(token),
-                    grp=group, state=state, limit=limit)
+                    job=job, state=state, limit=limit)
 
     @app.tool(description="Validate a kiroshi pipeline .toml spec and return "
                           "the parsed DAG (stages, edges) with no I/O.")
@@ -205,7 +225,7 @@ def build_server(default_fixer: Optional[str] = None,
         from .pipeline import Pipeline
         p = Pipeline.from_toml(spec_path)
         return {
-            "stages": {n: {"fixer": s.fixer, "group": s.group,
+            "stages": {n: {"fixer": s.fixer, "job": s.job,
                            "task": s.task, "has_command": bool(s.command),
                            "produces": list(s.produces)}
                        for n, s in p.stages.items()},
@@ -239,22 +259,22 @@ def build_server(default_fixer: Optional[str] = None,
             {"from": src_root, "to": dst_root, "pattern": pattern}))
         if fixer and gigs:
             _post(_fx(fixer), "/seed", _tk(token),
-                  {"gigs": gigs, "group": f"stage-{int(time.time())}",
+                  {"gigs": gigs, "job": f"stage-{int(time.time())}",
                    "label": f"stage: {src_root} -> {dst_root}"})
         return {"gig_count": len(gigs), "fixer": fixer,
                 "task": "kiroshi.staging:run"}
 
     @app.tool(description="Measure TRUE throughput of a campaign. Either pass "
                           "output_dir (from file mtimes; needs FS access) OR "
-                          "fixer+group (from /jobs completed_at over HTTP).")
+                          "fixer+job (from /jobs completed_at over HTTP).")
     def bench_rate(output_dir: Optional[str] = None, pattern: str = "*",
                    recursive: bool = True,
-                   fixer: Optional[str] = None, group: Optional[str] = None,
+                   fixer: Optional[str] = None, job: Optional[str] = None,
                    token: Optional[str] = None) -> dict:
         from . import bench as _bench
-        if fixer and group:
-            rows = _get(_fx(fixer), "/jobs", _tk(token),
-                        state="done", limit=2000, grp=group).get("jobs", [])
+        if fixer and job:
+            rows = _get(_fx(fixer), "/subjobs", _tk(token),
+                        state="done", limit=2000, job=job).get("jobs", [])
             times = [r["completed_at"] for r in rows if r.get("completed_at")]
             if not times:
                 return {"count": 0, "span_s": 0.0, "items_per_s": 0.0}
@@ -264,7 +284,7 @@ def build_server(default_fixer: Optional[str] = None,
                     "items_per_s": (n / span) if span > 0 else 0.0,
                     "sampled": n >= 2000}
         if not output_dir:
-            raise ValueError("bench_rate needs output_dir OR fixer+group")
+            raise ValueError("bench_rate needs output_dir OR fixer+job")
         rate = _bench.rate_from_dir(output_dir, pattern=pattern,
                                     recursive=recursive)
         return {"count": rate.count, "span_s": rate.span_s,
@@ -282,11 +302,56 @@ def build_server(default_fixer: Optional[str] = None,
         return {"recommended_concurrency": rec, "bias": bias,
                 "peak_mbps": peak_mbps, "peak_at_concurrency": peak_conc}
 
-    # ---- Process management tools (local-host only) ------------------
-    # These read the local process registry (``processreg``), NOT the Fixer
-    # HTTP API. They are only meaningful when the MCP server is co-located
-    # with the Kiroshi processes you want to inspect/stop. If you're driving
-    # a remote Fixer from your laptop, these describe YOUR laptop's processes.
+    # ---- Observability / scheduling (thin over Fixer HTTP) -----------
+    # Decision-log tools for debugging node starvation / underutilization.
+
+    @app.tool(description="Recent lease DECISIONS (why each host got N gigs): "
+                          "requested vs granted, binding_reason, per-disk budget "
+                          "snapshot. Filter by host/reason. Use to debug node "
+                          "starvation or underutilization.")
+    def lease_decisions(host: str = "", reason: str = "", since: float = 0,
+                        limit: int = 100,
+                        fixer: Optional[str] = None,
+                        token: Optional[str] = None) -> dict:
+        p: dict = {"limit": limit}
+        if host:
+            p["host"] = host
+        if reason:
+            p["reason"] = reason
+        if since:
+            p["since"] = since
+        return _get(_fx(fixer), "/lease/decisions", _tk(token), **p)
+
+    @app.tool(description="Coordination timeline for one job/gig "
+                          "(seeded/leased/completed/failed/expired events + "
+                          "current DB row). Use to trace a single gig's lifecycle.")
+    def job_trace(subjob_id: str,
+                  fixer: Optional[str] = None,
+                  token: Optional[str] = None) -> dict:
+        return _get(_fx(fixer), "/subjob/trace", _tk(token), subjob_id=subjob_id)
+
+    @app.tool(description="Aggregated scheduling health over a window: per-host "
+                          "grant ratio, main binding reason, and which hosts are "
+                          "STARVED. The 'is anyone starving?' call — use first "
+                          "when diagnosing underutilization.")
+    def scheduling_summary(window_s: int = 300,
+                           fixer: Optional[str] = None,
+                           token: Optional[str] = None) -> dict:
+        return _get(_fx(fixer), "/decisions/summary", _tk(token),
+                    window_s=window_s)
+
+    @app.tool(description="Paragraph-form health diagnosis of ONE campaign: "
+                          "progress %, active advisories on its spindles, and "
+                          "recent errors — shaped to paste straight into context. "
+                          "The fastest 'how did my run go?' call.")
+    def campaign_health(subjob_id: str, limit_errors: int = 5,
+                        fixer: Optional[str] = None,
+                        token: Optional[str] = None) -> dict:
+        fx, tk = _fx(fixer), _tk(token)
+        groups = _get(fx, "/groups", tk, limit=500)
+        advisories = _get(fx, "/advisories", tk, active_only="true", limit=100)
+        status = _get(fx, "/status", tk)
+        return _campaign_health(subjob_id, limit_errors, groups, advisories, status)
 
     @app.tool(description="Return failed/stuck gigs to pending (HTTP /requeue). "
                           "States default to ['failed']; set reset_attempts=True "
@@ -296,6 +361,12 @@ def build_server(default_fixer: Optional[str] = None,
                 token: Optional[str] = None) -> dict:
         return _post(_fx(fixer), "/requeue", _tk(token),
                      {"states": states, "reset_attempts": reset_attempts})
+
+    # ---- Process management tools (local-host only) ------------------
+    # These read the local process registry (``processreg``), NOT the Fixer
+    # HTTP API. Only meaningful when the MCP server is co-located with the
+    # Kiroshi processes to inspect/stop; driving a remote Fixer from a laptop,
+    # these describe YOUR laptop's processes.
 
     @app.tool(description="List Kiroshi processes registered ON THIS HOST "
                           "(local only — reads the process manifest, not the "
@@ -316,6 +387,68 @@ def build_server(default_fixer: Optional[str] = None,
 
     # keep the tool function body thin so the logic is unit-testable without
     # needing to go through FastMCP's async tool-dispatch layer.
+
+    return app
+
+
+def _campaign_health(subjob_id: str, limit_errors: int,
+                     groups: Any, advisories: Any, status: Any) -> dict:
+    """Compose a paste-ready campaign diagnosis from /groups + /advisories +
+    /status. Extracted for direct unit testing (no FastMCP dispatch needed)."""
+    job = None
+    for g in (groups.get("groups") if isinstance(groups, dict) else []) or []:
+        if g.get("job") == subjob_id or g.get("label") == subjob_id:
+            job = g
+            break
+    relevant: list[dict] = []
+    if isinstance(advisories, dict):
+        for a in advisories.get("advisories", []) or []:
+            # Surface fleet-wide advisories and (absent per-job disk metadata)
+            # any active advisory — a campaign author wants to see them.
+            relevant.append(a)
+    errors = []
+    if isinstance(status, dict):
+        errors = (status.get("recent_errors") or [])[: max(0, int(limit_errors))]
+    return {
+        "summary": _format_summary(subjob_id, job, relevant, errors, status),
+        "job": job,
+        "advisories": relevant,
+        "errors": errors,
+    }
+
+
+def _format_summary(subjob_id: str, job: Optional[dict],
+                    advisories: list[dict], errors: list[dict],
+                    status: Any) -> str:
+    """One deterministic paragraph an agent can paste directly (no LLM)."""
+    parts: list[str] = []
+    if job:
+        done = int(job.get("done", 0))
+        failed = int(job.get("failed", 0))
+        pending = int(job.get("pending", 0))
+        leased = int(job.get("leased", 0))
+        total = done + failed + pending + leased
+        pct = (100.0 * done / total) if total else 0.0
+        parts.append(f"Campaign {subjob_id!r}: {done}/{total} done ({pct:.0f}%), "
+                     f"{failed} failed, {pending} pending, {leased} in-flight.")
+    else:
+        parts.append(f"No campaign matched {subjob_id!r} in the Fixer's groups.")
+    if isinstance(status, dict) and status.get("rate_per_s") is not None:
+        parts.append(f"Fleet throughput ~{status.get('rate_per_s')}/s.")
+    if advisories:
+        by_sev: dict[str, int] = {}
+        for a in advisories:
+            by_sev[a.get("severity", "?")] = by_sev.get(a.get("severity", "?"), 0) + 1
+        parts.append("Active advisories: "
+                     + ", ".join(f"{v} {k}" for k, v in sorted(by_sev.items()))
+                     + f". Top: {advisories[0].get('code', '?')} — "
+                     + (advisories[0].get("detail", "") or "").strip())
+    else:
+        parts.append("No active advisories.")
+    if errors:
+        parts.append(f"Recent errors (up to {len(errors)}): " + "; ".join(
+            f"{e.get('subjob_id', '?')}: {(e.get('error') or '')[:120]}" for e in errors))
+    return " ".join(parts)
 
 
 def _stop_impl(role: Optional[str] = None, pid: Optional[int] = None,
@@ -349,8 +482,6 @@ def _stop_impl(role: Optional[str] = None, pid: Optional[int] = None,
         if request_stop(p.get("role", ""), int(p.get("pid", 0))):
             stopped += 1
     return {"stopped": stopped}
-
-    return app
 
 
 def run_stdio(default_fixer: Optional[str] = None,
