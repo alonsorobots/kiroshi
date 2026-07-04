@@ -92,16 +92,31 @@ class HostPlan:
             self.ssh_target = self.host
 
 
+def _quote_remote_path(path: str) -> str:
+    """Quote a filesystem path for a command sent over SSH to an *unknown*
+    remote shell.
+
+    ``shlex.quote`` emits POSIX single-quotes, and it quotes Windows paths
+    because ``\\`` is not in its safe-char set. But Windows OpenSSH defaults to
+    ``cmd.exe``, which does NOT treat single-quotes as quoting — they arrive
+    literally and git fails with ``cannot change to ''C:\\...\\kiroshi''``.
+
+    Fix: normalize backslashes to forward slashes (git accepts them on Windows)
+    and wrap in double quotes, which both ``cmd.exe`` and POSIX ``sh`` honour.
+    Safe for real repo/interpreter paths (no ``$``/backtick/embedded quote)."""
+    return '"' + path.replace("\\", "/") + '"'
+
+
 def _repo_pull_cmd(repo: str) -> str:
     """``git -C`` avoids depending on the remote shell's cwd. ``--ff-only``
     refuses to merge — a diverged remote surfaces cleanly instead of silently
     creating a merge commit on a production box."""
-    return f"git -C {shlex.quote(repo)} pull --ff-only"
+    return f"git -C {_quote_remote_path(repo)} pull --ff-only"
 
 
 def _reinstall_cmd(repo: str, python: Optional[str]) -> str:
-    py = shlex.quote(python) if python else "python"
-    return f"{py} -m pip install --quiet -e {shlex.quote(repo)}"
+    py = _quote_remote_path(python) if python else "python"
+    return f"{py} -m pip install --quiet -e {_quote_remote_path(repo)}"
 
 
 def _restart_cmd(host: str) -> str:

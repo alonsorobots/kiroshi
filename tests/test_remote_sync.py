@@ -48,14 +48,29 @@ def test_plan_uses_ff_only_pulls():
 
 
 def test_plan_quotes_paths_with_spaces():
-    # A path with a space MUST be shell-safely quoted; a plain path may or may
-    # not be quoted depending on shlex's "safe chars" rule — that's fine.
+    # A path with a space MUST be shell-safely quoted. We use double quotes
+    # (not POSIX single quotes) because they are honoured by both POSIX sh and
+    # the Windows cmd.exe that OpenSSH launches on a Windows remote.
     plans = rs.plan_sync(HOSTS, repos=("/opt/my repos/kiroshi",),
                          local_hostnames=("host-local",))
     hosta = next(p for p in plans if p.host == "host-a")
     pull = next(s for s in hosta.steps if s.kind == "pull")
-    assert "'/opt/my repos/kiroshi'" in pull.remote_cmd, \
+    assert '"/opt/my repos/kiroshi"' in pull.remote_cmd, \
         "path with spaces must be shell-quoted"
+
+
+def test_plan_windows_repo_path_is_cmd_safe():
+    # Regression: a Windows backslash path must NOT be POSIX single-quoted
+    # (shlex.quote did this) — cmd.exe passes single quotes through literally,
+    # so `git -C 'C:\...'` fails with "cannot change to ''C:\\...''". The path
+    # must be forward-slashed + double-quoted so both cmd.exe and sh accept it.
+    win = r"C:\Users\admin\Desktop\RESEARCH\kiroshi"
+    plans = rs.plan_sync(HOSTS, repos=(win,), local_hostnames=("host-local",))
+    hosta = next(p for p in plans if p.host == "host-a")
+    pull = next(s for s in hosta.steps if s.kind == "pull")
+    assert "'" not in pull.remote_cmd, "must not emit POSIX single-quotes for cmd.exe"
+    assert '"C:/Users/admin/Desktop/RESEARCH/kiroshi"' in pull.remote_cmd
+    assert "\\" not in pull.remote_cmd, "backslashes must be normalized to /"
 
 
 def test_reinstall_uses_host_python_when_provided():
