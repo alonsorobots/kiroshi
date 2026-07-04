@@ -204,6 +204,23 @@ def test_inject_roots_inert_without_topology():
     assert gigs[0]["spec"] == {}
 
 
+def test_inject_roots_does_not_overwrite_spec_supplied_roots():
+    # A sub-job that ships its own roots (e.g. a slerp step reading the 30fps
+    # reductions, not the disk's raw data_canonical share) must keep them --
+    # overwriting would silently misroute the task to the wrong input tree.
+    from kiroshi.storage import DiskConfig, inject_roots
+
+    disks = [DiskConfig(id="d1", read="//nas/data_canonical", write="//nas/cache")]
+    gigs = [{
+        "subjob_id": "clip", "disk": "d1",
+        "spec": {"src_path": "clip.npz", "read_root": "//nas/reduced_88dof_30fps",
+                 "write_root": "//nas/cache"},
+    }]
+    inject_roots(gigs, disks)
+    assert gigs[0]["spec"]["read_root"] == "//nas/reduced_88dof_30fps"
+    assert gigs[0]["spec"]["write_root"] == "//nas/cache"
+
+
 def test_lease_injects_dual_path_roots(tmp_path):
     # end-to-end: /lease stamps the spec with the disk's read/write roots so the
     # task reads the direct share / writes the cached share.

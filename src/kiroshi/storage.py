@@ -200,7 +200,11 @@ def inject_roots(gigs: list[dict[str, Any]], disks: list[DiskConfig]) -> None:
         spec = g.get("spec")
         if not isinstance(spec, dict):
             continue
-        if d.read:
+        # Only fill roots the spec doesn't already carry: a sub-job that ships its
+        # own read_root/write_root (e.g. a slerp step reading reduced_88dof_30fps
+        # rather than the disk's raw data_canonical share) knows its paths better
+        # than the topology default. Overwriting them silently misroutes the task.
+        if d.read and not spec.get("read_root"):
             spec["read_root"] = d.read
-        if d.write:
+        if d.write and not spec.get("write_root"):
             spec["write_root"] = d.write
