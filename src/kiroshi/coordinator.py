@@ -59,6 +59,10 @@ class LeaseReq(BaseModel):
     # The Runner's heartbeat cadence (s). The Coordinator sizes the lease as a safe
     # multiple of it, so a slow-but-alive Runner isn't reaped into a duplicate.
     heartbeat_interval: Optional[float] = None
+    # The job (workload) this Runner can execute. When set, the Coordinator only
+    # leases sub-jobs of this job, so many jobs can share one coordinator without
+    # a fixed-task Runner ever receiving another job's sub-job. None => fleet-wide.
+    job: Optional[str] = None
 
 
 class ResultItem(BaseModel):
@@ -684,7 +688,8 @@ def create_app(
         budget = _effective_disk_budget()
         res = store.lease(req.runner_id, req.host, req.capacity, ttl,
                           disk_concurrency=budget,
-                          host_share=_host_share(req.host, budget))
+                          host_share=_host_share(req.host, budget),
+                          job=req.job)
         # Dual-path routing (N3): stamp each sub-job's spec with its disk's read/write
         # roots so the task reads the direct spindle share / writes the cached share.
         # Inert without a topology (sub-job has no disk -> spec roots unset -> env fallback).

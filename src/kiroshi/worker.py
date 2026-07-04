@@ -73,6 +73,7 @@ class Runner:
         quiet: bool = False,
         max_tasks_per_child: Optional[int] = None,
         gc_between_tasks: bool = False,
+        job: Optional[str] = None,
     ):
         # quiet suppresses the routine per-batch / startup prints so an
         # in-process `kiroshi run` can render a clean progress bar. Errors and
@@ -85,6 +86,9 @@ class Runner:
         self._registered = False
         self._verified_url: Optional[str] = None  # last Coordinator that passed the auth challenge
         self.task_ref = task_ref
+        # Job-scoped leasing: this Runner only leases sub-jobs of ``self.job`` so
+        # a single coordinator can host many jobs. None => lease any job (legacy).
+        self.job = job
         self.workers = workers or (os.cpu_count() or 4)
         self.capacity = capacity
         self.runner_id = runner_id or f"{socket.gethostname()}-{uuid.uuid4().hex[:6]}"
@@ -280,7 +284,8 @@ class Runner:
                     "/lease",
                     {"runner_id": self.runner_id, "host": self.host,
                      "capacity": min(self.capacity, self.workers * 2),
-                     "heartbeat_interval": self.heartbeat_interval},
+                     "heartbeat_interval": self.heartbeat_interval,
+                     "job": self.job},
                 )
                 gigs = (lease or {}).get("gigs") or []
                 lease_id = (lease or {}).get("lease_id")

@@ -200,7 +200,8 @@ class JobStore:
     # --------------------------------------------------------------- lease
     def lease(self, runner_id: str, host: str, capacity: int, ttl: float,
               disk_concurrency: Optional[dict[str, int]] = None,
-              host_share: Optional[int] = None) -> LeaseResult:
+              host_share: Optional[int] = None,
+              job: Optional[str] = None) -> LeaseResult:
         """Lease up to ``capacity`` pending gigs atomically.
 
         With ``disk_concurrency`` (the mesh-global per-spindle budget, only the
@@ -222,10 +223,18 @@ class JobStore:
         now = time.time()
         lease_id = uuid.uuid4().hex
         requested = capacity
+        # Job-scoped leasing: when a runner declares its ``job`` (the workload it
+        # can execute), only sub-jobs of that job are candidates. This is what
+        # makes the single "one brain" coordinator safe to run *many* jobs at
+        # once -- a reduce30 runner never leases a slerp sub-job (different task,
+        # different spec) and vice-versa. ``job=None`` => fleet-wide (legacy).
+        job_sql = " AND job=?" if job is not None else ""
+        job_args: tuple = (job,) if job is not None else ()
         with self._lock:
             # Pending count snapshot for diagnostics (cheap COUNT(*)).
             pending_total = self._conn.execute(
-                "SELECT COUNT(*) AS c FROM subjobs WHERE state='pending'"
+                "SELECT COUNT(*) AS c FROM subjobs WHERE state='pending'" + job_sql,
+                job_args,
             ).fetchone()["c"]
 
             # Fair-share ceiling: never let this host exceed its slice of the
@@ -253,9 +262,9 @@ class JobStore:
 
             if not disk_concurrency:
                 cur = self._conn.execute(
-                    "SELECT subjob_id, spec, disk FROM subjobs WHERE state='pending' "
-                    "ORDER BY created_at LIMIT ?",
-                    (capacity,),
+                    "SELECT subjob_id, spec, disk FROM subjobs WHERE state='pending'"
+                    + job_sql + " ORDER BY created_at LIMIT ?",
+                    job_args + (capacity,),
                 )
                 rows = cur.fetchall()
                 if not rows:
@@ -303,8 +312,9 @@ class JobStore:
             inflight_before = dict(inflight)
             # 2. pending gigs with their disk, in creation order
             rows = self._conn.execute(
-                "SELECT subjob_id, spec, disk FROM subjobs WHERE state='pending' "
-                "ORDER BY created_at"
+                "SELECT subjob_id, spec, disk FROM subjobs WHERE state='pending'"
+                + job_sql + " ORDER BY created_at",
+                job_args,
             ).fetchall()
             if not rows:
                 return LeaseResult(

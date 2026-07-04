@@ -202,6 +202,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     pr.add_argument("--coordinator", "--fixer", dest="coordinator", default=cfg.coordinator_url,
                     help="Coordinator base URL, or 'auto' to discover it on the LAN.")
     pr.add_argument("--task", required=True, help="Task as 'module:function'.")
+    pr.add_argument("--job", default=None,
+                    help="Only lease sub-jobs of this job (workload). Required when "
+                         "one coordinator hosts many jobs so a fixed-task Runner "
+                         "never receives another job's sub-job. Default: any job.")
     pr.add_argument("--workers", type=int, default=cfg.host().workers)
     pr.add_argument("--capacity", type=int, default=cfg.host().capacity)
     pr.add_argument("--id", default=None, help="Runner id (default: host-rand).")
@@ -874,6 +878,7 @@ def _cmd_runner(args) -> int:
         launch_command=_launch_command(),
         max_tasks_per_child=getattr(args, "max_tasks_per_child", None),
         gc_between_tasks=getattr(args, "gc_between_tasks", False),
+        job=getattr(args, "job", None),
     ).run()
     return 0
 
