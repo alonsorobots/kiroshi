@@ -1582,6 +1582,31 @@ def _cmd_requeue(args) -> int:
     return 0
 
 
+def _cmd_cancel(args) -> int:
+    import requests
+
+    args.coordinator = _resolve_coordinator_arg(args.coordinator)
+    if not args.yes:
+        what = ("PURGE (delete ALL rows + job metadata)" if args.purge
+                else "cancel queued (pending/leased) gigs")
+        resp = input(f"About to {what} for job {args.job!r}. Continue? [y/N] ")
+        if resp.strip().lower() not in ("y", "yes"):
+            print("[cancel] aborted", flush=True)
+            return 1
+    r = requests.post(
+        f"{args.coordinator.rstrip('/')}/cancel",
+        json={"job": args.job, "purge": args.purge},
+        timeout=30,
+        headers=_auth_headers(args),
+    )
+    r.raise_for_status()
+    d = r.json()
+    tail = " (purged history + metadata)" if d.get("purged") else ""
+    print(f"[cancel] job {args.job!r}: deleted {d.get('deleted', 0)} gig(s){tail}",
+          flush=True)
+    return 0
+
+
 def _cmd_ps(args) -> int:
     from .processreg import list_registered
 

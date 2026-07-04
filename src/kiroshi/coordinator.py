@@ -873,9 +873,11 @@ def create_app(
         return {"requeued": n}
 
     @app.post("/cancel")
-    def cancel(req: CancelReq) -> dict[str, int]:
+    def cancel(req: CancelReq):
         """Cancel a job's queued gigs (token-gated via the auth middleware).
         ``purge`` also removes completed history + the job's metadata row."""
+        if not (req.job or "").strip():
+            return JSONResponse({"error": "job is required"}, status_code=400)
         return store.cancel(req.job, purge=req.purge)
 
     @app.get("/task/meta")
