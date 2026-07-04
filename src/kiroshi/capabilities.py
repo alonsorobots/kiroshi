@@ -52,6 +52,13 @@ CAPABILITIES: list[dict[str, Any]] = [
         "when_not": "Single-file copies inside a task — use kfs directly. Don't use for compute (it's a data-movement verb, not a transform).",
     },
     {
+        "name": "demote",
+        "purpose": "Write-back mover: flush an NVMe cache dir onto the sharded HDD array, but ONLY when the array is idle. Idle-gated copy job; stable per-path hash placement (spreads all spindles, idempotent).",
+        "command": "kiroshi demote --from <nvme-root> --to '/mnt/user/Lubu*/Dataset' --coordinator <url> [--util 15 --sustain-min 30] [--now]",
+        "when_to_use": "You wrote results fast to NVMe and want them on the HDD array in per-spindle shard layout, without competing with live jobs. The '*' in the dest = one shard per disk (LubuN↔diskN). Gate holds leases until HDD util stays low for the sustain window.",
+        "when_not": "For an immediate tier copy with no idle-wait use 'kiroshi stage'. Writes direct /mnt/diskN paths by design (deterministic sharding) — don't use if you want mergerfs to choose placement.",
+    },
+    {
         "name": "pipeline",
         "purpose": "Declarative multi-stage pipeline with typed dependency edges.",
         "command": "kiroshi pipeline run spec.toml   # or: validate spec.toml",
@@ -78,6 +85,20 @@ CAPABILITIES: list[dict[str, Any]] = [
         "command": "kiroshi requeue --coordinator <url> --state failed",
         "when_to_use": "After fixing a systemic error so failed sub-jobs re-run.",
         "when_not": "Don't loop it blindly against 'leased' while runners are alive — they'll re-lease.",
+    },
+    {
+        "name": "stop",
+        "purpose": "Stop registered coordinator/Runner processes: cooperative drain by default, optional grace-then-force-kill escalation.",
+        "command": "kiroshi stop [--role coordinator|runner] [--all] [--grace 30]  |  kiroshi stop --force (alias: force-kill)",
+        "when_to_use": "Graceful shutdown when workers can observe the drain flag. Default waits 30s then hard-kills wedged process trees (SMB hangs, etc.).",
+        "when_not": "When workers are already wedged and won't drain — use force-kill instead of waiting.",
+    },
+    {
+        "name": "force-kill",
+        "purpose": "Immediately hard-kill registered coordinator/Runner process trees (no drain, no grace).",
+        "command": "kiroshi force-kill [--role coordinator|runner] [--all]  |  MCP: force_kill(role=..., all=True)",
+        "when_to_use": "Stuck runners at 100% CPU with zero completions, hung SMB writes, or any case where graceful drain is pointless.",
+        "when_not": "When you want in-flight sub-jobs to finish/report — use 'kiroshi stop' (graceful) instead.",
     },
     {
         "name": "nas.probe",

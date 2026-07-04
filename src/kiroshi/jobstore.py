@@ -102,6 +102,11 @@ class JobStore:
                 self._conn.execute("ALTER TABLE subjobs ADD COLUMN disk TEXT")
             if "job" not in sj_cols:
                 self._conn.execute("ALTER TABLE subjobs ADD COLUMN job TEXT")
+            # idle_gate: per-job JSON config that parks a background job's leases
+            # until the HDD array is quiet (see idlegate.py + docs/DEMOTE.md).
+            job_cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(jobs)")}
+            if "idle_gate" not in job_cols:
+                self._conn.execute("ALTER TABLE jobs ADD COLUMN idle_gate TEXT")
             # Now create indexes (columns are guaranteed to exist)
             self._conn.executescript(
                 """
@@ -128,6 +133,44 @@ class JobStore:
         self._conn.commit()
 
     # ---------------------------------------------------------------- seed
+    def set_job_gate(self, job: str, idle_gate: Optional[dict[str, Any]]) -> None:
+        """Attach (or clear) an idle-gate config for a job. Upserts the jobs row."""
+        now = time.time()
+        payload = jsonio.dumps(idle_gate) if idle_gate else None
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO jobs (job, created_at, idle_gate) VALUES (?, ?, ?) "
+                "ON CONFLICT(job) DO UPDATE SET idle_gate=excluded.idle_gate",
+                (job, now, payload),
+            )
+            self._conn.commit()
+
+    def job_gate(self, job: str) -> Optional[dict[str, Any]]:
+        """The idle-gate config for a job, or None."""
+        row = self._conn.execute(
+            "SELECT idle_gate FROM jobs WHERE job=?", (job,)
+        ).fetchone()
+        if not row or not row["idle_gate"]:
+            return None
+        try:
+            return jsonio.loads(row["idle_gate"])
+        except Exception:  # noqa: BLE001
+            return None
+
+    def all_job_gates(self) -> dict[str, dict[str, Any]]:
+        """All jobs with a non-null idle_gate, as {job: config}. For startup cache."""
+        out: dict[str, dict[str, Any]] = {}
+        for row in self._conn.execute(
+            "SELECT job, idle_gate FROM jobs WHERE idle_gate IS NOT NULL"
+        ):
+            try:
+                cfg = jsonio.loads(row["idle_gate"])
+            except Exception:  # noqa: BLE001
+                continue
+            if cfg:
+                out[row["job"]] = cfg
+        return out
+
     def seed(self, gigs: list[dict[str, Any]],
              job: Optional[str] = None,
              label: Optional[str] = None) -> int:
@@ -549,6 +592,32 @@ class JobStore:
             )
             self._conn.commit()
             return cur.rowcount
+
+    def cancel(self, job: str, *, purge: bool = False) -> dict[str, int]:
+        """Cancel a job's queued work. Deletes its ``pending`` + ``leased`` gigs
+        so no runner leases them again (an already-in-flight gig finishes on its
+        runner and is simply discarded when it reports — its row is gone).
+
+        ``purge=True`` additionally deletes the job's completed rows and its
+        ``jobs`` metadata row, removing the job from ``/jobs`` entirely.
+
+        ``job`` is REQUIRED — there is intentionally no "cancel everything" so a
+        typo can't wipe the whole queue. Returns ``{deleted, purged}``.
+        """
+        if not job:
+            raise ValueError("cancel requires a non-empty job slug")
+        with self._lock:
+            if purge:
+                n = self._conn.execute(
+                    "DELETE FROM subjobs WHERE job=?", (job,)).rowcount
+                self._conn.execute("DELETE FROM jobs WHERE job=?", (job,))
+                self._conn.commit()
+                return {"deleted": int(n), "purged": 1}
+            cur = self._conn.execute(
+                "DELETE FROM subjobs WHERE job=? AND state IN ('pending','leased')",
+                (job,))
+            self._conn.commit()
+            return {"deleted": int(cur.rowcount), "purged": 0}
 
     def heartbeat(self, lease_id: str, ttl: float) -> int:
         """Extend the deadline for all gigs still held under this lease."""

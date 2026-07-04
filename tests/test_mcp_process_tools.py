@@ -79,6 +79,7 @@ def test_ps_and_stop_tools_registered():
         assert "requeue" in tool_names
         assert "ps" in tool_names
         assert "stop" in tool_names
+        assert "force_kill" in tool_names
 
 
 def test_stop_ambiguous_guard():
@@ -90,8 +91,8 @@ def test_stop_ambiguous_guard():
         {"role": "coordinator", "pid": 200, "launch_command": "kiroshi coordinator --port 8801"},
     ]
     mock_stop = MagicMock(return_value=True)
-    with patch("kiroshi.processreg.list_registered", return_value=fake_procs):
-        with patch("kiroshi.processreg.request_stop", mock_stop):
+    with patch("kiroshi.stopctl.list_registered", return_value=fake_procs):
+        with patch("kiroshi.stopctl.request_stop", mock_stop):
             from kiroshi.mcp_server import _stop_impl
             result = _stop_impl(role="coordinator")  # 2 matches, no pid, no all
             assert result["stopped"] == 0
@@ -106,8 +107,8 @@ def test_stop_single_match_stops_it():
     m = _skip_or_import()
     fake_procs = [{"role": "runner", "pid": 999, "launch_command": "kiroshi runner"}]
     mock_stop = MagicMock(return_value=True)
-    with patch("kiroshi.processreg.list_registered", return_value=fake_procs):
-        with patch("kiroshi.processreg.request_stop", mock_stop):
+    with patch("kiroshi.stopctl.list_registered", return_value=fake_procs):
+        with patch("kiroshi.stopctl.request_stop", mock_stop):
             from kiroshi.mcp_server import _stop_impl
             result = _stop_impl(role="runner")
             assert result["stopped"] == 1
@@ -122,18 +123,36 @@ def test_stop_all_flag_overrides_ambiguous():
         {"role": "coordinator", "pid": 200, "launch_command": "k2"},
     ]
     mock_stop = MagicMock(return_value=True)
-    with patch("kiroshi.processreg.list_registered", return_value=fake_procs):
-        with patch("kiroshi.processreg.request_stop", mock_stop):
+    with patch("kiroshi.stopctl.list_registered", return_value=fake_procs):
+        with patch("kiroshi.stopctl.request_stop", mock_stop):
             from kiroshi.mcp_server import _stop_impl
             result = _stop_impl(role="coordinator", all=True)
             assert result["stopped"] == 2
             assert mock_stop.call_count == 2
 
 
+def test_force_kill_skips_drain():
+    """force_kill must hard-kill without calling request_stop."""
+    m = _skip_or_import()
+    fake_procs = [{"role": "runner", "pid": 999, "hostname": "", "launch_command": "k"}]
+    mock_stop = MagicMock(return_value=True)
+    mock_kill = MagicMock(return_value=True)
+    with patch("kiroshi.stopctl.list_registered", return_value=fake_procs):
+        with patch("kiroshi.stopctl.request_stop", mock_stop):
+            with patch("kiroshi.stopctl.terminate_tree", mock_kill):
+                from kiroshi.mcp_server import _stop_impl
+                result = _stop_impl(role="runner", force=True)
+                assert result["killed"] == 1
+                assert result["stopped"] == 0
+                assert result["force"] is True
+                mock_stop.assert_not_called()
+                mock_kill.assert_called_once_with(999)
+
+
 def test_stop_no_matches():
     """stop with no matching processes returns stopped=0."""
     m = _skip_or_import()
-    with patch("kiroshi.processreg.list_registered", return_value=[]):
+    with patch("kiroshi.stopctl.list_registered", return_value=[]):
         from kiroshi.mcp_server import _stop_impl
         result = _stop_impl(role="runner")
         assert result["stopped"] == 0

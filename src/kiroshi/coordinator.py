@@ -45,6 +45,11 @@ class SeedReq(BaseModel):
     # a whole job in the dashboard instead of fragmenting it per subjob_id prefix.
     job: Optional[str] = None
     label: Optional[str] = None
+    # Optional idle-gate config for this job: parks its leases until the HDD
+    # array is quiet (see idlegate.py + docs/DEMOTE.md). Shape:
+    #   {"disks": ["disk1",...] | null, "util_pct": 15, "sustain_min": 30}
+    # Applied to ``job`` (batch-wide). None => not gated (normal leasing).
+    idle_gate: Optional[dict[str, Any]] = None
     # Opaque attribution blob — carried as-is, never interpreted by Kiroshi except
     # for the optional ``callback`` URL used by the advisory webhook. Lets a
     # launcher say "I'm cursor-agent X, POST warnings to Y" so a script that
@@ -88,6 +93,11 @@ class HeartbeatReq(BaseModel):
 class RequeueReq(BaseModel):
     states: list[str] = Field(default_factory=lambda: ["failed"])
     reset_attempts: bool = True
+
+
+class CancelReq(BaseModel):
+    job: str
+    purge: bool = False
 
 
 class RegisterReq(BaseModel):
@@ -200,6 +210,23 @@ def create_app(
     _direct_paths = {d.id: d.direct_path for d in app.state.disks if d.direct_path}
     app.state.io_watcher = IOWatcher(_hdd_disk_ids, _parity_map, _direct_paths)
     app.state.io_watcher.start()
+
+    # --- Idle gate (background-job admission) ---
+    # A job can be marked idle-gated so its leases are withheld until the HDD
+    # array has been quiet for a sustained window (write-back demote; see
+    # idlegate.py + docs/DEMOTE.md). Configs persist in the jobs table; the
+    # tracker holds per-job hysteresis (quiet_since) in memory. Inert unless a
+    # job actually carries a gate.
+    from . import idlegate as _idlegate
+    app.state.idle_gate_tracker = _idlegate.IdleGateTracker()
+    app.state.job_gates = {}
+    try:
+        for _j, _cfg in store.all_job_gates().items():
+            _norm = _idlegate.normalize_gate(_cfg)
+            if _norm:
+                app.state.job_gates[_j] = _norm
+    except Exception:  # noqa: BLE001
+        pass  # never block startup on gate-cache warmup
 
     # --- Advisory channel (M9) ---
     # Structured warnings for whoever launched the work: humans reading the
@@ -454,6 +481,17 @@ def create_app(
                     if d:
                         g["disk"] = d
         inserted = store.seed(gigs, job=req.job, label=req.label)
+        # Idle gate: persist + cache the config so /lease can park this job's
+        # leases until the array is quiet. Applied to the batch-wide job slug.
+        if req.idle_gate is not None and req.job:
+            from . import idlegate as _idlegate
+            norm = _idlegate.normalize_gate(req.idle_gate)
+            store.set_job_gate(req.job, req.idle_gate if norm else None)
+            if norm:
+                app.state.job_gates[req.job] = norm
+            else:
+                app.state.job_gates.pop(req.job, None)
+                app.state.idle_gate_tracker.forget(req.job)
         # Record SEEDED job events (capped for bulk seeds).
         new_ids = [g["subjob_id"] for g in gigs]
         if len(new_ids) <= 5000:
@@ -738,10 +776,41 @@ def create_app(
                       f"free={free_map} pending={decision['pending_total']}",
                       flush=True)
 
+    def _idle_gate_hold(req: "LeaseReq", ttl: float) -> Optional[dict[str, Any]]:
+        """If this runner's job is idle-gated and the array isn't quiet enough,
+        return an empty lease payload (and record the decision). Else None
+        (leasing proceeds normally). Inert unless the job carries a gate."""
+        gate = app.state.job_gates.get(req.job) if req.job else None
+        if not gate:
+            return None
+        snap = None
+        try:
+            snap = app.state.io_watcher.snapshot()
+        except Exception:  # noqa: BLE001
+            snap = None
+        res = app.state.idle_gate_tracker.evaluate(req.job, gate, snap)
+        if res.admit:
+            return None  # gate open — fall through to normal leasing
+        # Gate closed: hand back nothing, but log WHY for observability.
+        decision = {
+            "ts": time.time(), "runner_id": req.runner_id, "host": req.host,
+            "requested_capacity": req.capacity, "effective_capacity": 0,
+            "granted": 0, "lease_id": None, "binding_reason": res.reason,
+            "pending_total": 0, "fair_share_ceiling": None,
+            "host_inflight_before": 0, "disk": {}, "granted_subjob_ids": [],
+            "ttl": ttl, "idle_gate": res.as_dict(),
+        }
+        app.state.lease_decisions.append(decision)
+        return {"lease_id": None, "gigs": [], "ttl": ttl,
+                "idle_gate": res.as_dict()}
+
     @app.post("/lease")
     def lease(req: LeaseReq) -> dict[str, Any]:
         _touch_runner(req.runner_id, req.host)
         ttl = _effective_ttl(req.heartbeat_interval)
+        held = _idle_gate_hold(req, ttl)
+        if held is not None:
+            return held
         budget = _effective_disk_budget()
         res = store.lease(req.runner_id, req.host, req.capacity, ttl,
                           disk_concurrency=budget,
@@ -802,6 +871,12 @@ def create_app(
     def requeue(req: RequeueReq) -> dict[str, int]:
         n = store.requeue(tuple(req.states), reset_attempts=req.reset_attempts)
         return {"requeued": n}
+
+    @app.post("/cancel")
+    def cancel(req: CancelReq) -> dict[str, int]:
+        """Cancel a job's queued gigs (token-gated via the auth middleware).
+        ``purge`` also removes completed history + the job's metadata row."""
+        return store.cancel(req.job, purge=req.purge)
 
     @app.get("/task/meta")
     def task_meta() -> dict[str, Any]:

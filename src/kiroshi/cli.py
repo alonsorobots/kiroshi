@@ -304,6 +304,40 @@ def main(argv: Optional[list[str]] = None) -> int:
                      type=int, default=300,
                      help="Per-sub-job timeout in seconds (local mode only).")
 
+    # ---- demote (write-back NVMe -> sharded HDD, idle-gated) ----
+    pdm = sub.add_parser(
+        "demote",
+        help="Flush NVMe cache -> deterministic sharded HDD, only when the array "
+             "is idle. Seeds an idle-gated copy job (see docs/DEMOTE.md).")
+    pdm.add_argument("--from", dest="src_root", required=True,
+                     help="NVMe source root (local, UNC, or mapped drive).")
+    pdm.add_argument("--to", dest="dst_glob", required=True,
+                     help="Sharded HDD destination: a glob like "
+                          "'/mnt/user/Lubu*/Dataset' (the '*' = one shard per "
+                          "spindle) or an explicit template "
+                          "'/mnt/disk{n}/Lubu{n}/Dataset'.")
+    pdm.add_argument("--disks", type=int, default=7,
+                     help="Number of spindles to shard across (default: 7).")
+    pdm.add_argument("--pattern", default="*", help="Filename glob filter.")
+    pdm.add_argument("--union-mount", default="/mnt/user",
+                     help="mergerfs union mount to strip when expanding the glob.")
+    pdm.add_argument("--coordinator", "--fixer", dest="coordinator", required=True,
+                     help="Coordinator URL to seed the idle-gated job to.")
+    pdm.add_argument("--job", default=None,
+                     help="Job slug. Default: 'demote-<timestamp>'.")
+    pdm.add_argument("--token", default=None, help="Mesh auth token.")
+    # Idle-gate knobs
+    pdm.add_argument("--util", type=float, default=15.0,
+                     help="Admit leases only when max HDD util%% is at or below "
+                          "this (default: 15).")
+    pdm.add_argument("--sustain-min", type=float, default=30.0,
+                     help="...sustained for this many minutes (default: 30).")
+    pdm.add_argument("--watch-disks", default=None,
+                     help="Comma-separated disk ids to watch for idle "
+                          "(default: all HDD disks in the topology).")
+    pdm.add_argument("--now", action="store_true",
+                     help="Skip the idle gate — seed a normal (ungated) copy job.")
+
     # ---- jobs (search/list jobs by regex) ----
     pj = sub.add_parser(
         "jobs",
@@ -374,6 +408,19 @@ def main(argv: Optional[list[str]] = None) -> int:
                     help="Don't reset the attempt counter (default: reset to 0).")
     pq.add_argument("--token", default=None, help="Mesh auth token.")
 
+    # ---- cancel ----
+    pc = sub.add_parser("cancel",
+                        help="Cancel a job: drop its queued (pending/leased) gigs.")
+    pc.add_argument("--coordinator", "--fixer", dest="coordinator",
+                    default=cfg.coordinator_url, help="Coordinator base URL, or 'auto'.")
+    pc.add_argument("--job", required=True, help="Job slug to cancel.")
+    pc.add_argument("--purge", action="store_true",
+                    help="Also delete completed history + the job's metadata row "
+                         "(full removal from /jobs), not just queued gigs.")
+    pc.add_argument("--yes", "-y", action="store_true",
+                    help="Skip the confirmation prompt.")
+    pc.add_argument("--token", default=None, help="Mesh auth token.")
+
     # ---- doctor ----
     pd = sub.add_parser("doctor", help="Preflight checks for this machine + env.")
     pd.add_argument("--coordinator", "--fixer", dest="coordinator", default=cfg.coordinator_url, help="Coordinator base URL, or 'auto'.")
@@ -406,6 +453,18 @@ def main(argv: Optional[list[str]] = None) -> int:
                        help="Skip the graceful drain; hard-kill the process tree now.")
     pstop.add_argument("--no-escalate", action="store_true",
                        help="Only request a graceful drain; never force-kill (legacy).")
+
+    # ---- force-kill (immediate process-tree kill; no drain, no grace) ----
+    pfk = sub.add_parser(
+        "force-kill",
+        help="Immediately hard-kill registered Coordinator/Runner process trees "
+             "(no graceful drain, no grace period). Same as 'stop --force'.",
+    )
+    pfk.add_argument("--role", choices=["coordinator", "runner"],
+                     help="Limit to a role.")
+    pfk.add_argument("--pid", type=int, default=None, help="Limit to one PID.")
+    pfk.add_argument("--all", action="store_true",
+                     help="Force-kill all matching registered processes.")
 
     # ---- tray ----
     ptray = sub.add_parser("tray", help="Run the system-tray UI (needs the 'tray' extra).")
@@ -605,12 +664,16 @@ def main(argv: Optional[list[str]] = None) -> int:
         return _cmd_status(args)
     if args.cmd == "requeue":
         return _cmd_requeue(args)
+    if args.cmd == "cancel":
+        return _cmd_cancel(args)
     if args.cmd == "doctor":
         return _cmd_doctor(args)
     if args.cmd == "ps":
         return _cmd_ps(args)
     if args.cmd == "stop":
         return _cmd_stop(args)
+    if args.cmd == "force-kill":
+        return _cmd_force_kill(args)
     if args.cmd == "tray":
         return _cmd_tray(args)
     if args.cmd == "firewall":
@@ -631,6 +694,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         return _cmd_cursor_bridge(args)
     if args.cmd == "stage":
         return _cmd_stage(args)
+    if args.cmd == "demote":
+        return _cmd_demote(args)
     if args.cmd == "jobs":
         return _cmd_jobs(args)
     if args.cmd == "bench":
@@ -1397,6 +1462,76 @@ def _cmd_stage(args) -> int:
     )
 
 
+def _cmd_demote(args) -> int:
+    """Seed an idle-gated write-back job: NVMe cache -> deterministic sharded HDD.
+
+    Enumerates one copy sub-job per file (destination spindle = stable hash of
+    the file's relative path), then seeds them to the Coordinator with an
+    ``idle_gate`` so leasing is withheld until the HDD array is quiet. Start a
+    runner bound to ``kiroshi.demote:run`` to execute the flush.
+    """
+    from . import demote as demote_mod
+
+    try:
+        dest_tmpl = demote_mod.expand_lubu_glob(args.dst_glob,
+                                                union_mount=args.union_mount)
+    except ValueError as exc:
+        print(f"[demote] {exc}", file=sys.stderr)
+        return 2
+
+    gigs = list(demote_mod.enumerate_gigs({
+        "from": args.src_root, "to": args.dst_glob, "n_disks": args.disks,
+        "pattern": args.pattern, "union_mount": args.union_mount,
+    }))
+    if not gigs:
+        print("[demote] no files found to demote.", file=sys.stderr)
+        return 1
+
+    job = args.job or f"demote-{int(time.time())}"
+    payload: dict = {
+        "gigs": gigs, "job": job,
+        "label": f"demote: {args.src_root} -> {dest_tmpl}",
+    }
+    if not args.now:
+        watch = ([d.strip() for d in args.watch_disks.split(",") if d.strip()]
+                 if args.watch_disks else None)
+        payload["idle_gate"] = {
+            "disks": watch, "util_pct": args.util, "sustain_min": args.sustain_min,
+        }
+
+    import requests
+    params = {"token": args.token} if args.token else {}
+    try:
+        r = requests.post(f"{args.coordinator.rstrip('/')}/seed",
+                          params=params, json=payload, timeout=120)
+        r.raise_for_status()
+    except requests.RequestException as exc:
+        print(f"[demote] FAILED to seed to {args.coordinator}: {exc}", file=sys.stderr)
+        return 1
+
+    # Per-spindle file distribution (from the hash assignment) for a sanity check.
+    per_disk: dict[str, int] = {}
+    for g in gigs:
+        per_disk[g["disk"]] = per_disk.get(g["disk"], 0) + 1
+    dist = ", ".join(f"{k}={v}" for k, v in sorted(per_disk.items()))
+
+    print(f"[demote] seeded {len(gigs)} files to {args.coordinator} (job={job}).")
+    print(f"  destination template: {dest_tmpl}")
+    print(f"  spindle distribution: {dist}")
+    if args.now:
+        print("  idle gate: DISABLED (--now) — leases immediately.")
+    else:
+        print(f"  idle gate: util<={args.util}% sustained {args.sustain_min:.0f}min"
+              + (f" on {args.watch_disks}" if args.watch_disks else " (all HDD disks)"))
+        print("  NOTE: writes direct /mnt/diskN paths by design (deterministic "
+              "sharding); carries the direct_disk_write ack.")
+        print("  NOTE: the gate needs HDD I/O telemetry on the coordinator "
+              "(Linux /proc/diskstats). Without it, it fails OPEN and flushes now.")
+    print(f"  Start a runner:  kiroshi runner --fixer {args.coordinator} "
+          f"--task kiroshi.demote:run --job {job} --workers N")
+    return 0
+
+
 def _cmd_mcp(args) -> int:
     """Run the MCP server on stdio so an LLM client (Claude Desktop, Cursor,
     etc.) can enumerate + call Kiroshi tools without shelling out to the CLI.
@@ -1516,95 +1651,39 @@ def _cmd_nas_cred(args) -> int:
 
 
 def _cmd_stop(args) -> int:
-    """Stop registered Kiroshi processes with graceful-then-forceful escalation.
+    from .stopctl import stop_registered
 
-    A cooperative drain (drop a ``.stop`` file) is the right default — it lets a
-    Runner finish/report in-flight work instead of dying mid-batch. But a drain
-    is *powerless* against a process wedged in a blocking syscall (e.g. a hung
-    SMB write on the OS redirector): the stop flag is never observed, so the
-    Runner never exits and its pool keeps the machine pinned. So, like
-    ``docker stop`` / systemd ``TimeoutStopSec`` / k8s ``terminationGracePeriod``,
-    we wait a bounded grace period and then **hard-kill the process tree**."""
-    import time as _time
-    from .processreg import list_registered, request_stop, _pid_alive
-    from .proctree import terminate_tree
-
-    procs = list_registered()
-    targets = []
-    for p in procs:
-        if args.role and p.get("role") != args.role:
-            continue
-        if args.pid is not None and p.get("pid") != args.pid:
-            continue
-        # Escalation can only hard-kill PIDs on THIS machine.
-        targets.append(p)
-    if not targets:
-        print("no matching registered processes.")
-        return 1
-    if len(targets) > 1 and not args.all and args.pid is None:
-        print(f"{len(targets)} processes match; pass --all (or --pid) to confirm.")
-        for p in targets:
+    result = stop_registered(
+        role=args.role,
+        pid=args.pid,
+        all=bool(args.all),
+        force=bool(getattr(args, "force", False)),
+        grace=float(getattr(args, "grace", 30.0) or 0.0),
+        no_escalate=bool(getattr(args, "no_escalate", False)),
+    )
+    for line in result.get("messages") or []:
+        print(line)
+    if result.get("ambiguous"):
+        for p in result.get("matches") or []:
             print(f"  {p.get('role')} pid={p.get('pid')} {p.get('launch_command','')}")
-        return 1
+    return int(result.get("exit_code", 1))
 
-    def _local(p) -> bool:
-        # Only PIDs on this host are killable; a remote manifest's PID isn't ours.
-        import socket as _s
-        hn = str(p.get("hostname") or "")
-        return (not hn) or hn == _s.gethostname()
 
-    # --force: skip the drain entirely and hard-kill now.
-    if getattr(args, "force", False):
-        n = 0
-        for p in targets:
-            pid = int(p.get("pid", 0))
-            if _local(p) and terminate_tree(pid):
-                print(f"force-killed: {p.get('role')} pid={pid} (process tree)")
-                n += 1
-            else:
-                print(f"could not force-kill {p.get('role')} pid={pid} "
-                      f"({'remote' if not _local(p) else 'kill failed'})")
-        return 0 if n else 1
+def _cmd_force_kill(args) -> int:
+    from .stopctl import stop_registered
 
-    # Otherwise request a cooperative drain first.
-    requested = []
-    for p in targets:
-        if request_stop(p.get("role", ""), int(p.get("pid", 0))):
-            print(f"stop requested (draining): {p.get('role')} pid={p.get('pid')}")
-            requested.append(p)
-    if not requested:
-        return 1
-
-    grace = float(getattr(args, "grace", 30.0) or 0.0)
-    if getattr(args, "no_escalate", False) or grace <= 0:
-        if grace <= 0 and not getattr(args, "no_escalate", False):
-            print("(--grace 0: requested drain, not waiting/escalating)")
-        return 0
-
-    # Wait up to `grace` seconds for the drain to complete; poll liveness.
-    print(f"waiting up to {grace:.0f}s for graceful drain before force-kill...")
-    deadline = _time.time() + grace
-    pending = list(requested)
-    while pending and _time.time() < deadline:
-        _time.sleep(1.0)
-        still = []
-        for p in pending:
-            if _local(p) and _pid_alive(int(p.get("pid", 0))):
-                still.append(p)
-            else:
-                print(f"drained cleanly: {p.get('role')} pid={p.get('pid')}")
-        pending = still
-
-    # Anything still alive past the grace window gets the tree killed.
-    survivors = [p for p in pending if _local(p) and _pid_alive(int(p.get("pid", 0)))]
-    if not survivors:
-        print("all targets drained gracefully.")
-        return 0
-    for p in survivors:
-        pid = int(p.get("pid", 0))
-        print(f"grace expired; force-killing {p.get('role')} pid={pid} (process tree)")
-        terminate_tree(pid)
-    return 0
+    result = stop_registered(
+        role=args.role,
+        pid=args.pid,
+        all=bool(args.all),
+        force=True,
+    )
+    for line in result.get("messages") or []:
+        print(line)
+    if result.get("ambiguous"):
+        for p in result.get("matches") or []:
+            print(f"  {p.get('role')} pid={p.get('pid')} {p.get('launch_command','')}")
+    return int(result.get("exit_code", 1))
 
 
 def _cmd_service(args) -> int:

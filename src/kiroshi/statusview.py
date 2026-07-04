@@ -102,7 +102,7 @@ def _action_hint(
         )
     if health_code == "stalled":
         hints.append(
-            "Stuck workers: kiroshi stop --role runner --all --force; "
+            "Stuck workers: kiroshi force-kill --role runner --all; "
             "then kiroshi requeue --state leased"
         )
     elif health_code == "queued" and pending > 0:

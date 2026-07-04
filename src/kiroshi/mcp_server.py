@@ -353,6 +353,43 @@ def build_server(default_coordinator: Optional[str] = None,
         return {"gig_count": len(gigs), "coordinator": coordinator,
                 "task": "kiroshi.staging:run"}
 
+    @app.tool(description="Write-back mover: flush an NVMe cache dir onto the "
+                          "sharded HDD array, ONLY when the array is idle. Seeds an "
+                          "idle-gated copy job (leases withheld until HDD util stays "
+                          "<= util_pct for sustain_min). dst_glob uses '*' for one "
+                          "shard per spindle (e.g. '/mnt/user/Lubu*/Dataset'); "
+                          "placement is a stable per-path hash (idempotent). Writes "
+                          "direct /mnt/diskN paths by design. Set now=True to skip "
+                          "the gate. Returns the enumerated file count + spindle "
+                          "distribution; run a 'kiroshi.demote:run' runner to execute.")
+    def demote(src_root: str, dst_glob: str, coordinator: str,
+               n_disks: int = 7, pattern: str = "*",
+               util_pct: float = 15.0, sustain_min: float = 30.0,
+               watch_disks: Optional[list[str]] = None, now: bool = False,
+               union_mount: str = "/mnt/user",
+               token: Optional[str] = None) -> dict:
+        from . import demote as _demote
+        dest_tmpl = _demote.expand_lubu_glob(dst_glob, union_mount=union_mount)
+        gigs = list(_demote.enumerate_gigs(
+            {"from": src_root, "to": dst_glob, "n_disks": n_disks,
+             "pattern": pattern, "union_mount": union_mount}))
+        if not gigs:
+            return {"gig_count": 0, "coordinator": coordinator,
+                    "error": "no files found to demote"}
+        job = f"demote-{int(time.time())}"
+        payload: dict = {"gigs": gigs, "job": job,
+                         "label": f"demote: {src_root} -> {dest_tmpl}"}
+        if not now:
+            payload["idle_gate"] = {"disks": watch_disks, "util_pct": util_pct,
+                                    "sustain_min": sustain_min}
+        _post(_fx(coordinator), "/seed", _tk(token), payload)
+        per_disk: dict[str, int] = {}
+        for g in gigs:
+            per_disk[g["disk"]] = per_disk.get(g["disk"], 0) + 1
+        return {"gig_count": len(gigs), "job": job, "coordinator": coordinator,
+                "dest_template": dest_tmpl, "spindle_distribution": per_disk,
+                "idle_gated": (not now), "task": "kiroshi.demote:run"}
+
     @app.tool(description="Measure TRUE throughput of a job. Either pass "
                           "output_dir (from file mtimes; needs FS access) OR "
                           "coordinator+job (from /jobs completed_at over HTTP).")
@@ -473,10 +510,20 @@ def build_server(default_coordinator: Optional[str] = None,
                           "(local host only). Pass role ('coordinator'/'runner') or "
                           "pid. If multiple match and neither pid nor all=True "
                           "is given, returns the list without stopping anything "
-                          "(safety guard against accidental mass-stop).")
+                          "(safety guard against accidental mass-stop). "
+                          "Set force=True to skip drain and hard-kill immediately; "
+                          "grace>0 waits that many seconds before escalating.")
     def stop(role: Optional[str] = None, pid: Optional[int] = None,
-             all: bool = False) -> dict:
-        return _stop_impl(role, pid, all)
+             all: bool = False, force: bool = False, grace: float = 0.0) -> dict:
+        return _stop_impl(role, pid, all, force=force, grace=grace)
+
+    @app.tool(description="Immediately hard-kill LOCAL registered coordinator/Runner "
+                          "process trees (no graceful drain, no grace period). "
+                          "Same as 'kiroshi force-kill' / 'stop --force'. "
+                          "Use when workers are wedged and won't observe a drain flag.")
+    def force_kill(role: Optional[str] = None, pid: Optional[int] = None,
+                   all: bool = False) -> dict:
+        return _stop_impl(role, pid, all, force=True)
 
     # keep the tool function body thin so the logic is unit-testable without
     # needing to go through FastMCP's async tool-dispatch layer.
@@ -567,36 +614,40 @@ def _format_summary(job_slug: str, job: Optional[dict],
 
 
 def _stop_impl(role: Optional[str] = None, pid: Optional[int] = None,
-               all: bool = False) -> dict:
-    """Stop logic, extracted for direct unit testing.
+               all: bool = False, *, force: bool = False,
+               grace: float = 0.0) -> dict:
+    """Stop / force-kill logic, extracted for direct unit testing.
 
-    Mirrors the CLI ``kiroshi stop`` safety guard: if multiple processes match
-    and neither ``pid`` nor ``all=True`` is given, returns an ambiguous result
-    WITHOUT stopping anything.
+    Mirrors the CLI safety guard: if multiple processes match and neither
+    ``pid`` nor ``all=True`` is given, returns an ambiguous result WITHOUT
+    stopping anything. Default MCP ``stop`` requests a drain and returns
+    immediately (grace=0); use ``force_kill`` or ``force=True`` to hard-kill.
     """
-    from .processreg import list_registered, request_stop
-    procs = list_registered()
-    targets = []
-    for p in procs:
-        if role and p.get("role") != role:
-            continue
-        if pid is not None and p.get("pid") != pid:
-            continue
-        targets.append(p)
-    if not targets:
-        return {"stopped": 0, "message": "no matching registered processes"}
-    if len(targets) > 1 and not all and pid is None:
-        return {"stopped": 0, "ambiguous": True,
-                "message": f"{len(targets)} processes match; "
-                           f"pass all=True or pid=<N> to confirm.",
-                "matches": [{"role": p.get("role"), "pid": p.get("pid"),
-                             "launch_command": p.get("launch_command", "")}
-                            for p in targets]}
-    stopped = 0
-    for p in targets:
-        if request_stop(p.get("role", ""), int(p.get("pid", 0))):
-            stopped += 1
-    return {"stopped": stopped}
+    from .stopctl import stop_registered
+
+    result = stop_registered(
+        role=role,
+        pid=pid,
+        all=all,
+        force=force,
+        grace=float(grace or 0.0),
+        no_escalate=(not force and float(grace or 0.0) <= 0),
+    )
+    messages = list(result.get("messages") or [])
+    out: dict[str, Any] = {
+        "ok": bool(result.get("ok")),
+        "stopped": int(result.get("stopped") or 0),
+        "killed": int(result.get("killed") or 0),
+        "force": bool(result.get("force") or force),
+        "ambiguous": bool(result.get("ambiguous")),
+        "matches": list(result.get("matches") or []),
+        "messages": messages,
+    }
+    if messages:
+        out["message"] = messages[-1] if len(messages) == 1 else "; ".join(messages)
+    elif not out["ambiguous"]:
+        out["message"] = "no matching registered processes"
+    return out
 
 
 def run_stdio(default_coordinator: Optional[str] = None,
