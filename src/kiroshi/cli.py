@@ -500,6 +500,21 @@ def main(argv: Optional[list[str]] = None) -> int:
     pnp.add_argument("--n", type=int, default=7,
                      help="Number of shares to try if no --shares/--pattern (default: disk1..7).")
 
+    # ---- nas-cred (broker: store the NAS SMB secret encrypted on the coordinator) ----
+    pnc = sub.add_parser(
+        "nas-cred",
+        help="Manage the coordinator-brokered NAS SMB credential (encrypted at "
+             "rest via machine-DPAPI; delivered to authed runners in-memory).",
+    )
+    pnc.add_argument("action", choices=["set", "show", "test"],
+                     help="set: store user+password encrypted on this node. "
+                          "show: non-secret status. test: decrypt round-trip.")
+    pnc.add_argument("--user", default=None, help="(set) SMB username, e.g. 'kiroshi'.")
+    pnc.add_argument("--password", default=None,
+                     help="(set) SMB password. Omit to be prompted (not echoed).")
+    pnc.add_argument("--server", default="default",
+                     help="Per-server key; 'default' applies mesh-wide.")
+
     # ---- service (NSSM persistence) ----
     psvc = sub.add_parser("service",
                           help="Install/uninstall/inspect Coordinator or Runner as a Windows service (NSSM).")
@@ -572,6 +587,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         return _cmd_runner(args)
     if args.cmd == "seed":
         return _cmd_seed(args)
+    if args.cmd == "nas-cred":
+        return _cmd_nas_cred(args)
     if args.cmd == "status":
         return _cmd_status(args)
     if args.cmd == "requeue":
@@ -1406,6 +1423,56 @@ def _cmd_ps(args) -> int:
         print(f"{state:<3} {p.get('role',''):<7} {p.get('pid',''):>7}  "
               f"{p.get('host',''):<16} {p.get('launch_command','')}")
     return 0
+
+
+def _cmd_nas_cred(args) -> int:
+    """Store / inspect the coordinator-brokered NAS SMB credential.
+
+    Run this ONCE on the coordinator node. The password is encrypted at rest
+    with machine-scoped DPAPI (see ``nascred.py``) and never leaves this node in
+    the clear — runners fetch it in-memory over the authed, sealed channel."""
+    from . import nascred
+
+    if args.action == "show":
+        st = nascred.status(args.server)
+        print(f"[nas-cred] store: {st['path']}")
+        if st.get("present"):
+            print(f"[nas-cred] {args.server!r}: user={st.get('user')!r} (password "
+                  f"encrypted at rest, machine-DPAPI)")
+        else:
+            print(f"[nas-cred] no credential stored for {args.server!r}.")
+        if st.get("servers"):
+            print(f"[nas-cred] servers: {', '.join(st['servers'])}")
+        return 0
+
+    if args.action == "test":
+        loaded = nascred.load_secret(args.server)
+        if not loaded:
+            print(f"[nas-cred] FAIL: could not load/decrypt {args.server!r}.")
+            return 1
+        user, pw = loaded
+        print(f"[nas-cred] OK: decrypted {args.server!r} user={user!r} "
+              f"(password length {len(pw)}).")
+        return 0
+
+    # action == "set"
+    user = args.user
+    if not user:
+        print("[nas-cred] --user is required for `set`.", file=sys.stderr)
+        return 2
+    password = args.password
+    if password is None:
+        import getpass
+        password = getpass.getpass(f"SMB password for {user!r}: ")
+    if not password:
+        print("[nas-cred] empty password; aborting.", file=sys.stderr)
+        return 2
+    path = nascred.set_secret(user, password, server=args.server)
+    # Verify the round-trip so a broken DPAPI/ACL is caught now, not at runtime.
+    ok = nascred.load_secret(args.server) == (user, password)
+    print(f"[nas-cred] stored {args.server!r} (user={user!r}) encrypted at {path}")
+    print(f"[nas-cred] round-trip decrypt: {'OK' if ok else 'FAILED'}")
+    return 0 if ok else 1
 
 
 def _cmd_stop(args) -> int:

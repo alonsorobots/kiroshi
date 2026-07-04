@@ -183,6 +183,57 @@ class Runner:
             return False
         return True
 
+    def _bootstrap_nas_creds(self, server: str = "default") -> None:
+        """Fetch the NAS SMB credential from the Coordinator and inject it into
+        THIS process's env, so ``smbprotocol`` authenticates directly in every
+        logon context (service / SSH / scheduled / interactive) and pool workers
+        spawned after this inherit it. Never written to disk.
+
+        Runs before the worker pool is created. Skips silently if creds are
+        already in env (operator override), no token is configured (open mesh),
+        or the Coordinator has none stored. The Coordinator is verified first
+        (mutual auth), and the fetch proves token possession via HMAC without
+        transmitting the token; the reply is sealed under a token+nonce key."""
+        if os.environ.get("KIROSHI_NAS_USER") and os.environ.get("KIROSHI_NAS_PASS"):
+            return
+        if not self.token:
+            return
+        if not self.coordinator_url or not self._verify_coordinator(self.coordinator_url):
+            return
+        from . import nascred
+        nonce = security.new_nonce()  # 32 hex chars
+        try:
+            r = requests.get(
+                f"{self.coordinator_url}/mesh/nas-cred",
+                params={"server": server, "nonce": nonce},
+                headers={"X-Kiroshi-Cred-Proof":
+                         nascred.cred_proof(self.token, nonce, server)},
+                timeout=self.http_timeout,
+            )
+            if r.status_code == 404:
+                return  # coordinator has no stored cred — env/keyring will be tried
+            r.raise_for_status()
+            sealed = (r.json() or {}).get("sealed")
+        except (requests.RequestException, ValueError):
+            print("[runner] NAS credential broker unreachable; falling back to "
+                  "env/keyring for SMB auth.", flush=True)
+            return
+        payload = nascred.unseal(self.token, nonce, sealed) if sealed else None
+        if not payload or b"\n" not in payload:
+            print("[runner] SECURITY: NAS credential seal failed to open "
+                  "(tamper or token mismatch) — not using it.", flush=True)
+            return
+        user, pw = payload.decode("utf-8").split("\n", 1)
+        os.environ["KIROSHI_NAS_USER"] = user
+        os.environ["KIROSHI_NAS_PASS"] = pw
+        # SMB3 payload encryption on the data plane (confidentiality + integrity);
+        # operator can override by pre-setting KIROSHI_SMB_ENCRYPT.
+        os.environ.setdefault("KIROSHI_SMB_ENCRYPT", "1")
+        if not self.quiet:
+            print(f"[runner] NAS credential provisioned from coordinator "
+                  f"(user={user!r}, SMB3 encryption on); nothing persisted.",
+                  flush=True)
+
     def _trusted(self) -> bool:
         """True iff the current Coordinator URL has passed (and still passes) the auth
         challenge. Caches the last verified URL so we challenge once per connect."""
@@ -256,6 +307,9 @@ class Runner:
         from .proctree import bind_job_object
         bind_job_object()
         self._resolve_coordinator()  # block until a Coordinator is known (auto mode)
+        # Provision NAS creds into env BEFORE the pool spawns, so every worker
+        # inherits them and smbprotocol authenticates directly in any logon type.
+        self._bootstrap_nas_creds()
         if not self.quiet:
             print(
                 f"[runner] {self.runner_id} on {self.host}: {self.workers} workers, "

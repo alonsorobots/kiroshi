@@ -28,7 +28,8 @@ _DASHBOARD = Path(__file__).parent / "dashboard" / "index.html"
 # own; everything sensitive comes from guarded endpoints it fetches), a liveness
 # probe, and the auth challenge (which is itself the authentication mechanism and
 # never reveals the token). Everything else requires the mesh token when set.
-_OPEN_PATHS = frozenset({"/", "/favicon.ico", "/healthz", "/auth/challenge"})
+_OPEN_PATHS = frozenset({"/", "/favicon.ico", "/healthz", "/auth/challenge",
+                         "/mesh/nas-cred"})
 
 
 class SeedGig(BaseModel):
@@ -312,6 +313,44 @@ def create_app(
         if not nonce or len(nonce) < 8:
             return JSONResponse({"error": "nonce required (>=8 chars)"}, status_code=400)
         return JSONResponse({"auth": True, "proof": security.prove(tok, nonce)})
+
+    @app.get("/mesh/nas-cred")
+    def nas_cred(request: Request, server: str = "default",
+                 nonce: str = "") -> JSONResponse:
+        """Broker the NAS SMB credential to an authenticated Runner.
+
+        The secret lives encrypted at rest on THIS node only (machine-DPAPI, see
+        ``nascred.py``). A Runner fetches it once at startup, injects it into its
+        own process env for ``smbprotocol``, and never persists it — the
+        workgroup form of "don't store long-lived secrets on every client".
+
+        Confidential on the wire even over plain HTTP, and open by design (like
+        ``/auth/challenge``): instead of a bearer token (which would travel in
+        cleartext), the Runner proves it holds the mesh token via
+        ``HMAC(token, "nascred:"+nonce+":"+server)`` in ``X-Kiroshi-Cred-Proof``.
+        The response is sealed with a key derived from token+nonce, so only a
+        token-holder can read the password and the token itself is never sent."""
+        from . import nascred
+        tok = app.state.token
+        if not tok:
+            # No mesh auth configured: nothing to protect, nothing to broker.
+            return JSONResponse({"error": "no mesh token configured; set creds via env"},
+                                status_code=409)
+        if not nonce or len(nonce) < 16:
+            return JSONResponse({"error": "nonce required (>=16 hex chars)"},
+                                status_code=400)
+        proof = request.headers.get("x-kiroshi-cred-proof")
+        if not nascred.verify_cred_proof(tok, nonce, server, proof):
+            return JSONResponse({"error": "cred proof failed"}, status_code=401)
+        loaded = nascred.load_secret(server)
+        if not loaded:
+            return JSONResponse({"error": f"no NAS credential stored for {server!r}; "
+                                          f"run `kiroshi nas-cred set` on the coordinator"},
+                                status_code=404)
+        user, pw = loaded
+        payload = f"{user}\n{pw}".encode("utf-8")
+        return JSONResponse({"server": server, "user": user,
+                             "sealed": nascred.seal(tok, nonce, payload)})
 
     # Optional per-task custom views: any *.html dropped in pages_dir is served at
     # /p/<name> and linked from the dashboard. A task ships its own visualization
