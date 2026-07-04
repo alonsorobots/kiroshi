@@ -137,10 +137,12 @@ def build_server(default_fixer: Optional[str] = None,
         Order: explicit per-call ``fixer`` -> server default -> ``KIROSHI_COORDINATOR``
         env -> LAN beacon discovery. An empty value or the literal ``"auto"``
         forces discovery, so one config (``--fixer auto``) is portable across
-        every node and survives host/port/campaign changes without hardcoding an
+        every node and survives host/port/job changes without hardcoding an
         address. Discovery is lazy (first use) + cached, so IDEs that launch the
         MCP server at startup don't pay a UDP round-trip until a tool is called."""
-        for cand in (fixer, default_fixer, os.environ.get("KIROSHI_COORDINATOR")):
+        for cand in (fixer, default_fixer,
+                     os.environ.get("KIROSHI_COORDINATOR"),
+                     os.environ.get("KIROSHI_FIXER")):  # fallback for one release
             c = (cand or "").strip()
             if c and c.lower() != "auto":
                 return c
@@ -166,7 +168,7 @@ def build_server(default_fixer: Optional[str] = None,
         return _get(_fx(fixer), "/status", _tk(token))
 
     @app.tool(description="List currently-active coordinator advisories (NAS "
-                          "throughput collapse, gig failure spike, etc.).")
+                          "throughput collapse, sub-job failure spike, etc.).")
     def list_advisories(fixer: Optional[str] = None,
                         token: Optional[str] = None) -> dict:
         return _get(_fx(fixer), "/advisories", _tk(token))
@@ -210,7 +212,7 @@ def build_server(default_fixer: Optional[str] = None,
                 params["subjob_id_re"] = regex
         return _get(_fx(fixer), "/subjobs", _tk(token), **params)
 
-    @app.tool(description="Return a lightweight rows list for one campaign — "
+    @app.tool(description="Return a lightweight rows list for one job — "
                           "the fastest way to know which items a stage has "
                           "finished. state defaults to 'done'.")
     def export_metrics(job: str, state: str = "done", limit: int = 100000,
@@ -249,7 +251,7 @@ def build_server(default_fixer: Optional[str] = None,
         return {"log": log_lines}
 
     @app.tool(description="Stage (copy) a dataset between storage tiers with "
-                          "mesh I/O budgeting. Returns the enumerated gig count; "
+                          "mesh I/O budgeting. Returns the enumerated sub-job count; "
                           "use 'seed_gigs' or 'kiroshi runner' to execute them.")
     def stage_data(src_root: str, dst_root: str, pattern: str = "*",
                    fixer: Optional[str] = None,
@@ -264,7 +266,7 @@ def build_server(default_fixer: Optional[str] = None,
         return {"gig_count": len(gigs), "fixer": fixer,
                 "task": "kiroshi.staging:run"}
 
-    @app.tool(description="Measure TRUE throughput of a campaign. Either pass "
+    @app.tool(description="Measure TRUE throughput of a job. Either pass "
                           "output_dir (from file mtimes; needs FS access) OR "
                           "fixer+job (from /jobs completed_at over HTTP).")
     def bench_rate(output_dir: Optional[str] = None, pattern: str = "*",
@@ -322,9 +324,9 @@ def build_server(default_fixer: Optional[str] = None,
             p["since"] = since
         return _get(_fx(fixer), "/lease/decisions", _tk(token), **p)
 
-    @app.tool(description="Coordination timeline for one job/gig "
+    @app.tool(description="Coordination timeline for one job/sub-job "
                           "(seeded/leased/completed/failed/expired events + "
-                          "current DB row). Use to trace a single gig's lifecycle.")
+                          "current DB row). Use to trace a single sub-job's lifecycle.")
     def job_trace(subjob_id: str,
                   fixer: Optional[str] = None,
                   token: Optional[str] = None) -> dict:
@@ -340,7 +342,7 @@ def build_server(default_fixer: Optional[str] = None,
         return _get(_fx(fixer), "/decisions/summary", _tk(token),
                     window_s=window_s)
 
-    @app.tool(description="Paragraph-form health diagnosis of ONE campaign: "
+    @app.tool(description="Paragraph-form health diagnosis of ONE job: "
                           "progress %, active advisories on its spindles, and "
                           "recent errors — shaped to paste straight into context. "
                           "The fastest 'how did my run go?' call.")
@@ -393,7 +395,7 @@ def build_server(default_fixer: Optional[str] = None,
 
 def _campaign_health(subjob_id: str, limit_errors: int,
                      groups: Any, advisories: Any, status: Any) -> dict:
-    """Compose a paste-ready campaign diagnosis from /groups + /advisories +
+    """Compose a paste-ready job diagnosis from /groups + /advisories +
     /status. Extracted for direct unit testing (no FastMCP dispatch needed)."""
     job = None
     for g in (groups.get("groups") if isinstance(groups, dict) else []) or []:
@@ -404,7 +406,7 @@ def _campaign_health(subjob_id: str, limit_errors: int,
     if isinstance(advisories, dict):
         for a in advisories.get("advisories", []) or []:
             # Surface fleet-wide advisories and (absent per-job disk metadata)
-            # any active advisory — a campaign author wants to see them.
+            # any active advisory — a job author wants to see them.
             relevant.append(a)
     errors = []
     if isinstance(status, dict):
@@ -429,10 +431,10 @@ def _format_summary(subjob_id: str, job: Optional[dict],
         leased = int(job.get("leased", 0))
         total = done + failed + pending + leased
         pct = (100.0 * done / total) if total else 0.0
-        parts.append(f"Campaign {subjob_id!r}: {done}/{total} done ({pct:.0f}%), "
+        parts.append(f"Job {subjob_id!r}: {done}/{total} done ({pct:.0f}%), "
                      f"{failed} failed, {pending} pending, {leased} in-flight.")
     else:
-        parts.append(f"No campaign matched {subjob_id!r} in the coordinator's groups.")
+        parts.append(f"No job matched {subjob_id!r} in the coordinator's groups.")
     if isinstance(status, dict) and status.get("rate_per_s") is not None:
         parts.append(f"Fleet throughput ~{status.get('rate_per_s')}/s.")
     if advisories:

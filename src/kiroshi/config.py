@@ -86,7 +86,7 @@ class HostConfig:
 class MeshConfig:
     fixer_host: str = "localhost"
     fixer_port: int = DEFAULT_PORT
-    # All Fixer TCP ports the mesh uses (persistent service + campaign Fixers).
+    # All Coordinator TCP ports the mesh uses (persistent service + job Fixers).
     # Drives `kiroshi firewall install` so opening one port never closes another.
     # Defaults to [fixer_port] when [fixer].ports is absent.
     fixer_ports: list = field(default_factory=list)
@@ -187,8 +187,12 @@ def load_config(path: Optional[str] = None) -> MeshConfig:
             ))
 
     # Environment overrides (highest priority for connection + roots)
-    cfg.fixer_host = os.environ.get("KIROSHI_COORDINATOR_HOST", cfg.fixer_host)
-    cfg.fixer_port = int(os.environ.get("KIROSHI_COORDINATOR_PORT", cfg.fixer_port))
+    # New names (KIROSHI_COORDINATOR_*) win; old names (KIROSHI_FIXER_*) are
+    # kept as a fallback for one release so a stray service env doesn't break.
+    cfg.fixer_host = os.environ.get("KIROSHI_COORDINATOR_HOST",
+                                    os.environ.get("KIROSHI_FIXER_HOST", cfg.fixer_host))
+    cfg.fixer_port = int(os.environ.get("KIROSHI_COORDINATOR_PORT",
+                                        os.environ.get("KIROSHI_FIXER_PORT", cfg.fixer_port)) or cfg.fixer_port)
     cfg.read_root = os.environ.get("KIROSHI_READ_ROOT", cfg.read_root)
     cfg.write_root = os.environ.get("KIROSHI_WRITE_ROOT", cfg.write_root)
 

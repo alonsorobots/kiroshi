@@ -1,27 +1,27 @@
 """Windows Firewall management for Kiroshi's inbound ports.
 
-Kiroshi's Fixer binds *exactly two* ports for the mesh to work:
+Kiroshi's Coordinator binds *exactly two* ports for the mesh to work:
 
 - TCP ``<fixer_port>`` (default 8787) — HTTP API + dashboard.
 - UDP ``<discovery_port>`` (default 8788) — solicited-reply beacon so runners
-  can find the Fixer via ``--fixer auto``.
+  can find the Coordinator via ``--fixer auto``.
 
 On Windows both are silently dropped by default unless a firewall rule opens
 them. Runners **do not need any inbound rule** — their outbound TCP is always
 allowed, and the stateful firewall lets the response back in. So this module
-only cares about the Fixer host.
+only cares about the Coordinator host.
 
 The design goal is "do it once, permanently, and stop chasing new ports":
 
 1. Enumerate ALL Kiroshi-managed rules (identified by the ``RULE_PREFIX`` name
    prefix), so re-running is idempotent and cleans up drift from earlier
-   experiments (e.g. old ``Kiroshi Fixer 8800`` rules) in the same shot.
+   experiments (e.g. old ``Kiroshi Coordinator 8800`` rules) in the same shot.
 2. Recompute the desired rule set from the current Kiroshi config, so the
    answer to "which ports are open?" always tracks ``kiroshi.local.toml``
    instead of a hand-maintained pile of ``netsh`` invocations.
 3. Rules default to ``private,domain`` profiles and (when possible) are
    scoped to the local RFC1918 ``/24`` for defense in depth — a laptop
-   that later joins a public Wi-Fi won't accidentally expose the Fixer.
+   that later joins a public Wi-Fi won't accidentally expose the Coordinator.
 
 All destructive operations (add/delete) require admin and are gated by
 :func:`is_admin`; the callers surface a copy-paste elevated command instead
@@ -39,7 +39,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Iterable, Optional
 
 RULE_PREFIX = "Kiroshi "
-FIXER_RULE_NAME = "Kiroshi Fixer HTTP"
+FIXER_RULE_NAME = "Kiroshi Coordinator HTTP"
 DISCOVERY_RULE_NAME = "Kiroshi Discovery UDP"
 
 NetshRunner = Callable[[list[str]], subprocess.CompletedProcess]
@@ -162,12 +162,12 @@ def plan_rules(
 
     ``fixer_ports`` may be a single port (int) or many (iterable). Passing the
     full set of ports the mesh uses — e.g. the persistent service plus every
-    campaign Fixer (8787, 8800, 8801, 8802) — opens them all in one idempotent
-    shot, so you never silently close one campaign's port by opening another's.
+    job Coordinator (8787, 8800, 8801, 8802) — opens them all in one idempotent
+    shot, so you never silently close one job's port by opening another's.
 
     Naming: a single port keeps the historical unsuffixed ``FIXER_RULE_NAME``
     (backward compatible); multiple ports get per-port names
-    (``Kiroshi Fixer HTTP 8800``) so each is tracked + drift-cleaned
+    (``Kiroshi Coordinator HTTP 8800``) so each is tracked + drift-cleaned
     independently.
     """
     if isinstance(fixer_ports, int):

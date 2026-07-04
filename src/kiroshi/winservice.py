@@ -10,7 +10,7 @@ run as ``LocalSystem``.** LocalSystem has no access to the per-user credentials
 stored in Credential Manager, so mapped drives and authenticated UNC paths fail
 under it. Therefore:
 
-- **Fixer** → defaults to ``LocalSystem`` (only needs a local SQLite file + a TCP
+- **Coordinator** → defaults to ``LocalSystem`` (only needs a local SQLite file + a TCP
   port; no NAS).
 - **Runner** → *requires* a real user account (``DOMAIN\\user`` or ``.\\user``)
   whose Credential Manager holds the NAS credentials, unless it only touches

@@ -66,7 +66,7 @@ async function tick(){
       const gid=encodeURIComponent(g.job);
       const name=g.label||g.job;
       return `<tr>
-        <td class="name"><a href="/ui/subjobs?job=${gid}" title="${esc(g.job)}">${esc(name)}</a></td>
+        <td class="name"><a href="/ui/jobs?job=${gid}" title="${esc(g.job)}">${esc(name)}</a></td>
         <td><span class="minibar"><span style="width:${pct.toFixed(1)}%"></span></span>${pct.toFixed(1)}%</td>
         <td class="ok">${g.done}/${g.total}</td>
         <td class="${g.failed?'f':''}">${g.failed}</td>

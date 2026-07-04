@@ -2,7 +2,7 @@
 
 Pull loop: lease a batch -> run it on a :class:`~kiroshi.pool.LocalPool` -> report
 results -> repeat. All the within-node robustness (process pool, bounded window,
-per-gig timeout, broken-pool recovery, PYTHONPATH propagation) lives in
+per-sub-job timeout, broken-pool recovery, PYTHONPATH propagation) lives in
 ``LocalPool``; the Runner is just the HTTP coordination + lifecycle around it.
 
 Graceful drain on Ctrl-C / SIGTERM: finish + report the current batch, then exit.
@@ -27,12 +27,12 @@ _AUTO = {"auto", "discover", "", "auto://", "http://auto"}
 
 
 def verify_fixer(url: str, token: Optional[str], timeout: float = 30.0) -> bool:
-    """Authenticate the *Fixer* via the HMAC challenge before trusting it.
+    """Authenticate the *Coordinator* via the HMAC challenge before trusting it.
 
     Standalone form of :meth:`Runner._verify_fixer` so ``kiroshi join`` can verify
-    a Fixer *before* sending the token or fetching task code. Sends a random nonce
-    with NO Authorization header; only a Fixer holding the mesh token can return
-    ``HMAC(token, nonce)``. With no token, trusts only a Fixer that declares
+    a Coordinator *before* sending the token or fetching task code. Sends a random nonce
+    with NO Authorization header; only a Coordinator holding the mesh token can return
+    ``HMAC(token, nonce)``. With no token, trusts only a Coordinator that declares
     ``auth: false`` (a deliberately open dev mesh). Fails closed.
     """
     nonce = security.new_nonce()
@@ -83,7 +83,7 @@ class Runner:
         self.token = token if token is not None else security.resolve_token()
         self.launch_command = launch_command
         self._registered = False
-        self._verified_url: Optional[str] = None  # last Fixer that passed the auth challenge
+        self._verified_url: Optional[str] = None  # last Coordinator that passed the auth challenge
         self.task_ref = task_ref
         self.workers = workers or (os.cpu_count() or 4)
         self.capacity = capacity
@@ -110,12 +110,12 @@ class Runner:
 
     # --------------------------------------------------------- discovery
     def _resolve_fixer(self, *, blocking: bool = True) -> Optional[str]:
-        """Ensure ``self.fixer_url`` points at a live Fixer.
+        """Ensure ``self.fixer_url`` points at a live Coordinator.
 
         In auto mode this listens for a discovery beacon; with a fixed URL it's a
-        no-op. When ``blocking`` it retries (with backoff) until a Fixer appears
+        no-op. When ``blocking`` it retries (with backoff) until a Coordinator appears
         or the runner is told to drain — so a runner can be started before the
-        Fixer, or survive the Fixer moving to a new IP.
+        Coordinator, or survive the Coordinator moving to a new IP.
         """
         if not self._auto:
             return self.fixer_url
@@ -132,7 +132,7 @@ class Runner:
                 return None
             print(
                 f"[runner] no fixer beacon yet; retrying in {backoff:.0f}s "
-                f"(is the Fixer running?)",
+                f"(is the Coordinator running?)",
                 flush=True,
             )
             time.sleep(backoff)
@@ -141,12 +141,12 @@ class Runner:
 
     # ------------------------------------------------------- mutual auth
     def _verify_fixer(self, url: str) -> bool:
-        """Authenticate the *Fixer* before trusting it. The Runner sends a random
-        nonce (with NO Authorization header) and requires the Fixer to return
-        HMAC(token, nonce); only a Fixer holding the same mesh token can. This
-        runs BEFORE we ever send our bearer token or execute a leased gig, so a
-        rogue Fixer that wins `--fixer auto` discovery can neither harvest the
-        token nor inject specs. Fails closed (un-verifiable Fixer => not trusted).
+        """Authenticate the *Coordinator* before trusting it. The Runner sends a random
+        nonce (with NO Authorization header) and requires the Coordinator to return
+        HMAC(token, nonce); only a Coordinator holding the same mesh token can. This
+        runs BEFORE we ever send our bearer token or execute a leased sub-job, so a
+        rogue Coordinator that wins `--fixer auto` discovery can neither harvest the
+        token nor inject specs. Fails closed (un-verifiable Coordinator => not trusted).
         """
         nonce = security.new_nonce()
         try:
@@ -157,23 +157,23 @@ class Runner:
         except (requests.RequestException, ValueError):
             return False
         if not self.token:
-            # We hold no token; only trust a Fixer that also declares no auth
+            # We hold no token; only trust a Coordinator that also declares no auth
             # (a deliberately open dev mesh on a trusted LAN).
             return data.get("auth") is False
         if not data.get("auth"):
-            print("[runner] SECURITY: Fixer reports NO auth but this runner has a "
-                  "token — refusing (possible rogue or misconfigured Fixer).",
+            print("[runner] SECURITY: Coordinator reports NO auth but this runner has a "
+                  "token — refusing (possible rogue or misconfigured Coordinator).",
                   flush=True)
             return False
         if not security.verify_proof(self.token, nonce, data.get("proof")):
-            print("[runner] SECURITY: Fixer failed the token challenge — refusing "
-                  "to send credentials or run work (rogue Fixer / wrong token).",
+            print("[runner] SECURITY: Coordinator failed the token challenge — refusing "
+                  "to send credentials or run work (rogue Coordinator / wrong token).",
                   flush=True)
             return False
         return True
 
     def _trusted(self) -> bool:
-        """True iff the current Fixer URL has passed (and still passes) the auth
+        """True iff the current Coordinator URL has passed (and still passes) the auth
         challenge. Caches the last verified URL so we challenge once per connect."""
         if not self.fixer_url:
             return False
@@ -209,7 +209,7 @@ class Runner:
         return None
 
     def _on_transport_failure(self) -> None:
-        """After repeated failures, assume the Fixer moved and re-discover."""
+        """After repeated failures, assume the Coordinator moved and re-discover."""
         self._fails += 1
         if self._auto and self._fails >= self.rediscover_after:
             print("[runner] lost contact with fixer; re-discovering...", flush=True)
@@ -219,7 +219,7 @@ class Runner:
             self._resolve_fixer(blocking=False)
 
     def _register(self) -> None:
-        """Announce our launch command + identity so the Fixer can surface it on
+        """Announce our launch command + identity so the Coordinator can surface it on
         the dashboard/history (and so jobs can be traced to the exact command)."""
         from .logsetup import current_log_path
 
@@ -244,7 +244,7 @@ class Runner:
         # so spawned workers inherit the Job Object membership.
         from .proctree import bind_job_object
         bind_job_object()
-        self._resolve_fixer()  # block until a Fixer is known (auto mode)
+        self._resolve_fixer()  # block until a Coordinator is known (auto mode)
         if not self.quiet:
             print(
                 f"[runner] {self.runner_id} on {self.host}: {self.workers} workers, "
@@ -264,7 +264,7 @@ class Runner:
         try:
             while not self._draining:
                 # Mutual auth gate: never register, lease, or run until we've
-                # cryptographically verified this Fixer holds the mesh token.
+                # cryptographically verified this Coordinator holds the mesh token.
                 if not self._trusted():
                     time.sleep(self.poll_interval)
                     if self._auto:
@@ -284,7 +284,7 @@ class Runner:
                 )
                 gigs = (lease or {}).get("gigs") or []
                 lease_id = (lease or {}).get("lease_id")
-                # M9: any advisories the Fixer attached to this lease response
+                # M9: any advisories the Coordinator attached to this lease response
                 # are printed loudly on the Runner's stdout so they survive into
                 # the rotating log file — the "in-band" delivery channel that
                 # works for every consumer (a human tailing logs, an LLM that

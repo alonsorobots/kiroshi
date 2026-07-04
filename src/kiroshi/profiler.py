@@ -1,14 +1,14 @@
-"""kiroshi.profiler — per-gig resource attribution via psutil.
+"""kiroshi.profiler — per-sub-job resource attribution via psutil.
 
-Samples a worker process's CPU, memory, and I/O **during** a gig's execution,
-then folds a compact summary into the gig's ``metrics``. This is the
+Samples a worker process's CPU, memory, and I/O **during** a sub-job's execution,
+then folds a compact summary into the sub-job's ``metrics``. This is the
 foundation (P1) of the bottleneck-detection feature: it answers *"what did
 each job use?"* without any cross-process PID mapping (the profiler runs
 inside the worker process that executes the task).
 
 **Soft dependency on psutil:** if psutil is not installed, the profiler is a
 no-op (returns an empty dict). Install with ``pip install kiroshi[profiler]``
-to enable per-gig attribution.
+to enable per-sub-job attribution.
 
 Design:
   * A daemon thread samples ``psutil.Process(os.getpid())`` + its children
@@ -16,7 +16,7 @@ Design:
   * On stop, it folds the samples into a compact summary:
     ``{cpu_pct_mean, cpu_pct_peak, rss_peak_mb, read_mb, write_mb, wall_s, samples}``
   * IO counters are cumulative (psutil convention); the profiler reports the
-    delta between the first and last sample = bytes moved during the gig.
+    delta between the first and last sample = bytes moved during the sub-job.
   * ``cpu_percent(interval=None)`` is primed at start so the first real sample
     is meaningful (psutil's first call always returns 0.0 otherwise).
   * Disabled via ``KIROSHI_PROFILER=0`` env var (operator kill switch).
@@ -36,7 +36,7 @@ _INTERVAL_DEFAULT = 3.0
 
 
 class GigProfiler:
-    """Sample a worker process's resources during a gig's execution.
+    """Sample a worker process's resources during a sub-job's execution.
 
     Usage::
 

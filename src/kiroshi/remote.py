@@ -140,7 +140,7 @@ def _fingerprint_local(syspath: list) -> dict:
 
 
 def _lan_ip(hint: str = "192.168.1.1") -> str:
-    """Best-effort primary LAN IPv4 of this machine (the Fixer host)."""
+    """Best-effort primary LAN IPv4 of this machine (the Coordinator host)."""
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.connect((hint, 9))
@@ -599,7 +599,7 @@ def _print_preflight(host: str, r: dict, local_fp: Optional[dict] = None) -> boo
                       f"cache tier ({d.cache_tier or 'NVMe'}) for write-heavy workloads.")
         if has_parity(topo):
             print("  [INFO] parity-protected topology detected — the resource "
-                  "governor's global write budget is active. Non-gig workloads "
+                  "governor's global write budget is active. Non-sub-job workloads "
                   "using ResourceClient.acquire(mode='write') will self-limit.")
 
     return ok

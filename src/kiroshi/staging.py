@@ -1,9 +1,9 @@
 """Staging + bulk-transfer primitives — resource-budget-aware I/O helpers.
 
-These are the building blocks that let non-gig workloads (downloads, GPU
+These are the building blocks that let non-sub-job workloads (downloads, GPU
 processors, ad-hoc scripts) participate in Kiroshi's mesh-global I/O budget
 without becoming formal Kiroshi gigs. They use :class:`ResourceClient` to
-acquire read/write slots from the Fixer before touching the disks.
+acquire read/write slots from the Coordinator before touching the disks.
 
 Two patterns:
 
@@ -25,7 +25,7 @@ Two patterns:
     for url, dest in download_list:
         bulk_download(url, dest, client=rc)  # acquires write slot, writes, releases
 
-Both are fail-open: if the Fixer is unreachable, they proceed without budget
+Both are fail-open: if the Coordinator is unreachable, they proceed without budget
 coordination (the work still runs, just without contention protection).
 """
 from __future__ import annotations
@@ -53,7 +53,7 @@ def stage_to_local(remote_path: str, disk: Optional[str] = None,
                    scratch_dir: Optional[str] = None) -> Generator[str, None, None]:
     """Stage a remote file to local NVMe scratch, respecting the read budget.
 
-    Acquires a per-disk read slot from the Fixer (if a client is provided),
+    Acquires a per-disk read slot from the Coordinator (if a client is provided),
     copies the file to a local temp path, then releases the slot. The caller
     does its expensive compute on the local copy (no disk budget held during
     compute). The temp file is deleted on exit.
@@ -61,7 +61,7 @@ def stage_to_local(remote_path: str, disk: Optional[str] = None,
     Args:
         remote_path: The file to stage (UNC path, NFS path, etc.).
         disk: The disk ID for the read budget (e.g. "disk3"). None = uncapped.
-        client: A ResourceClient connected to the Fixer. None = no coordination.
+        client: A ResourceClient connected to the Coordinator. None = no coordination.
         scratch_dir: Where to put the temp file. Defaults to system temp.
 
     Yields:
@@ -72,7 +72,7 @@ def stage_to_local(remote_path: str, disk: Optional[str] = None,
     os.makedirs(scratch, exist_ok=True)
     local_path = os.path.join(scratch, f"stage_{uuid.uuid4().hex[:8]}_{Path(remote_path).name}")
 
-    # Acquire read slot (fail-open if no client / Fixer unreachable)
+    # Acquire read slot (fail-open if no client / Coordinator unreachable)
     slot = client.acquire(disk=disk, mode="read") if client else None
     try:
         with slot if slot else _null_ctx():
@@ -90,7 +90,7 @@ def bulk_download(url: str, dest: str, client: Optional[ResourceClient] = None,
                   timeout: int = 300, retries: int = 3) -> bool:
     """Download a URL to a destination, respecting the write budget.
 
-    Acquires a global-parity-write slot from the Fixer (if a client is provided)
+    Acquires a global-parity-write slot from the Coordinator (if a client is provided)
     before writing. This is what prevents 64 concurrent downloads from
     thrashing the parity disk — each download waits for its write slot.
 
@@ -146,9 +146,9 @@ def _null_ctx():
 
 
 def enumerate_gigs(args: dict[str, Any]) -> Iterator[dict[str, Any]]:
-    """Walk ``args["from"]`` and yield one copy gig per file.
+    """Walk ``args["from"]`` and yield one copy sub-job per file.
 
-    Each gig copies ``<from>/<rel>`` → ``<to>/<rel>``. The ``read_root`` and
+    Each sub-job copies ``<from>/<rel>`` → ``<to>/<rel>``. The ``read_root`` and
     ``write_root`` are embedded in the spec so mesh runners (which may have
     different env vars) resolve paths correctly.
 
@@ -199,7 +199,7 @@ def run(spec: dict[str, Any]) -> dict[str, Any]:
 
     Idempotent (skip if dst exists with same byte count). Acquires a read slot
     on the source disk and a write slot for the dest via ResourceClient
-    (fail-open if the Fixer is unreachable). Parent dirs are created lazily.
+    (fail-open if the Coordinator is unreachable). Parent dirs are created lazily.
     """
     read_root = kpaths.gig_read_root(spec) or os.environ.get("KIROSHI_READ_ROOT")
     write_root = kpaths.gig_write_root(spec) or os.environ.get("KIROSHI_WRITE_ROOT")

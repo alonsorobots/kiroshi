@@ -1,4 +1,4 @@
-"""The Fixer — coordinator HTTP service.
+"""The Coordinator — coordinator HTTP service.
 
 FastAPI app over a local :class:`~kiroshi.jobstore.JobStore`. Hands batches of gigs
 to Runners, applies their results, extends leases on heartbeat, and runs a
@@ -39,9 +39,9 @@ class SeedGig(BaseModel):
 
 class SeedReq(BaseModel):
     gigs: list[SeedGig]
-    # Batch-wide campaign slug + human-readable label, applied to every gig that
+    # Batch-wide job slug + human-readable label, applied to every sub-job that
     # doesn't carry its own `job`. Lets `kiroshi seed --job X --label "..."` head
-    # a whole campaign in the dashboard instead of fragmenting it per subjob_id prefix.
+    # a whole job in the dashboard instead of fragmenting it per subjob_id prefix.
     job: Optional[str] = None
     label: Optional[str] = None
     # Opaque attribution blob — carried as-is, never interpreted by Kiroshi except
@@ -56,7 +56,7 @@ class LeaseReq(BaseModel):
     runner_id: str
     host: str = "?"
     capacity: int = 100
-    # The Runner's heartbeat cadence (s). The Fixer sizes the lease as a safe
+    # The Runner's heartbeat cadence (s). The Coordinator sizes the lease as a safe
     # multiple of it, so a slow-but-alive Runner isn't reaped into a duplicate.
     heartbeat_interval: Optional[float] = None
 
@@ -107,7 +107,7 @@ def create_app(
     task_source: Optional[dict[str, Any]] = None,
     disks: Optional[list] = None,
     # M9 advisory channel — background detectors + optional outbound webhook.
-    # Additive: with defaults the Fixer behaves exactly as before, only gaining a
+    # Additive: with defaults the Coordinator behaves exactly as before, only gaining a
     # /advisories endpoint that returns [] until something fires. Set
     # ``enable_advisories=False`` to skip starting the threads entirely (used by
     # some unit tests to keep the app synchronous).
@@ -119,7 +119,7 @@ def create_app(
     decision_ring: int = 5000,
     jobevent_ring: int = 50000,
 ) -> FastAPI:
-    app = FastAPI(title="Kiroshi Fixer", version="0.0.1")
+    app = FastAPI(title="Kiroshi Coordinator", version="0.0.1")
     app.state.store = store
     app.state.lease_ttl = lease_ttl
     # A lease must outlive several missed heartbeats, or a momentarily-slow (but
@@ -138,11 +138,11 @@ def create_app(
     app.state.started_at = time.time()
     app.state.launch_command = launch_command or ""
     # Opt-in task-code serving for `kiroshi join` (SECURITY.md §6.5). None unless
-    # the Fixer was started with --serve-task; gated + consent-checked client-side.
+    # the Coordinator was started with --serve-task; gated + consent-checked client-side.
     app.state.task_source = task_source
     # Storage topology for shard-aware leasing (PLAN §7.6). None/[] => inert (no
     # per-disk budget, plain work-stealing). The mesh-global per-spindle budget is
-    # derived here once; only the Fixer can enforce it across the whole fleet.
+    # derived here once; only the Coordinator can enforce it across the whole fleet.
     app.state.disks = disks or []
     from .storage import disk_concurrency_map, validate_disks
 
@@ -171,7 +171,7 @@ def create_app(
         print(f"[fixer][WARN] {_w}", flush=True)
 
     # --- Mesh resource governor (standalone resource-acquire service) ---
-    # Extends the per-disk read budget to non-gig workloads + adds a global
+    # Extends the per-disk read budget to non-sub-job workloads + adds a global
     # write/parity budget. Any process can acquire via /resource/acquire.
     from .storage import has_parity, global_write_concurrency
     app.state.resource_slots = {}  # slot_id -> {disk, mode, holder, deadline}
@@ -194,7 +194,7 @@ def create_app(
     # --- Advisory channel (M9) ---
     # Structured warnings for whoever launched the work: humans reading the
     # dashboard, monitors, MCP clients, or LLM agents via an outbound webhook.
-    # The Fixer only ships primitives (detect + query + optional POST); IDE-
+    # The Coordinator only ships primitives (detect + query + optional POST); IDE-
     # specific consumers live outside this repo. Origins are opaque attribution
     # blobs the launcher supplied via `--origin` on `run`/`seed`.
     from . import advisories as _adv_mod
@@ -240,7 +240,7 @@ def create_app(
         return {d.id for d in app.state.disks if getattr(d, "parity_protected", False)}
 
     def _dashboard_url_for(_disk: Optional[str]) -> Optional[str]:
-        # Kiroshi doesn't know its own external base URL (Fixer may bind
+        # Kiroshi doesn't know its own external base URL (Coordinator may bind
         # 0.0.0.0 behind NAT / an overlay), so we return a relative path a
         # consumer can join to whatever hostname they used. Callers that need
         # an absolute URL should combine with `origin.dashboard_base`.
@@ -297,9 +297,9 @@ def create_app(
 
     @app.get("/auth/challenge")
     def auth_challenge(nonce: str = "") -> JSONResponse:
-        """Mutual auth: prove to a Runner that *this* Fixer holds the shared
-        token, so the Runner can verify the Fixer BEFORE sending its bearer token
-        or executing leased work. Defends `--fixer auto` against a rogue Fixer
+        """Mutual auth: prove to a Runner that *this* Coordinator holds the shared
+        token, so the Runner can verify the Coordinator BEFORE sending its bearer token
+        or executing leased work. Defends `--fixer auto` against a rogue Coordinator
         (LAN attacker who wins UDP discovery) harvesting the token + injecting
         specs. Reveals only HMAC(token, nonce), never the token. Open by design."""
         tok = app.state.token
@@ -333,7 +333,7 @@ def create_app(
                 if n:
                     print(f"[fixer] reaped {n} expired lease(s) -> pending", flush=True)
                     # The reaped gigs are now 'pending' again; emit a summary
-                    # event (per-gig identification isn't available post-reap).
+                    # event (per-sub-job identification isn't available post-reap).
                     _job_event("(reaper)", "REAPED", count=n)
             except Exception as e:  # pragma: no cover
                 print(f"[fixer] reaper error: {e}", flush=True)
@@ -391,8 +391,8 @@ def create_app(
 
     @app.post("/seed")
     def seed(req: SeedReq) -> dict[str, int]:
-        # Derive each gig's physical disk from the topology (if declared) so /lease
-        # can budget per-spindle. A gig that already carries a disk (set by the
+        # Derive each sub-job's physical disk from the topology (if declared) so /lease
+        # can budget per-spindle. A sub-job that already carries a disk (set by the
         # task's enumerate_gigs) wins; only absent ones are derived. No topology =>
         # disk stays None (uncapped / inert).
         disks = app.state.disks
@@ -460,7 +460,7 @@ def create_app(
         """Record a per-job coordination transition in the bounded ring buffer +
         a per-job index for O(1) trace lookup. No-op effect on the store.
 
-        Both the events ring AND the index dict are bounded — a long-lived Fixer
+        Both the events ring AND the index dict are bounded — a long-lived Coordinator
         processing millions of gigs across jobs must not leak memory, so the
         index evicts its oldest-tracked subjob_ids once it exceeds the ring size."""
         ts = time.time()
@@ -540,13 +540,13 @@ def create_app(
     def metrics_export(job: Optional[str] = None,
                        state: Optional[str] = "done",
                        limit: int = 100000) -> dict[str, Any]:
-        """Bulk per-gig metrics for result aggregation across a campaign.
+        """Bulk per-sub-job metrics for result aggregation across a job.
 
         Returns ``{rows: [{subjob_id, metrics, state, job, disk}], count, ts}``.
         Unlike ``/jobs`` (dashboard-shaped, capped at 2000), this streams up to
         ``limit`` (default 100k) lightweight rows so a consumer can fold metrics
-        across a whole campaign -- e.g. ranking every clip by worst-section
-        error. ``job`` filters to one campaign; ``state`` defaults to ``done``.
+        across a whole job -- e.g. ranking every clip by worst-section
+        error. ``job`` filters to one job; ``state`` defaults to ``done``.
         Ordered by subjob_id for deterministic paging.
         """
         states = tuple(s.strip() for s in state.split(",")) if state else None
@@ -582,7 +582,7 @@ def create_app(
 
     def _effective_disk_budget() -> Optional[dict[str, int]]:
         """The per-disk read budget available to GIGS = topology budget minus
-        read resource-slots currently held by external (non-gig) clients. This
+        read resource-slots currently held by external (non-sub-job) clients. This
         unifies the mesh-global budget: gigs and external workloads draw from
         ONE shared counter, so their combined in-flight never exceeds the cap.
         """
@@ -630,7 +630,7 @@ def create_app(
 
     def _record_lease_decision(req: "LeaseReq", res, ttl: float) -> None:
         """Build a LeaseDecision record from the lease result's diag and append
-        it to the ring buffer. Emit LEASED JobEvents for each granted gig.
+        it to the ring buffer. Emit LEASED JobEvents for each granted sub-job.
         Throttled console log when the host got fewer gigs than requested."""
         diag = res.diag or {}
         ts = time.time()
@@ -652,7 +652,7 @@ def create_app(
         }
         app.state.lease_decisions.append(decision)
 
-        # Emit a LEASED event for *every* leased gig — not the 32-capped
+        # Emit a LEASED event for *every* leased sub-job — not the 32-capped
         # granted_subjob_ids used for the compact decision record — so job_trace is
         # complete. Bounded by the per-lease grant size (workers+buffer, further
         # capped by the disk budget) and by the index eviction in _job_event.
@@ -682,9 +682,9 @@ def create_app(
         res = store.lease(req.runner_id, req.host, req.capacity, ttl,
                           disk_concurrency=budget,
                           host_share=_host_share(req.host, budget))
-        # Dual-path routing (N3): stamp each gig's spec with its disk's read/write
+        # Dual-path routing (N3): stamp each sub-job's spec with its disk's read/write
         # roots so the task reads the direct spindle share / writes the cached share.
-        # Inert without a topology (gig has no disk -> spec roots unset -> env fallback).
+        # Inert without a topology (sub-job has no disk -> spec roots unset -> env fallback).
         if app.state.disks and res.gigs:
             from .storage import inject_roots
 
@@ -736,7 +736,7 @@ def create_app(
 
     @app.get("/task/meta")
     def task_meta() -> dict[str, Any]:
-        """Whether this Fixer serves task code, and its identity/hash (token-gated).
+        """Whether this Coordinator serves task code, and its identity/hash (token-gated).
 
         ``served=False`` means the joining Runner must already have the task
         importable (pre-installed) — the safe default.
@@ -752,13 +752,13 @@ def create_app(
     def task_source_ep() -> JSONResponse:
         """Serve the task source for a consenting joiner (token-gated, opt-in).
 
-        Only present when the Fixer was started with ``--serve-task``. The client
+        Only present when the Coordinator was started with ``--serve-task``. The client
         (`kiroshi join`) shows the SHA-256 and requires operator approval before
         writing/importing — see SECURITY.md §6.5.
         """
         ts = app.state.task_source
         if not ts:
-            return JSONResponse({"error": "this Fixer does not serve task code"},
+            return JSONResponse({"error": "this Coordinator does not serve task code"},
                                 status_code=404)
         return JSONResponse({
             "task_ref": ts["task_ref"], "module": ts["module"],
@@ -851,7 +851,7 @@ def create_app(
 
     @app.get("/subjob/trace")
     def job_trace(subjob_id: str) -> dict[str, Any]:
-        """Coordination timeline for one job/gig: seeded/leased/completed/
+        """Coordination timeline for one job/sub-job: seeded/leased/completed/
         failed/requeued/expired events, plus the job's current DB row."""
         events = list(app.state.job_event_index.get(subjob_id, []))
         row = store.job(subjob_id)
@@ -871,7 +871,7 @@ def create_app(
         active_only: bool = False,
         limit: int = 200,
     ) -> dict[str, Any]:
-        """Structured Fixer-side warnings for humans / monitors / agents (M9).
+        """Structured Coordinator-side warnings for humans / monitors / agents (M9).
 
         Query params:
           - ``since``: unix timestamp; only newer entries.
@@ -963,7 +963,7 @@ def create_app(
         """Acquire a read (per-disk) or write (global-parity) resource slot.
 
         Any process — not just Kiroshi gigs — can call this to coordinate I/O
-        across the mesh. The Fixer is the single mesh-global arbiter.
+        across the mesh. The Coordinator is the single mesh-global arbiter.
 
         Request: {"slot_id": "...", "disk": "disk3"|"None", "mode": "read"|"write", "ttl": 120}
         Response: {"granted": true} or {"granted": false, "retry_after": 0.5}

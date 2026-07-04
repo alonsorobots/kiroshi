@@ -1,12 +1,12 @@
 """``kiroshi run`` — the front door (PLAN §7.5).
 
-One command: enumerate inputs → start an in-process Fixer (loopback by default,
+One command: enumerate inputs → start an in-process Coordinator (loopback by default,
 or ``0.0.0.0`` with ``--lan``) + a local Runner → seed → render a live terminal
 progress bar (aggregate across every joined machine) → print where outputs landed
 + the dashboard URL. Ctrl-C drains and exits.
 
 The coordinator here is *ephemeral* — it lives only for this run. For a permanent,
-boot-start Fixer use ``kiroshi install``.
+boot-start Coordinator use ``kiroshi install``.
 """
 from __future__ import annotations
 
@@ -76,7 +76,7 @@ def _read_jsonl(path: str) -> Iterator[dict[str, Any]]:
 
 
 def _gigs_from_items(pattern: str) -> list[dict[str, Any]]:
-    """One gig per file matching a local glob. spec = {'path': <match>}.
+    """One sub-job per file matching a local glob. spec = {'path': <match>}.
 
     Local filesystem only — for UNC/NAS enumeration use the task's
     ``enumerate_gigs`` hook (which can walk SMB via kfs). Deterministic subjob_ids
@@ -193,17 +193,17 @@ def run_job(
     from .worker import Runner
 
     # Split-brain guard for `kiroshi run --lan`: refuse to broadcast a second
-    # discoverable Fixer on a LAN that already has one. See cli._cmd_fixer for
+    # discoverable Coordinator on a LAN that already has one. See cli._cmd_fixer for
     # the same guard on `kiroshi fixer`. When --lan is off we bind loopback and
     # don't beacon, so this check is skipped (no cross-host contention possible).
     if lan and not force_second_fixer:
         other = check_singleton_fixer(timeout=3.0)
         if other:
-            print(f"[run] REFUSING --lan: another Fixer is already "
+            print(f"[run] REFUSING --lan: another Coordinator is already "
                   f"discoverable at {other}.\n"
                   f"  Seed to it instead:\n"
                   f"    kiroshi seed --fixer {other} ...\n"
-                  f"  Or drop --lan to run a private loopback-only Fixer here.\n"
+                  f"  Or drop --lan to run a private loopback-only Coordinator here.\n"
                   f"  (Pass --force-second-fixer only if you deliberately want\n"
                   f"  two isolated meshes on the same LAN.)",
                   file=sys.stderr)
@@ -243,9 +243,9 @@ def run_job(
             return 2
         if not lan:
             print("[run] note: --serve-task only matters with --lan (joiners need "
-                  "the LAN bind to reach this Fixer).", flush=True)
+                  "the LAN bind to reach this Coordinator).", flush=True)
 
-    # --- build the gig list ---
+    # --- build the sub-job list ---
     try:
         if jobs:
             gigs = list(_read_jsonl(jobs))
@@ -271,8 +271,8 @@ def run_job(
         print("[run] no gigs produced — nothing to do.", file=sys.stderr)
         return 1
 
-    # --- tag each gig with its physical disk (topology-aware leasing, PLAN §7.6) ---
-    # A gig may already carry a disk (set by enumerate_gigs); only absent ones are
+    # --- tag each sub-job with its physical disk (topology-aware leasing, PLAN §7.6) ---
+    # A sub-job may already carry a disk (set by enumerate_gigs); only absent ones are
     # derived. No topology => disk stays None and leasing is inert (plain work-steal).
     from .storage import derive_disk, load_topology
 
@@ -288,8 +288,8 @@ def run_job(
     # --lan: ensure a token exists (generate+persist) so joiners have a join code.
     # loopback: use an explicit/env/file token if one exists, else no-auth. We must
     # resolve it the SAME way the Runner would, then hand the SAME value to both the
-    # Fixer and the Runner — otherwise the Runner auto-resolves a persisted
-    # mesh.token while the Fixer runs no-auth, and mutual auth refuses (the Fixer
+    # Coordinator and the Runner — otherwise the Runner auto-resolves a persisted
+    # mesh.token while the Coordinator runs no-auth, and mutual auth refuses (the Coordinator
     # "reports NO auth but this runner has a token").
     host = "0.0.0.0" if lan else "127.0.0.1"
     if lan:
@@ -311,7 +311,7 @@ def run_job(
 
     print(f"[run] task={task_ref}  gigs={total} ({inserted} new)  db={db}", flush=True)
     if label:
-        print(f"[run] campaign: {label}", flush=True)
+        print(f"[run] job: {label}", flush=True)
     print(f"[run] dashboard: {url}", flush=True)
     if lan:
         print(f"[run] LAN mode — other machines can join with:  kiroshi join "
@@ -346,7 +346,7 @@ def run_job(
 
     app = create_app(store, token=token, launch_command=launch_command,
                      task_source=task_source, disks=disks)
-    # M9: stash the origin so advisories fired against this campaign's spindle
+    # M9: stash the origin so advisories fired against this job's spindle
     # can be attributed (and, if `callback` is present, webhook'd back to
     # whoever launched this run). Same in-memory shape as the /seed endpoint's
     # ``origins_by_group`` map — the seed already happened in-process above,
@@ -354,8 +354,8 @@ def run_job(
     if origin:
         from .jobstore import UNGROUPED
 
-        grp = job or UNGROUPED
-        app.state.origins_by_group.setdefault(grp, []).append(dict(origin))
+        job = job or UNGROUPED
+        app.state.origins_by_group.setdefault(job, []).append(dict(origin))
     config = uvicorn.Config(app, host=host, port=port, log_level="warning")
     server = uvicorn.Server(config)
     server_thread = threading.Thread(target=server.run, name="kiroshi-run-fixer",
@@ -410,6 +410,6 @@ def run_job(
     if write_root:
         print(f"[run] outputs under: {write_root}", flush=True)
     if st["failed"]:
-        print(f"[run] {st['failed']} gig(s) failed — re-run to retry, or "
+        print(f"[run] {st['failed']} sub-job(s) failed — re-run to retry, or "
               f"`kiroshi requeue --state failed` against the same db.", flush=True)
     return 1 if (interrupted or st["failed"]) else 0

@@ -80,7 +80,7 @@ def suggest_concurrency(
     """Pick a per-disk ``concurrency`` from throughput-vs-concurrency samples.
 
     ``samples`` is a list of ``(concurrency, throughput_Mbps)`` pairs — e.g.
-    measured by ``kiroshi nas benchmark`` or observed during a campaign. The
+    measured by ``kiroshi nas benchmark`` or observed during a job. The
     function finds the **knee**: the lowest concurrency where throughput
     reaches a fraction of the peak, determined by ``bias``:
 

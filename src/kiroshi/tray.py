@@ -4,7 +4,7 @@ Mirroring at-field's philosophy ("the tray just opens the dashboard URLs and
 manages the services; the engine stays headless"), this is deliberately small:
 a status icon whose colour/tooltip reflects mesh health, and a menu that opens
 the console pages (with the mesh token injected so the browser just works) and
-performs local control actions (graceful-stop the Fixer/Runners on this box,
+performs local control actions (graceful-stop the Coordinator/Runners on this box,
 open the logs folder).
 
 Requires the optional ``tray`` extra (``pip install kiroshi[tray]``) which pulls
@@ -252,14 +252,14 @@ class Tray:
                     d = r.json()
                     self._live = True
                     pct = (100 * d.get("done", 0) / d["total"]) if d.get("total") else 0
-                    # Fetch campaign summaries so the tooltip shows readable
+                    # Fetch job summaries so the tooltip shows readable
                     # labels (the fix for "too many jobs") not just a raw count.
                     campaigns = self._fetch_campaigns(base)
                     if campaigns:
                         active = [c for c in campaigns
                                   if c.get("leased", 0) or c.get("pending", 0)]
                         top = active[:3]
-                        names = [c.get("label") or c.get("grp", "?") for c in top]
+                        names = [c.get("label") or c.get("job", "?") for c in top]
                         if len(active) > 3:
                             names.append(f"… +{len(active) - 3} more")
                         camp_str = " | ".join(names) if names else "no active campaigns"
@@ -304,7 +304,7 @@ class Tray:
 
     def run(self) -> int:
         # Self-register for autostart on login (idempotent, best-effort).
-        # Mirrors at-field's tray: the Fixer is a boot-start service; the
+        # Mirrors at-field's tray: the Coordinator is a boot-start service; the
         # tray is a login-start UI lens. This one-time registration means
         # the tray icon shows up automatically every time you log in.
         from . import autostart

@@ -2,7 +2,7 @@
 
 at-field (the sibling GPU/thermal watchdog) performs emergency shutdown by
 killing ``python.exe`` process *trees* it discovers via psutil — it has no
-opt-in registration API. So Kiroshi instead **advertises** every Fixer/Runner it
+opt-in registration API. So Kiroshi instead **advertises** every Coordinator/Runner it
 starts as a small JSON manifest in a well-known place. Any watchdog (at-field,
 the tray, an ops script) can then enumerate exactly which PIDs belong to Kiroshi,
 the full launch command behind each, and how to stop it *gracefully* before
@@ -106,7 +106,7 @@ def list_registered(*, include_stale: bool = False,
                     gc: bool = True) -> list[dict[str, Any]]:
     """All currently-advertised Kiroshi process manifests (for tray/CLI).
 
-    A process is only healthy while its owning PID is alive. When a Fixer or
+    A process is only healthy while its owning PID is alive. When a Coordinator or
     Runner crashes (kill -9, power loss, OOM), its manifest sticks around
     forever — turning ``kiroshi ps`` into a graveyard. This function filters
     to *live* PIDs (on this host) by default and, when ``gc=True``, deletes

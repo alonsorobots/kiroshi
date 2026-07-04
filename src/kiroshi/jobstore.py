@@ -1,9 +1,9 @@
-"""JobStore — the Fixer's gig ledger (local SQLite, WAL mode).
+"""JobStore — the Coordinator's sub-job ledger (local SQLite, WAL mode).
 
 Lives **locally on the coordinator**. Workers never touch it; they coordinate over
 HTTP. This avoids unreliable SQLite locking over SMB/network filesystems.
 
-Gig states: ``pending`` -> ``leased`` -> ``done`` | ``failed``.
+Sub-job states: ``pending`` -> ``leased`` -> ``done`` | ``failed``.
 - ``seed`` is idempotent (INSERT OR IGNORE on subjob_id) — re-seeding is safe.
 - ``lease`` atomically hands a batch of pending gigs to one Runner with a TTL.
 - ``complete`` marks done/failed; failures re-queue until the retry budget is spent.
@@ -24,8 +24,8 @@ UNGROUPED = "(ungrouped)"
 
 
 def _job_of(subjob_id: str) -> str:
-    """Campaign/job for a gig: everything before the last '/'. Gigs with no
-    '/' are bucketed under ``(ungrouped)`` so every gig has a home."""
+    """Job/job for a sub-job: everything before the last '/'. Gigs with no
+    '/' are bucketed under ``(ungrouped)`` so every sub-job has a home."""
     i = subjob_id.rfind("/")
     return subjob_id[:i] if i > 0 else UNGROUPED
 
@@ -131,12 +131,12 @@ class JobStore:
     def seed(self, gigs: list[dict[str, Any]],
              job: Optional[str] = None,
              label: Optional[str] = None) -> int:
-        """Insert gigs idempotently. Each gig: {subjob_id, spec, job?}.
+        """Insert gigs idempotently. Each sub-job: {subjob_id, spec, job?}.
 
-        ``job`` (per-gig or batch-wide) overrides the subjob_id-prefix grouping, so
-        a whole campaign can be seeded under one readable slug regardless of how
+        ``job`` (per-sub-job or batch-wide) overrides the subjob_id-prefix grouping, so
+        a whole job can be seeded under one readable slug regardless of how
         the ``subjob_id``s are shaped. ``label`` is a human-readable name for that
-        campaign, stored once in the ``jobs`` table and shown in the UI.
+        job, stored once in the ``jobs`` table and shown in the UI.
 
         Returns # inserted.
         """
@@ -154,7 +154,7 @@ class JobStore:
                 "VALUES (?, ?, ?, ?, ?)",
                 rows,
             )
-            # Count gig inserts only — *before* the campaign upsert, so the label
+            # Count sub-job inserts only — *before* the job upsert, so the label
             # row doesn't inflate the reported "inserted" count.
             inserted = self._conn.total_changes - before
             if label:
@@ -173,7 +173,7 @@ class JobStore:
                      job: Optional[str]) -> Optional[str]:
         """The job slug a batch-wide ``label`` should attach to.
 
-        An explicit batch ``job`` wins. Otherwise, if every gig resolves to the
+        An explicit batch ``job`` wins. Otherwise, if every sub-job resolves to the
         same effective job, that one is used; a mixed batch has no single home
         for the label, so we return None (and skip labelling rather than mislabel).
         """
@@ -204,7 +204,7 @@ class JobStore:
         """Lease up to ``capacity`` pending gigs atomically.
 
         With ``disk_concurrency`` (the mesh-global per-spindle budget, only the
-        Fixer can supply), candidate gigs are **round-robin interleaved across
+        Coordinator can supply), candidate gigs are **round-robin interleaved across
         disks** (every spindle fed from the first lease) and a **per-disk in-flight
         cap** is enforced: never lease beyond ``budget[disk]`` gigs currently leased
         across the *whole fleet*. This is the distributed DiskSemaphore — possible
@@ -216,7 +216,7 @@ class JobStore:
         of gigs this ``host`` may hold in-flight across the whole fleet at once.
         It solves disk-budget *hoarding* — without it, the first host to poll can
         drain the entire per-disk budget before slower hosts get a look-in,
-        serializing a mesh that should run in parallel. The Fixer sets it
+        serializing a mesh that should run in parallel. The Coordinator sets it
         proportional to each host's live worker weight. ``None`` => inert.
         """
         now = time.time()
@@ -379,7 +379,7 @@ class JobStore:
                 # Pending gigs left unleased -> the per-disk budget was the wall.
                 reason = "DISK_BUDGET_FULL"
             else:
-                # Drained every pending gig we could see; just no more work.
+                # Drained every pending sub-job we could see; just no more work.
                 reason = "GRANTED_FULL"
 
             if not selected:
@@ -482,7 +482,7 @@ class JobStore:
                 elif status == "requeue":
                     # Eviction: return to pending immediately. Undo the lease's
                     # attempts+1 so a flapping pressure pause can't exhaust the
-                    # retry budget and mark a healthy gig 'failed' — the task was
+                    # retry budget and mark a healthy sub-job 'failed' — the task was
                     # preempted, not actually tried. error is cleared (not a fault).
                     self._conn.execute(
                         "UPDATE subjobs SET state='pending', error=NULL, "
@@ -641,7 +641,7 @@ class JobStore:
     # ------------------------------------------------------------- listing
     def disk_done_counts(self) -> dict[str, int]:
         """``{disk_id: done_count}`` — for the throughput sampler to derive per-disk
-        rate over time (PLAN §7.6 N6). Only disks with at least one done gig."""
+        rate over time (PLAN §7.6 N6). Only disks with at least one done sub-job."""
         with self._lock:
             return {
                 row["disk"]: row["n"]
@@ -711,12 +711,12 @@ class JobStore:
                   error_re: Optional[str] = None) -> list[dict[str, Any]]:
         """Return job rows (for the /jobs + /history views). Newest by activity.
 
-        ``job`` optionally filters to one campaign (the ``job`` column set at
-        seed time). Without it, rows from every campaign are mixed (the existing
+        ``job`` optionally filters to one job (the ``job`` column set at
+        seed time). Without it, rows from every job are mixed (the existing
         behavior for the dashboard).
 
         ``subjob_id_re`` / ``error_re`` optionally apply a regex filter **server-side**
-        via the registered REGEXP function (so a 100k-gig campaign doesn't ship
+        via the registered REGEXP function (so a 100k-sub-job job doesn't ship
         all rows to the client to grep). Patterns are validated with
         ``re.compile`` before the query runs — a bad pattern raises ``re.error``
         which the caller should catch and report cleanly.
@@ -763,11 +763,11 @@ class JobStore:
         """Bulk export of (subjob_id, metrics, state) for result aggregation.
 
         Unlike :meth:`list_jobs` (dashboard-shaped, capped at 2000), this is
-        for consumers that need to fold metrics across a whole campaign -- e.g.
+        for consumers that need to fold metrics across a whole job -- e.g.
         ranking 32k clips by worst-section MPJPE. Returns lightweight rows
         (subjob_id, metrics, state, job, disk) ordered by subjob_id (deterministic),
         so a caller can page by subjob_id if the set is huge. ``limit`` defaults
-        high (100k) since a single campaign rarely exceeds that.
+        high (100k) since a single job rarely exceeds that.
         """
         cols = "subjob_id, metrics, state, job, disk"
         params: list[Any] = []
@@ -796,7 +796,7 @@ class JobStore:
         return out
 
     def group_stats(self, limit: int = 200) -> list[dict[str, Any]]:
-        """Per-campaign rollup ("jobs" for the UI): counts by state + timing.
+        """Per-job rollup ("jobs" for the UI): counts by state + timing.
 
         A "job" here is a job of gigs sharing a ``subjob_id`` prefix. Returns the
         most-recently-active groups first.

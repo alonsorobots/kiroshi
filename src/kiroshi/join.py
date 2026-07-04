@@ -1,6 +1,6 @@
 """``kiroshi join`` — add this machine to a running mesh (PLAN §7.5).
 
-One command on a new box: discover the Fixer, **mutually authenticate** it, make
+One command on a new box: discover the Coordinator, **mutually authenticate** it, make
 the task available (pre-installed, or consent-fetch its served source — SECURITY.md
 §6.5), then run a Runner in the foreground or install it as an auto-start service.
 
@@ -57,7 +57,7 @@ def _consent(src: dict, url: str, accept_hash: Optional[str]) -> bool:
         print(f"[join] REFUSED: --accept-task-hash does not match served code "
               f"(served {sha[:12]}…).", file=sys.stderr)
         return False
-    print("\n[join] This Fixer wants to send CODE to run on this machine:", flush=True)
+    print("\n[join] This Coordinator wants to send CODE to run on this machine:", flush=True)
     print(f"         task:   {src['task_ref']}", flush=True)
     print(f"         file:   {src['filename']}  ({len(src['source'])} bytes)", flush=True)
     print(f"         sha256: {sha}", flush=True)
@@ -65,7 +65,7 @@ def _consent(src: dict, url: str, accept_hash: Optional[str]) -> bool:
     if pinned and pinned != sha:
         print(f"  WARNING: this DIFFERS from previously-approved {pinned[:12]}… — "
               f"the task code changed.", flush=True)
-    print("  Only approve code from a Fixer you control (see SECURITY.md §6.5).",
+    print("  Only approve code from a Coordinator you control (see SECURITY.md §6.5).",
           flush=True)
     try:
         ans = input("[join] Run this code on your machine? [y/N] ").strip().lower()
@@ -78,7 +78,7 @@ def _acquire_task(url: str, token: Optional[str], task_ref: Optional[str],
                   accept_hash: Optional[str]) -> Optional[str]:
     """Ensure the task is importable; return the resolved task_ref or None on failure.
 
-    Order: pre-installed wins. Otherwise, if the Fixer serves code and the operator
+    Order: pre-installed wins. Otherwise, if the Coordinator serves code and the operator
     consents, fetch + write + pin it and add the tasks dir to ``sys.path``.
     """
     # Make any previously-fetched task importable for the check.
@@ -93,7 +93,7 @@ def _acquire_task(url: str, token: Optional[str], task_ref: Optional[str],
 
     ref = task_ref or meta.get("task_ref")
     if not ref:
-        print("[join] no --task given and the Fixer doesn't advertise one. Pass "
+        print("[join] no --task given and the Coordinator doesn't advertise one. Pass "
               "--task module:function.", file=sys.stderr)
         return None
 
@@ -102,10 +102,10 @@ def _acquire_task(url: str, token: Optional[str], task_ref: Optional[str],
         return ref
 
     if not meta.get("served"):
-        print(f"[join] task {ref!r} is not importable on this machine and the Fixer "
+        print(f"[join] task {ref!r} is not importable on this machine and the Coordinator "
               f"isn't serving code.\n"
               f"  Fix: pre-install the task (pip install / checkout) on this box, or "
-              f"start the Fixer with `run --serve-task` (single-file tasks only).",
+              f"start the Coordinator with `run --serve-task` (single-file tasks only).",
               file=sys.stderr)
         return None
 
@@ -172,8 +172,8 @@ def join(
 
     # Mutual auth BEFORE sending the token or fetching code (SECURITY.md §3).
     if not verify_fixer(url, token):
-        print(f"[join] could not verify the Fixer at {url} (wrong/missing token, or "
-              f"a rogue Fixer). Refusing to join.", file=sys.stderr)
+        print(f"[join] could not verify the Coordinator at {url} (wrong/missing token, or "
+              f"a rogue Coordinator). Refusing to join.", file=sys.stderr)
         return 2
 
     ref = _acquire_task(url, token, task, accept_task_hash)

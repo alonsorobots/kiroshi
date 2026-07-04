@@ -1,4 +1,4 @@
-"""Advisory channel — structured Fixer-side warnings for humans, monitors, and agents.
+"""Advisory channel — structured Coordinator-side warnings for humans, monitors, and agents.
 
 Kiroshi already has the *sensor* data: per-disk in-flight vs budget
 (``store.disk_inflight_count`` + ``resource_slots``), rolling I/O saturation
@@ -24,7 +24,7 @@ Everything here is opt-in and fail-open:
 
 - Detectors that lack data (no topology, no ``iowatcher``, no metrics history)
   simply don't fire.
-- The webhook dispatcher never crashes the Fixer; a bad callback URL is
+- The webhook dispatcher never crashes the Coordinator; a bad callback URL is
   logged and dropped, no retries beyond one.
 - The store is bounded (``capacity`` entries, oldest evicted) and lives only
   in memory — restart-time reset is intentional for v1; advisories describe
@@ -237,10 +237,10 @@ class AdvisoryDetector:
     ``origins_for(disk)`` is a callback: given a disk id (or ``None`` for
     fleet-wide advisories), return the list of origin dicts that own
     in-flight work in that scope. Kiroshi wires this from
-    ``app.state.origins`` + the store's leased-gig list.
+    ``app.state.origins`` + the store's leased-sub-job list.
 
     Fail-open: any detector that raises is logged and skipped — a bad
-    detector never crashes the Fixer.
+    detector never crashes the Coordinator.
     """
 
     def __init__(
@@ -472,7 +472,7 @@ class AdvisoryDetector:
         return out
 
     def _detect_failure_spike(self, stats: dict[str, Any]) -> list[Advisory]:
-        """Fire when failed-gig deltas over the sample window exceed either an
+        """Fire when failed-sub-job deltas over the sample window exceed either an
         absolute count or a ratio of completions in the same window."""
         out: list[Advisory] = []
         now = time.time()

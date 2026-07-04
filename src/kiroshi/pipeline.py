@@ -1,13 +1,13 @@
 """kiroshi.pipeline — declarative multi-stage pipelines with typed edges.
 
-Promotes the ad-hoc "cascade seeder" pattern (poll an upstream campaign's
-done gigs, seed the next campaign) into a first-class, *tested* primitive.
+Promotes the ad-hoc "cascade seeder" pattern (poll an upstream job's
+done gigs, seed the next job) into a first-class, *tested* primitive.
 
 A pipeline is a set of STAGES connected by typed EDGES. The edge type is the
 one piece of "privileged" dependency knowledge — and it is DECLARED, never
 inferred by the scheduler:
 
-  each        downstream gig for item X unlocks the instant upstream item X
+  each        downstream sub-job for item X unlocks the instant upstream item X
               is done. The common map->map fan-through.
   quorum:k    a BARRIER: fire the downstream *action* once >= k upstream
               items are done (map->reduce — e.g. build a global codebook
@@ -86,7 +86,7 @@ class Edge:
 
 
 def resolve_each(up_done_keys: set[str], down_have_keys: set[str]) -> list[str]:
-    """Items whose downstream gig should be seeded now (upstream done, not yet
+    """Items whose downstream sub-job should be seeded now (upstream done, not yet
     present downstream). Sorted for deterministic seeding."""
     return sorted(up_done_keys - down_have_keys)
 
@@ -106,7 +106,7 @@ def artifacts_ready(paths: tuple[str, ...]) -> bool:
 
 
 def render_spec(template: dict[str, Any], stem: str) -> dict[str, Any]:
-    """Fill a downstream gig-spec template for one item.
+    """Fill a downstream sub-job-spec template for one item.
 
     Any string value containing ``{stem}`` / ``{clip}`` is substituted.
     ``{clip}`` expands to ``<stem>.npz``; ``{stem}`` to the bare stem.
@@ -138,11 +138,11 @@ def build_gigs(stems: list[str], subjob_id_template: str, spec_template: dict[st
 @dataclass
 class Stage:
     name: str
-    fixer: str                              # base URL of the Fixer hosting this stage
-    job: str                              # campaign job slug on that Fixer
+    fixer: str                              # base URL of the Coordinator hosting this stage
+    job: str                              # job job slug on that Coordinator
     task: Optional[str] = None              # task ident (informational; runners bind it)
     label: str = ""
-    # For gig-producing stages: how to shape a downstream gig.
+    # For sub-job-producing stages: how to shape a downstream sub-job.
     subjob_id_template: str = "{clip}"
     spec_template: dict[str, Any] = field(default_factory=dict)
     # For a barrier/reduce stage: a shell command to run once the quorum trips.

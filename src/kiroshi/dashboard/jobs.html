@@ -72,7 +72,7 @@ function render(groups){
         <span class="counts"><b>${g.done}</b>/${g.total} done · ${g.leased} in-flight · ${g.pending} queued · <span class="f">${g.failed} failed</span></span></div>
       <div class="pill"><div class="fill" style="width:${pct.toFixed(1)}%"></div><div class="lbl">${pct.toFixed(1)}%</div></div>
       <div class="meta">
-        <a class="btn" href="/ui/subjobs?job=${gid}">⟋ graph</a>${pageBtn}
+        <a class="btn" href="/ui/jobs?job=${gid}">⟋ graph</a>${pageBtn}
         <span class="cmd" title="click to expand" onclick="this.classList.toggle('open')">${esc(cmd)}</span>
       </div></div>`;
   }).join("");

@@ -17,7 +17,7 @@ The remaining failure mode is *supervision* — that's what ``scheduled`` fixes.
 
 Per-user (HKCU / current-user task) instead of per-machine by design: no UAC,
 runs in the interactive session (SMB creds + desktop available to the tray),
-and the Fixer service itself already covers "runs regardless of logon" via
+and the Coordinator service itself already covers "runs regardless of logon" via
 NSSM. This module is Windows-only; non-Windows public functions are no-ops.
 """
 from __future__ import annotations
@@ -139,7 +139,7 @@ if sys.platform == "win32":
         Returns ``"registered"`` if a new entry was written,
         ``"already"`` if the existing entry already points at this
         interpreter (no-op), or ``"updated"`` if a stale entry was
-        overwritten. Never raises — autostart is best-effort; the Fixer
+        overwritten. Never raises — autostart is best-effort; the Coordinator
         service runs regardless.
         """
         cmd = _tray_command()

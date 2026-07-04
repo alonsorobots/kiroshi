@@ -11,7 +11,7 @@ pipelines — spawn, IPC pipe, GPU/subprocess-teardown hangs):
   a sliding window and refill as gigs finish.
 - **Staggered cold-start** — the initial submissions are spaced ~100ms so worker
   init (task import / model load) doesn't race; only at startup, not steady-state.
-- **Per-gig timeout** — a hung gig is abandoned and its worker process is
+- **Per-sub-job timeout** — a hung sub-job is abandoned and its worker process is
   force-terminated, so one bad clip can't wedge a node forever.
 - **BrokenProcessPool recovery with dedup + refill** — when one worker crashes,
   *every* pending future cascades to ``BrokenProcessPool``. We mark them as
@@ -23,14 +23,14 @@ pipelines — spawn, IPC pipe, GPU/subprocess-teardown hangs):
   resources actually release.
 - **Abort-with-eviction under pressure** — an optional ``pause_cb`` lets the
   Runner signal "stop now" (e.g. at-field pause). Not-yet-started gigs are
-  cancelled and returned as ``status="requeue"`` (the Fixer returns them to
+  cancelled and returned as ``status="requeue"`` (the Coordinator returns them to
   pending without burning the retry budget); running gigs are left to finish.
 - **PYTHONPATH propagation** — Windows ``spawn`` starts fresh interpreters without
   the parent's ``sys.path``; we push the needed roots into the environment so
   children can import both ``kiroshi`` and the task module.
 
-Failures are never silent: every gig produces a result dict, and unrecoverable
-ones come back as ``{"status": "error", "error": ...}`` for the Fixer to re-queue.
+Failures are never silent: every sub-job produces a result dict, and unrecoverable
+ones come back as ``{"status": "error", "error": ...}`` for the Coordinator to re-queue.
 """
 from __future__ import annotations
 
@@ -104,7 +104,7 @@ def _run_one(payload: tuple[str, dict, int, float]) -> dict[str, Any]:
                 "metrics": result.get("metrics", {}),
                 "error": None,
             }
-            # attach the per-gig resource profile (empty dict if psutil absent)
+            # attach the per-sub-job resource profile (empty dict if psutil absent)
             proc_profile = profiler.stop()
             if proc_profile:
                 out["metrics"]["proc"] = proc_profile
@@ -127,7 +127,7 @@ def _err(subjob_id: str, msg: str) -> dict[str, Any]:
 
 
 def _requeue(subjob_id: str, reason: str) -> dict[str, Any]:
-    """An evicted gig: the Fixer returns it to ``pending`` without burning retries."""
+    """An evicted sub-job: the Coordinator returns it to ``pending`` without burning retries."""
     return {"subjob_id": subjob_id, "status": "requeue", "error": reason, "metrics": {}}
 
 
@@ -340,7 +340,7 @@ class LocalPool:
             elif not evicting:
                 refill()  # steady-state refill is instant (no stagger)
 
-            # per-gig timeout: abandon + kill, then carry on with a fresh pool
+            # per-sub-job timeout: abandon + kill, then carry on with a fresh pool
             if gig_timeout and inflight:
                 now = time.time()
                 if any(now - st > gig_timeout for _jid, st in inflight.values()):

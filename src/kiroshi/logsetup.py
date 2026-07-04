@@ -1,6 +1,6 @@
 """Terminal-output logging — tee every process's stdout/stderr to a log file.
 
-Operators (and the tray) want the full console history of a Fixer/Runner without
+Operators (and the tray) want the full console history of a Coordinator/Runner without
 having to have launched it from a terminal they kept open. So at startup each
 process mirrors its stdout+stderr into a per-process log file under the state
 dir's ``logs/`` folder, while still writing to the real console.

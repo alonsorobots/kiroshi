@@ -1,15 +1,15 @@
 """Task-code distribution for ``kiroshi join`` (PLAN §7.5, SECURITY.md §6.5).
 
-Lets a ``run --serve-task`` Fixer hand its task's source to a joining Runner so a
+Lets a ``run --serve-task`` Coordinator hand its task's source to a joining Runner so a
 new machine doesn't need a manual checkout. This is a **security-sensitive** path
-(a Fixer shipping code a Runner executes), so it is:
+(a Coordinator shipping code a Runner executes), so it is:
 
-  * **opt-in** — only a Fixer started with ``--serve-task`` serves anything, and
+  * **opt-in** — only a Coordinator started with ``--serve-task`` serves anything, and
     only a single-file, top-level task module (the safe, legible 80% case);
   * **consent-gated** — :func:`kiroshi.join` shows the SHA-256 and requires the
     operator to approve before the code is written or imported;
   * **hash-pinned** — the approved hash is recorded; a later mismatch is refused
-    until re-approved, so a Fixer (or MITM) can't swap code after consent.
+    until re-approved, so a Coordinator (or MITM) can't swap code after consent.
 
 Multi-module / package tasks are deliberately **not** served — pre-install them or
 use ``--task-repo`` (planned). This module only handles the single-file case.

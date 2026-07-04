@@ -11,10 +11,10 @@ A Kiroshi task is a **module-level** function (so it is picklable for the
 Return a dict. Conventional ``status`` values:
     - ``"ok"``       — completed successfully (default if status omitted)
     - ``"skipped"``  — nothing to do (e.g. output already exists)
-Raising an exception marks the gig failed; the Runner records the error and the
-Fixer re-queues it up to the retry budget.
+Raising an exception marks the sub-job failed; the Runner records the error and the
+Coordinator re-queues it up to the retry budget.
 
-The Fixer never imports the task — only Runners do (``kiroshi runner --task ...``).
+The Coordinator never imports the task — only Runners do (``kiroshi runner --task ...``).
 """
 from __future__ import annotations
 
@@ -25,10 +25,10 @@ TaskFn = Callable[[Dict[str, Any]], Dict[str, Any]]
 
 # The enumeration contract (see PLAN §7.5). A task module MAY define a
 # module-level ``enumerate_gigs(args: dict) -> Iterator[dict]`` that turns the
-# pass-through ``--`` args from ``kiroshi run`` into gigs. Each yielded gig is a
+# pass-through ``--`` args from ``kiroshi run`` into gigs. Each yielded sub-job is a
 # ``{"subjob_id": str, "spec": dict, "job"?: str}`` dict — exactly the shape
 # ``/seed`` and :meth:`JobStore.seed` accept. This lets a task own its own
-# fan-out (e.g. one source read -> a 4-fps and an 8-fps gig) which a generic
+# fan-out (e.g. one source read -> a 4-fps and an 8-fps sub-job) which a generic
 # ``--items`` globber can't infer.
 ENUMERATE_FN = "enumerate_gigs"
 EnumerateFn = Callable[[Dict[str, Any]], Iterator[Dict[str, Any]]]
@@ -40,7 +40,7 @@ EnumerateFn = Callable[[Dict[str, Any]], Iterator[Dict[str, Any]]]
 # (``kiroshi remote``/``doctor``) imports the module and calls it, which catches
 # the failure modes ``find_spec`` cannot: a LAZY import inside ``run()`` (a
 # dep present on the coordinator but missing on a stale node), a missing
-# repo-relative asset, or a broken native extension — before a single gig is
+# repo-relative asset, or a broken native extension — before a single sub-job is
 # leased, on the exact interpreter that will run the work.
 SELFTEST_FN = "selftest"
 SelfTestFn = Callable[[], None]

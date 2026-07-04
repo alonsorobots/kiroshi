@@ -5,7 +5,7 @@ only formal gigs could benefit from the per-disk budget. This module extracts
 it into a **standalone client** that *any* process (downloads, bulk transfers,
 GPU processors, ad-hoc scripts) can use to coordinate I/O across the whole mesh.
 
-Two budgets, both enforced by the Fixer (the only mesh-global arbiter):
+Two budgets, both enforced by the Coordinator (the only mesh-global arbiter):
 
 1. **Per-disk read budget** (existing, now exported): caps in-flight reads per
    spindle across the fleet. Avoids seek thrash on HDD arrays.
@@ -13,7 +13,7 @@ Two budgets, both enforced by the Fixer (the only mesh-global arbiter):
 2. **Global write/parity budget** (new): on parity-protected arrays (Unraid
    single/dual parity, RAID5/6), every array write RMWs through the parity
    spindle — a fleet-wide bottleneck. This caps concurrent *writes* globally
-   so non-gig workloads self-limit instead of pinning the parity disk to 100%.
+   so non-sub-job workloads self-limit instead of pinning the parity disk to 100%.
 
 Usage (any process, not just Kiroshi gigs)::
 
@@ -27,7 +27,7 @@ Usage (any process, not just Kiroshi gigs)::
     with rc.acquire(disk="disk3", mode="write"):
         ... write the file ...
 
-If no Fixer is reachable, ``acquire()`` is a no-op (fail-open) — the process
+If no Coordinator is reachable, ``acquire()`` is a no-op (fail-open) — the process
 runs without coordination but logs a warning. This ensures scripts work
 standalone; they just don't get contention protection.
 
@@ -35,10 +35,10 @@ Design principles:
 - **HW-config-gated**: read budgets and the parity-write semaphore are only
   active when the topology declares HDD/parity disks. NVMe-only nodes get
   no-op budgets (no seek penalty, no parity RMW).
-- **No shortcuts**: the Fixer is the single source of truth for in-flight
+- **No shortcuts**: the Coordinator is the single source of truth for in-flight
   counts. No client-side guessing.
 - **Idempotent + crash-safe**: if a client crashes, its acquired slots expire
-  (TTL) and are reclaimed — same pattern as gig leases.
+  (TTL) and are reclaimed — same pattern as sub-job leases.
 """
 from __future__ import annotations
 
@@ -53,7 +53,7 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 # Default TTL for a resource slot (seconds). If the holder crashes without
-# releasing, the Fixer reclaims after this. Matches the gig-lease default.
+# releasing, the Coordinator reclaims after this. Matches the sub-job-lease default.
 _DEFAULT_SLOT_TTL = 120.0
 # How long to block on acquire before timing out (seconds).
 _DEFAULT_ACQUIRE_TIMEOUT = 300.0
@@ -62,10 +62,10 @@ _POLL_INTERVAL = 0.5
 
 
 class ResourceClient:
-    """Client for the Fixer's mesh-global resource budget service.
+    """Client for the Coordinator's mesh-global resource budget service.
 
     Any process can construct one and call ``acquire()`` to coordinate I/O.
-    If the Fixer is unreachable, acquire is a no-op (fail-open).
+    If the Coordinator is unreachable, acquire is a no-op (fail-open).
     """
 
     def __init__(self, fixer: str, token: Optional[str] = None,
@@ -83,7 +83,7 @@ class ResourceClient:
         return {"Authorization": f"Bearer {self._token}"} if self._token else {}
 
     def _check_available(self) -> bool:
-        """One-time check: is the Fixer reachable? Cached."""
+        """One-time check: is the Coordinator reachable? Cached."""
         if self._available is not None:
             return self._available
         try:
@@ -94,7 +94,7 @@ class ResourceClient:
         except Exception:
             self._available = False
         if not self._available:
-            logger.warning("resource: Fixer at %s unreachable — acquire will "
+            logger.warning("resource: Coordinator at %s unreachable — acquire will "
                            "be a no-op (no contention protection)", self._fixer)
         return self._available
 
@@ -103,7 +103,7 @@ class ResourceClient:
         """Acquire a resource slot (read per-disk or write global-parity).
 
         Blocks until a slot is available or ``timeout`` seconds elapse. If the
-        Fixer is unreachable, returns immediately (fail-open).
+        Coordinator is unreachable, returns immediately (fail-open).
 
         Args:
             disk: The disk ID (for read mode) or None (for global write mode).
@@ -117,7 +117,7 @@ class ResourceClient:
 
     def _do_acquire(self, disk: Optional[str], mode: str,
                     timeout: float) -> Optional[str]:
-        """Actually acquire from the Fixer. Returns a slot_id or None (fail-open)."""
+        """Actually acquire from the Coordinator. Returns a slot_id or None (fail-open)."""
         if not self._check_available():
             return None
 
@@ -172,7 +172,7 @@ class ResourceClient:
             pass  # a missed renewal is fine as long as some succeed
 
     def _do_release(self, slot_id: Optional[str]) -> None:
-        """Release a slot back to the Fixer."""
+        """Release a slot back to the Coordinator."""
         if slot_id is None:
             return
         with self._lock:
@@ -193,8 +193,8 @@ class ResourceSlot:
 
     While held, a background thread RENEWS the slot at ~1/3 the TTL interval —
     so a long-running hold (a multi-minute download, a big file stage) keeps its
-    slot alive instead of being reaped by the Fixer's TTL and over-subscribed by
-    another client. Same pattern as gig-lease heartbeats.
+    slot alive instead of being reaped by the Coordinator's TTL and over-subscribed by
+    another client. Same pattern as sub-job-lease heartbeats.
     """
 
     def __init__(self, client: ResourceClient, disk: Optional[str],
@@ -227,5 +227,5 @@ class ResourceSlot:
 
     @property
     def granted(self) -> bool:
-        """True if the Fixer granted a slot. False if fail-open (no Fixer)."""
+        """True if the Coordinator granted a slot. False if fail-open (no Coordinator)."""
         return self._slot_id is not None

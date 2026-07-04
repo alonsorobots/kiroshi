@@ -1,8 +1,8 @@
 """Database migration: rename old Cyberpunk-schema tables/columns to operator vocab.
 
 Old schema (confusingly named):
-  - table ``jobs`` (PK ``job_id``, col ``grp``, col ``disk``) held **sub-jobs**
-  - table ``campaigns`` (PK ``grp``, col ``label``) held **jobs**
+  - table ``jobs`` (PK ``job_id``, col ``job``, col ``disk``) held **sub-jobs**
+  - table ``campaigns`` (PK ``job``, col ``label``) held **jobs**
 
 New schema (operator vocab):
   - table ``subjobs`` (PK ``subjob_id``, col ``job``, col ``disk``) — sub-jobs
@@ -40,9 +40,9 @@ def migrate(conn: sqlite3.Connection) -> bool:
 
     The migration:
       1. Create ``subjobs`` from old ``jobs`` (copy all columns, rename
-         job_id→subjob_id, grp→job).
+         job_id→subjob_id, job→job).
       2. Drop old ``jobs`` (now safe — subjobs has the data).
-      3. Create new ``jobs`` from old ``campaigns`` (rename grp→job).
+      3. Create new ``jobs`` from old ``campaigns`` (rename job→job).
       4. Drop old ``campaigns``.
       5. Rebuild indexes under new names.
       6. Bump PRAGMA user_version.
@@ -51,7 +51,7 @@ def migrate(conn: sqlite3.Connection) -> bool:
         return False
 
     # Detect which columns exist in the old jobs table (some pre-disk DBs
-    # don't have the 'disk' column; some pre-grp DBs don't have 'grp').
+    # don't have the 'disk' column; some pre-job DBs don't have 'job').
     old_cols = {r[1] for r in conn.execute("PRAGMA table_info(jobs)")}
     has_disk = "disk" in old_cols
     has_grp = "grp" in old_cols

@@ -56,7 +56,7 @@ _SMB_READY = False
 # of the file — a virus scanner, an indexer, the SMB server settling a handle from
 # a just-killed client, or (under at-least-once delivery) a second worker writing
 # the same output. Those locks clear in seconds, so we retry the commit with
-# jittered backoff instead of failing the whole gig on a transient "file in use".
+# jittered backoff instead of failing the whole sub-job on a transient "file in use".
 _COMMIT_ATTEMPTS = max(1, int(os.environ.get("KIROSHI_COMMIT_ATTEMPTS", "6")))
 _COMMIT_BASE_DELAY = float(os.environ.get("KIROSHI_COMMIT_BASE_DELAY", "0.5"))
 _COMMIT_MAX_DELAY = float(os.environ.get("KIROSHI_COMMIT_MAX_DELAY", "8.0"))

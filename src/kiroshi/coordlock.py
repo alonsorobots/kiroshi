@@ -1,4 +1,4 @@
-"""Machine-level exclusive lock for the coordinator (Fixer).
+"""Machine-level exclusive lock for the coordinator (Coordinator).
 
 ONE coordinator per machine is the core invariant of Kiroshi's architecture:
 a single brain enforces the mesh-global per-spindle NAS budget. Two coordinators

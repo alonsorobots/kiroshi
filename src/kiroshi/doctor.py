@@ -2,8 +2,8 @@
 
 Most "the mesh isn't working" incidents are environmental, not bugs in Kiroshi:
 a worker env missing a dependency, a NAS root that isn't visible from this logon
-session, a drive letter that an elevated/service process can't see, or a Fixer
-that moved IPs. Left undiagnosed, these burn the per-gig retry budget and surface
+session, a drive letter that an elevated/service process can't see, or a Coordinator
+that moved IPs. Left undiagnosed, these burn the per-sub-job retry budget and surface
 only as cryptic ``recent_errors`` after the fact.
 
 ``doctor`` reproduces, on the exact machine + interpreter that will run the
@@ -13,7 +13,7 @@ Runner, the things that actually break:
      as Windows Smart App Control refusing an unsigned ``.pyd``);
   2. the read root is listable and the write root is actually writable;
   3. drive-letter roots are flagged + their UNC target shown;
-  4. the Fixer is reachable (or discoverable via beacon).
+  4. the Coordinator is reachable (or discoverable via beacon).
 
 It prints a PASS/WARN/FAIL line per check and exits non-zero if anything is a
 hard FAIL, so it slots into a launch script or Scheduled Task as a gate.
@@ -82,7 +82,7 @@ def _check_task(rep: _Report, task_ref: Optional[str], syspath: list[str]) -> No
     # Deep check: run the task's selftest() on its fixture if it has one. This
     # exercises LAZY imports (deps imported inside run(), invisible to the
     # import above) + core compute on THIS interpreter — the exact drift that
-    # made a runner import fine yet fail every gig.
+    # made a runner import fine yet fail every sub-job.
     try:
         from .tasks import resolve_selftest
 
@@ -244,9 +244,9 @@ def _check_fixer(rep: _Report, fixer_url: Optional[str], auto: bool,
         url = discover_fixer(timeout=6.0)
         if not url:
             rep.line(_FAIL, "fixer discovery",
-                     "no beacon heard in 6s. Either no Fixer is running on this "
-                     "LAN (start it with: kiroshi fixer), OR the Fixer host is "
-                     "silently dropping UDP :8788 at the firewall. On the Fixer "
+                     "no beacon heard in 6s. Either no Coordinator is running on this "
+                     "LAN (start it with: kiroshi fixer), OR the Coordinator host is "
+                     "silently dropping UDP :8788 at the firewall. On the Coordinator "
                      "host, run (elevated): kiroshi firewall install")
             return
         rep.line(_OK, "fixer discovery", f"beacon -> {url}")
@@ -268,7 +268,7 @@ def _check_fixer(rep: _Report, fixer_url: Optional[str], auto: bool,
         hint = ""
         if "timed out" in emsg.lower() or "connectiontimeout" in emsg.lower().replace(" ", ""):
             hint = ("  hint: TCP timeout usually means Windows Firewall is dropping "
-                    "inbound on the Fixer host. On that host, run (elevated): "
+                    "inbound on the Coordinator host. On that host, run (elevated): "
                     "kiroshi firewall install")
         rep.line(_FAIL, "fixer reachable", f"{fixer_url}: {e}" + (f"\n{hint}" if hint else ""))
 

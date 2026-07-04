@@ -1,32 +1,32 @@
-"""Zero-config Fixer discovery over UDP broadcast.
+"""Zero-config Coordinator discovery over UDP broadcast.
 
-Hardcoding the Fixer's IP is fragile on real networks: home/office DHCP leases
+Hardcoding the Coordinator's IP is fragile on real networks: home/office DHCP leases
 drift, machines move subnets, and most users can't (or shouldn't have to) set up
 static IPs or router reservations. So Kiroshi ships a tiny zero-config discovery
 layer, the same idea as mDNS/Bonjour but dependency-free and Windows-friendly:
 
-Two complementary mechanisms run on the Fixer's UDP port
+Two complementary mechanisms run on the Coordinator's UDP port
 (``KIROSHI_DISCOVERY_PORT``, default 8788):
 
 - **Solicited (primary, firewall-friendly):** a client broadcasts a small query
-  datagram; the Fixer replies *unicast* to the sender. The query is outbound from
+  datagram; the Coordinator replies *unicast* to the sender. The query is outbound from
   the client (always allowed) and the reply rides back through the client's
-  stateful firewall state, so **clients need no inbound rule** — only the Fixer
+  stateful firewall state, so **clients need no inbound rule** — only the Coordinator
   opens one UDP port, exactly like its HTTP port.
-- **Passive (fallback):** the Fixer also periodically broadcasts the same beacon,
+- **Passive (fallback):** the Coordinator also periodically broadcasts the same beacon,
   which works on flat networks where inbound broadcast is allowed.
 
-Because the runner re-discovers whenever it loses the Fixer (see
+Because the runner re-discovers whenever it loses the Coordinator (see
 ``worker.Runner``), a DHCP lease change just causes a brief reconnect instead of
 a dead mesh. No router config, no static IPs, no central registry.
 
 Privacy / OSS-exposure hardening:
 - The beacon carries **no hostname and no secret** — only the magic string, the
   HTTP port, and a short random per-process fingerprint. An observer learns only
-  "a Kiroshi Fixer is at this IP:port", which is already inferable from the open
+  "a Kiroshi Coordinator is at this IP:port", which is already inferable from the open
   TCP port; it does **not** leak the machine's name.
 - It is **solicited by default** (reply only when asked) rather than constantly
-  broadcasting, so the Fixer isn't shouting its presence across the LAN. Passive
+  broadcasting, so the Coordinator isn't shouting its presence across the LAN. Passive
   broadcast is opt-in (``KIROSHI_DISCOVERY_BROADCAST=1``) for flat networks.
 - The mesh **token still gates everything** — discovery only finds the URL;
   joining requires the token, which never travels in the beacon.
@@ -102,7 +102,7 @@ def parse_beacon(data: bytes) -> Optional[dict]:
 
 
 class BeaconBroadcaster:
-    """Fixer-side discovery server: answers queries + periodically broadcasts.
+    """Coordinator-side discovery server: answers queries + periodically broadcasts.
 
     Binds the discovery UDP port and runs one thread that both (a) replies
     unicast to ``kiroshi-who?`` queries and (b) emits a periodic broadcast beacon
@@ -191,16 +191,16 @@ def check_singleton_fixer(
     timeout: float = 3.0,
     disc_port: Optional[int] = None,
 ) -> Optional[str]:
-    """Split-brain guard: is another discoverable Fixer already on this LAN?
+    """Split-brain guard: is another discoverable Coordinator already on this LAN?
 
-    Called during Fixer startup (before we bind our own beacon) to detect the
+    Called during Coordinator startup (before we bind our own beacon) to detect the
     common footgun of accidentally starting two Fixers on the same LAN — e.g.
     running ``kiroshi run --lan`` on a workstation while the persistent
     ``kiroshi-fixer`` service is up on the coordinator host. Two Fixers means
     two disjoint queues + two disjoint per-spindle disk budgets, so each
     happily saturates the shared NAS assuming the other doesn't exist.
 
-    Returns the reachable existing-Fixer URL if one is discoverable, else
+    Returns the reachable existing-Coordinator URL if one is discoverable, else
     ``None`` (safe to proceed). Uses the same solicited-reply mechanism as
     :func:`discover_fixer` so anything the runners would see, we see.
     """
@@ -211,7 +211,7 @@ def discover_fixer(
     timeout: float = 5.0,
     disc_port: Optional[int] = None,
 ) -> Optional[str]:
-    """Find the Fixer and return its base URL (``http://ip:port``), or ``None``.
+    """Find the Coordinator and return its base URL (``http://ip:port``), or ``None``.
 
     Actively solicits (broadcast query -> unicast reply, firewall-friendly) and
     simultaneously listens for passive broadcasts, retrying the query a few times

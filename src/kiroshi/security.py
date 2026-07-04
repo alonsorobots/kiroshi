@@ -1,7 +1,7 @@
-"""Mesh authentication — a shared bearer token gating the Fixer's HTTP API.
+"""Mesh authentication — a shared bearer token gating the Coordinator's HTTP API.
 
 Why this is mandatory (unlike at-field, which binds localhost and skips auth):
-Kiroshi is a *mesh*. The Fixer must bind a routable address so Runners on other
+Kiroshi is a *mesh*. The Coordinator must bind a routable address so Runners on other
 machines can reach it, which means the coordination API is exposed on the LAN.
 Every endpoint either hands out work to execute, accepts results, mutates the
 queue, or discloses topology (hostnames, file paths in error strings). On an
@@ -18,7 +18,7 @@ Token resolution (first hit wins):
     1. explicit argument / ``--token``
     2. ``KIROSHI_TOKEN`` env var
     3. token file in the state dir (``mesh.token``)
-    4. (Fixer only) auto-generate a strong token, persist it, and print it once
+    4. (Coordinator only) auto-generate a strong token, persist it, and print it once
 
 The token is compared in constant time. It is **never** placed in the discovery
 beacon (that is LAN-broadcast); cross-machine Runners receive it out-of-band
@@ -82,7 +82,7 @@ def resolve_token(explicit: Optional[str] = None) -> Optional[str]:
 
 def ensure_fixer_token(explicit: Optional[str] = None,
                        allow_insecure: bool = False) -> Optional[str]:
-    """Resolve the token for the Fixer, auto-generating + persisting if absent.
+    """Resolve the token for the Coordinator, auto-generating + persisting if absent.
 
     Returns ``None`` only when the operator explicitly opted out (``allow_insecure``
     with no explicit token) — used to run a wide-open dev mesh on a trusted LAN.
@@ -112,7 +112,7 @@ def token_matches(configured: Optional[str], presented: Optional[str]) -> bool:
 
 
 def prove(token: str, nonce: str) -> str:
-    """Return HMAC-SHA256(token, nonce) as hex — the Fixer's proof that it holds
+    """Return HMAC-SHA256(token, nonce) as hex — the Coordinator's proof that it holds
     the shared mesh token, without ever revealing the token itself."""
     return hmac.new(token.encode("utf-8"), nonce.encode("utf-8"),
                     "sha256").hexdigest()
@@ -120,8 +120,8 @@ def prove(token: str, nonce: str) -> str:
 
 def verify_proof(token: Optional[str], nonce: str, proof: Optional[str]) -> bool:
     """Constant-time check that ``proof`` is a valid HMAC of ``nonce`` under
-    ``token``. Used by a Runner to authenticate the *Fixer* (mutual auth) before
-    sending its bearer token or executing any leased gig. Fails closed."""
+    ``token``. Used by a Runner to authenticate the *Coordinator* (mutual auth) before
+    sending its bearer token or executing any leased sub-job. Fails closed."""
     if not token or not nonce or not proof:
         return False
     return hmac.compare_digest(prove(token, nonce), proof)

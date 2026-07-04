@@ -2,16 +2,16 @@
 
 When a mesh's shared storage is **many physical drives** (a NAS HDD array,
 optionally with an NVMe cache tier), peak throughput needs every spindle busy AND
-no spindle over-subscribed. That budget is **mesh-global** — only the Fixer sees
-the fleet-wide in-flight count per disk — so it lives here as config the Fixer
+no spindle over-subscribed. That budget is **mesh-global** — only the Coordinator sees
+the fleet-wide in-flight count per disk — so it lives here as config the Coordinator
 reads, and the coordinator enforces it at lease time (``JobStore.lease``).
 
 This module is **pure config + derivation**: it describes the topology and maps a
-gig to a disk. It does no I/O. The actual read/write happens in the task; dual-path
+sub-job to a disk. It does no I/O. The actual read/write happens in the task; dual-path
 routing (read direct / write cached) is N3. With no ``[[storage.disk]]`` config,
 ``load_topology()`` returns ``[]`` and everything is inert.
 
-Boundary: Kiroshi owns the topology + the per-spindle budget + gig→disk mapping +
+Boundary: Kiroshi owns the topology + the per-spindle budget + sub-job→disk mapping +
 leasing policy. Reading/writing the bytes stays in the job.
 """
 from __future__ import annotations
@@ -44,7 +44,7 @@ class DiskConfig:
     # On a parity-protected array (Unraid single/dual parity, RAID5/6), every
     # array write requires a read-modify-write through the parity spindle(s) —
     # a GLOBAL bottleneck, not per-disk. A single parity_protected=true disk
-    # in the topology turns on a fleet-wide write semaphore so non-gig workloads
+    # in the topology turns on a fleet-wide write semaphore so non-sub-job workloads
     # (downloads, bulk transfers) self-limit instead of thrashing the parity disk.
     parity_protected: bool = False
     write_concurrency: Optional[int] = None  # None -> 6 (measured optimal for RMW parity)
@@ -122,7 +122,7 @@ def global_write_concurrency(disks: list[DiskConfig]) -> int:
     return min(caps) if caps else 0
 
 
-# --------------------------------------------------------------- gig -> disk
+# --------------------------------------------------------------- sub-job -> disk
 _RANGE_RE = re.compile(r"^(.*?)(\d+)$")
 
 
@@ -140,7 +140,7 @@ def _expand_range(match: str) -> list[str]:
 
 
 def match_disk(haystack: str, match: str) -> bool:
-    """Does ``haystack`` (a gig's job_id / path text) belong to the disk with this
+    """Does ``haystack`` (a sub-job's job_id / path text) belong to the disk with this
     ``match`` rule? Supports a shard range (``shard_01..08``), a glob
     (``shard_0[1-8]*``), or a plain substring (``shard_01``)."""
     if not match:
@@ -154,7 +154,7 @@ def match_disk(haystack: str, match: str) -> bool:
 
 def derive_disk(job_id: str, spec: dict[str, Any],
                 disks: list[DiskConfig]) -> Optional[str]:
-    """Resolve which physical disk a gig's input lives on, or ``None`` if no rule
+    """Resolve which physical disk a sub-job's input lives on, or ``None`` if no rule
     matches (uncapped / inert). Matches against the job_id and common path fields in
     the spec, so it works whether the shard is in the job_id or in a ``src_path``."""
     if not disks:
@@ -172,13 +172,13 @@ def derive_disk(job_id: str, spec: dict[str, Any],
 
 
 def inject_roots(gigs: list[dict[str, Any]], disks: list[DiskConfig]) -> None:
-    """Augment each leased gig's spec with its disk's ``read``/``write`` roots
+    """Augment each leased sub-job's spec with its disk's ``read``/``write`` roots
     (dual-path routing, N3): the task then reads from the direct per-spindle share
     and writes to the cached share, without knowing the topology. In-place on the
-    freshly-loaded lease copy (the stored spec is untouched). Inert if the gig has
+    freshly-loaded lease copy (the stored spec is untouched). Inert if the sub-job has
     no disk or the disk declares no roots — the task falls back to the env roots.
 
-    If a gig arrives with ``disk=None`` (e.g. seeded under a misconfigured topology
+    If a sub-job arrives with ``disk=None`` (e.g. seeded under a misconfigured topology
     whose match rule was later fixed), re-derive the disk on the fly so a config
     fix takes effect without wiping + re-seeding the entire DB. Gigs that were
     *intentionally* inert (no matching rule) stay inert — ``derive_disk`` returns
@@ -188,7 +188,7 @@ def inject_roots(gigs: list[dict[str, Any]], disks: list[DiskConfig]) -> None:
     for g in gigs:
         did = g.get("disk")
         if did is None and disks:
-            # Re-derive: the gig was seeded when no disk rule matched (or the
+            # Re-derive: the sub-job was seeded when no disk rule matched (or the
             # topology has since changed). Only fires for untagged gigs —
             # already-tagged gigs pay zero cost.
             did = derive_disk(g.get("job_id", ""), g.get("spec") or {}, disks)

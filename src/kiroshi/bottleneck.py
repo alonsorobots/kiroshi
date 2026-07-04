@@ -163,7 +163,7 @@ def classify(sample: ResourceSample, ceilings: Optional[Ceilings] = None) -> Ver
     if pressures["gpu"] >= c.gpu_util_pct / 100.0:
         return Verdict(
             GPU_BOUND, "gpu", pressures,
-            hint="GPU is the bottleneck — add more GPU nodes or reduce GPU work per gig",
+            hint="GPU is the bottleneck — add more GPU nodes or reduce GPU work per sub-job",
             detail=f"GPU util {sample.gpu_util_pct:.0f}%")
 
     # 3. MEM pressure

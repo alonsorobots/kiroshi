@@ -1,4 +1,4 @@
-"""External-process I/O watcher — rolling-window observability for the Fixer.
+"""External-process I/O watcher — rolling-window observability for the Coordinator.
 
 Surfaces "which spindle is the wall" without manual ``iostat`` forensics. Samples
 per-disk I/O throughput at a fixed interval and maintains a rolling window so
@@ -13,7 +13,7 @@ On Linux (NAS), uses ``/proc/diskstats`` (zero-dependency, no iostat install
 needed). On Windows, uses ``wmic``/``typeperf`` as a fallback. If neither is
 available, the watcher is inert (returns empty data).
 
-The watcher runs in a background daemon thread inside the Fixer process,
+The watcher runs in a background daemon thread inside the Coordinator process,
 sampling every ``_SAMPLE_INTERVAL_S`` seconds and storing the last
 ``_WINDOW_S`` seconds of data in a ring buffer. The ``/resource/status``
 endpoint exposes the aggregated view.
@@ -154,7 +154,7 @@ class IOWatcher:
             try:
                 self._sample()
             except Exception:  # noqa: BLE001
-                pass  # watcher must never crash the Fixer
+                pass  # watcher must never crash the Coordinator
             self._stop.wait(_SAMPLE_INTERVAL_S)
 
     def _sample(self) -> None:
@@ -193,7 +193,7 @@ class IOWatcher:
 
     def _sample_windows(self) -> None:
         """Windows fallback using typeperf (coarse but built-in)."""
-        # typeperf is slow and heavyweight — skip for now. The Fixer runs on
+        # typeperf is slow and heavyweight — skip for now. The Coordinator runs on
         # the NAS (Linux) where /proc/diskstats is available. Windows nodes
         # don't typically need disk saturation monitoring (local NVMe).
         pass
