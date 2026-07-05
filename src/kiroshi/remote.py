@@ -433,7 +433,11 @@ def _resolve(args, cfg: MeshConfig) -> dict:
     write_root = args.write_root or hc.write_root or cfg.write_root
     token = security.resolve_token(args.token)
     syspath = list(args.syspath or [])
-    slug = "".join(c if c.isalnum() else "-" for c in (args.group or "runner")).strip("-")
+    # Name the durable Scheduled Task / launcher / log after the job (the
+    # `remote` subparser exposes --job, not --group; referencing a nonexistent
+    # attribute here crashed every `remote join`).
+    slug_src = getattr(args, "job", None) or getattr(args, "group", None) or "runner"
+    slug = "".join(c if c.isalnum() else "-" for c in slug_src).strip("-")
     return {
         "host": host,
         "ssh_target": ssh_target,
