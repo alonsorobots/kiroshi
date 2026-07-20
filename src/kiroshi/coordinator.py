@@ -29,7 +29,7 @@ _DASHBOARD = Path(__file__).parent / "dashboard" / "index.html"
 # probe, and the auth challenge (which is itself the authentication mechanism and
 # never reveals the token). Everything else requires the mesh token when set.
 _OPEN_PATHS = frozenset({"/", "/favicon.ico", "/healthz", "/auth/challenge",
-                         "/mesh/nas-cred"})
+                         "/mesh/nas-cred", "/atfield/event"})
 
 
 class SeedGig(BaseModel):
@@ -88,6 +88,29 @@ class HeartbeatReq(BaseModel):
     runner_id: str = "?"
     stats: dict[str, Any] = Field(default_factory=dict)
     heartbeat_interval: Optional[float] = None
+
+
+class AtFieldEventReq(BaseModel):
+    """A kill/pressure event pushed by an AT-Field instance on some host.
+
+    AT-Field discovers this coordinator's URL from the manifest Kiroshi's
+    own processreg.py already writes into AT-Field's client directory --
+    no new coupling on the AT-Field config side. ``host`` is trusted from
+    the payload (AT-Field doesn't share the mesh token); this endpoint is
+    intentionally low-stakes (append-only observability, no state mutation
+    beyond an insert) so that's an acceptable tradeoff rather than plumbing
+    a second auth scheme.
+    """
+
+    host: str
+    rule: Optional[str] = None
+    signal: Optional[str] = None
+    threshold: Optional[float] = None
+    action: Optional[str] = None
+    succeeded: Optional[bool] = None
+    kill_root: Optional[dict[str, Any]] = None
+    skipped_reason: Optional[str] = None
+    ts: Optional[float] = None
 
 
 class RequeueReq(BaseModel):
@@ -888,6 +911,19 @@ def create_app(
         extended = store.heartbeat(req.lease_id, ttl)
         return {"extended": extended, "ttl": ttl}
 
+    @app.post("/atfield/event")
+    def atfield_event(req: AtFieldEventReq) -> dict[str, Any]:
+        """Ingest a kill/pressure event pushed by AT-Field on some host.
+
+        Unauthenticated (see AtFieldEventReq docstring) and deliberately
+        low-ceremony: append-only, no cross-checks against runner state.
+        This is what lets ``/status`` explain a dead runner as "AT-Field
+        killed it for pagefile-pressure 4m ago" instead of a bare
+        heartbeat-timeout that looks identical to a crash or a wedge.
+        """
+        store.record_atfield_event(req.host, req.model_dump(exclude={"host"}))
+        return {"ok": True}
+
     @app.post("/requeue")
     def requeue(req: RequeueReq) -> dict[str, int]:
         n = store.requeue(tuple(req.states), reset_attempts=req.reset_attempts)
@@ -955,6 +991,10 @@ def create_app(
             }
         # Scheduling observability block: per-host grant ratio in the last ~120s.
         st["scheduling"] = _scheduling_summary(window_s=120.0)
+        # Recent AT-Field kill/pressure events across the mesh -- lets a dead
+        # runner be explained ("killed for pagefile-pressure") instead of
+        # looking like a bare heartbeat timeout.
+        st["atfield_events"] = store.recent_atfield_events(limit=20)
         groups = _groups_with_launch()
         enriched = enrich_status(
             st,

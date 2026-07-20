@@ -449,6 +449,14 @@ class Runner:
                     "task": self.task_ref,
                     "workers": self.workers,
                     "coordinator_url": self.coordinator_url,
+                    # AT-Field's generic event-webhook subscription convention
+                    # (see at-field's reporter.py / README "Presence detection
+                    # and event webhooks") -- any manifest under AT-Field's
+                    # clients/ dir carrying this field gets POSTed kill/pressure
+                    # events. Only set once a coordinator URL is actually known.
+                    "atfield_event_webhook": (
+                        f"{self.coordinator_url}/atfield/event" if self.coordinator_url else None
+                    ),
                     "log_path": current_log_path(),
                 },
                 on_stop=_on_stop,

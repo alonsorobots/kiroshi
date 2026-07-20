@@ -91,6 +91,25 @@ class JobStore:
                     label       TEXT,
                     created_at  REAL NOT NULL
                 );
+                -- AT-Field kill/pressure events, pushed in by each machine's
+                -- AT-Field instance (POST /atfield/event). Lets the coordinator
+                -- explain WHY a runner disappeared (killed for pagefile
+                -- pressure, say) instead of a heartbeat timeout looking
+                -- identical to a crash or a wedge.
+                CREATE TABLE IF NOT EXISTS atfield_events (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    host        TEXT,
+                    rule        TEXT,
+                    signal      TEXT,
+                    threshold   REAL,
+                    action      TEXT,
+                    succeeded   INTEGER,
+                    kill_pid    INTEGER,
+                    kill_name   TEXT,
+                    skipped_reason TEXT,
+                    ts          REAL NOT NULL,
+                    received_at REAL NOT NULL
+                );
                 """
             )
             # Column-level migration: if subjobs table existed without disk/job
@@ -115,6 +134,8 @@ class JobStore:
                 CREATE INDEX IF NOT EXISTS idx_subjobs_completed ON subjobs(completed_at);
                 CREATE INDEX IF NOT EXISTS idx_subjobs_job ON subjobs(job);
                 CREATE INDEX IF NOT EXISTS idx_subjobs_disk ON subjobs(disk);
+                CREATE INDEX IF NOT EXISTS idx_atfield_events_host ON atfield_events(host);
+                CREATE INDEX IF NOT EXISTS idx_atfield_events_ts ON atfield_events(ts);
                 """
             )
             self._conn.commit()
@@ -170,6 +191,42 @@ class JobStore:
             if cfg:
                 out[row["job"]] = cfg
         return out
+
+    # ------------------------------------------------------------ at-field
+    def record_atfield_event(self, host: str, event: dict[str, Any]) -> None:
+        """Persist one AT-Field kill/pressure event (POST /atfield/event)."""
+        kill_root = event.get("kill_root") or {}
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO atfield_events "
+                "(host, rule, signal, threshold, action, succeeded, kill_pid, "
+                " kill_name, skipped_reason, ts, received_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    host,
+                    event.get("rule"),
+                    event.get("signal"),
+                    event.get("threshold"),
+                    event.get("action"),
+                    1 if event.get("succeeded") else 0,
+                    kill_root.get("pid"),
+                    kill_root.get("name"),
+                    event.get("skipped_reason"),
+                    float(event.get("ts") or time.time()),
+                    time.time(),
+                ),
+            )
+            self._conn.commit()
+
+    def recent_atfield_events(self, limit: int = 50) -> list[dict[str, Any]]:
+        """Most recent AT-Field events across all hosts, newest first."""
+        rows = self._conn.execute(
+            "SELECT host, rule, signal, threshold, action, succeeded, kill_pid, "
+            "kill_name, skipped_reason, ts FROM atfield_events "
+            "ORDER BY ts DESC LIMIT ?",
+            (max(1, limit),),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     def seed(self, gigs: list[dict[str, Any]],
              job: Optional[str] = None,

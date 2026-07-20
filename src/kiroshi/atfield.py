@@ -1,13 +1,20 @@
-"""at-field awareness — let a Runner back off while the rig is being protected.
+"""at-field awareness — let a Runner back off while the rig is being protected
+or while a human is actively using it.
 
-at-field (the sibling GPU/thermal watchdog) signals "stop hammering this box" by
-writing a ``pause.sentinel`` file in its state dir whose first line is an ISO-8601
-expiry timestamp (an empty file means an indefinite pause). When that sentinel is
-active, a polite Runner should stop leasing new work and let the rig cool/recover
-rather than getting its whole process tree killed.
+at-field (the sibling GPU/thermal watchdog) exposes two SEPARATE sentinel
+files -- deliberately not one, see at-field's own ``service.py`` comment
+for why they must never be conflated:
 
-This is read-only and entirely optional: if at-field isn't installed, the sentinel
-never exists and ``pause_state()`` always reports "not paused".
+* ``pause.sentinel`` -- at-field's own self-pause (``atf pause``/``atf
+  unpause``), which suppresses AT-FIELD'S kill rules. First line is an
+  ISO-8601 expiry timestamp; an empty file means an indefinite pause.
+* ``presence.sentinel`` -- a read-only-by-consumers signal that a human is
+  currently at the keyboard/mouse (input-idle time below at-field's
+  configured threshold). Existence alone is the signal; no expiry, since
+  presence is continuously re-evaluated every tick, not scheduled.
+
+Both are read-only and entirely optional here: if at-field isn't installed,
+neither sentinel ever exists and both state functions report "no".
 """
 from __future__ import annotations
 
@@ -58,3 +65,20 @@ def pause_state() -> Tuple[bool, Optional[str]]:
 
 def is_paused() -> bool:
     return pause_state()[0]
+
+
+def presence_sentinel_path() -> Optional[Path]:
+    d = _state_dir()
+    return (d / "presence.sentinel") if d else None
+
+
+def is_present() -> bool:
+    """True if at-field reports a human is currently at this machine.
+
+    Unlike :func:`is_paused`, absence of at-field (or of the sentinel) means
+    "not present" (False) -- there is no fail-safe direction to prefer here
+    the way there is for pause (where "unparseable => paused" errs toward
+    politeness); the honest default when we don't know is "assume away."
+    """
+    p = presence_sentinel_path()
+    return p is not None and p.exists()
