@@ -322,11 +322,21 @@ def run_doctor(
     _check_coordlock(rep)
     _check_coordinator(rep, coordinator_url, auto, token)
 
+    _tail = (
+        "\nDebugging a storage/permission/NAS failure? Read AGENTS.md's "
+        "'Gotchas an agent MUST know' section FIRST -- it covers cache-vs-array "
+        "shares, filename collisions with Samba's fruit VFS, cross-session "
+        "process-listing unreliability, and more, before you spend hours on "
+        "client-side trial and error. `kiroshi capabilities --json` for the "
+        "machine-readable version."
+    )
     if rep.failed:
         print("\nRESULT: FAIL — fix the above before joining the mesh.", flush=True)
+        print(_tail, flush=True)
         return 1
     if rep.warned:
         print("\nRESULT: OK (with warnings).", flush=True)
+        print(_tail, flush=True)
         return 0
     print("\nRESULT: OK — ready to join.", flush=True)
     return 0

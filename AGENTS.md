@@ -195,8 +195,11 @@ def run(spec: dict) -> dict:
 - `kfs.exists(dst)`  → skip-if-output-exists idempotency
 - `kfs.open(path, "rb")`  → uniform local + UNC + mapped-drive
 - `kfs.walk(root)`  → streaming (huge SMB trees) with reconnect
-- `kfs.atomic_write(dst) as fh: fh.write(...)`  → crash-safe writes
-- `kfs.makedirs(dir)`  → make parents (atomic_write does NOT auto-mkdir)
+- `kfs.atomic_write(dst) as fh: fh.write(...)`  → crash-safe writes.
+  **Auto-creates the parent dir** (both branches call `makedirs(parent,
+  exist_ok=True)` internally) — you do NOT need to `kfs.makedirs()` first.
+- `kfs.makedirs(dir)`  → for when you need a directory to exist independent
+  of a write (e.g. before a `walk`/`listdir`); redundant before `atomic_write`
 - `kfs.backend(path)` / `kfs.smb_diagnostics(server)` for debugging
 
 **SMB creds for scheduled tasks / services** (no interactive session, no
@@ -361,3 +364,20 @@ storage topology lives on the persistent Coordinator once, so jobs inherit the
 8. **pytest may be broken** in a given env (`pluggy` missing). Test files here
    ship a zero-dependency `if __name__ == "__main__"` runner — invoke
    `python tests/test_X.py` and read the `N/N passed` line.
+9. **A "permission denied" on one share but not another can be a filename
+   collision, not an ACL problem.** `atomic_write`'s temp file is
+   `.{filename}.{uuid}.tmp` (both branches). If `filename` itself starts with
+   `_`, the temp name becomes `._filename...` — the exact macOS AppleDouble
+   sidecar convention. Samba shares with `vfs objects = ... fruit ...`
+   (common wherever a Mac Finder client also touches the share — check for
+   `.DS_Store` files as a tell) specially intercept `._*` names, producing a
+   spurious `STATUS_OBJECT_NAME_NOT_FOUND`/`Access denied`-shaped failure that
+   has nothing to do with the destination user's actual write permission.
+   Diagnosed by: `testparm -s` on the NAS showing `vfs objects` on the
+   failing share but not a working one, then reproducing with a realistic
+   (non-underscore-prefixed) filename. **When diagnosing a "permission"
+   failure on an Unraid/Samba share: check the NAS's own `testparm -s` and
+   filesystem (`stat`/`ls`, real file ownership) before concluding it's a
+   credential/ACL issue** — this is the fastest way to see the true cause,
+   and confirms/refutes a permission theory in one step instead of many
+   rounds of client-side trial and error.
