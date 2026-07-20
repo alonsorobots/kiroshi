@@ -193,6 +193,13 @@ class JobStore:
         return out
 
     # ------------------------------------------------------------ at-field
+    # Ring-buffer cap on the event log. The endpoint that feeds this is
+    # unauthenticated (AT-Field has no mesh token), so without a cap it's an
+    # unbounded-insert / disk-fill vector; and during a real pressure storm
+    # AT-Field legitimately fires dozens of events a minute. We only ever read
+    # the most-recent handful, so old rows have no value -- trim on insert.
+    _ATFIELD_EVENTS_CAP = 2000
+
     def record_atfield_event(self, host: str, event: dict[str, Any]) -> None:
         """Persist one AT-Field kill/pressure event (POST /atfield/event)."""
         kill_root = event.get("kill_root") or {}
@@ -215,6 +222,12 @@ class JobStore:
                     float(event.get("ts") or time.time()),
                     time.time(),
                 ),
+            )
+            # Trim to the newest _ATFIELD_EVENTS_CAP rows (by autoincrement id).
+            self._conn.execute(
+                "DELETE FROM atfield_events WHERE id <= "
+                "(SELECT MAX(id) FROM atfield_events) - ?",
+                (self._ATFIELD_EVENTS_CAP,),
             )
             self._conn.commit()
 

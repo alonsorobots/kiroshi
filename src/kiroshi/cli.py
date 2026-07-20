@@ -842,6 +842,12 @@ def _cmd_coordinator(args) -> int:
             "launch_command": _launch_command(),
             "host": args.host, "port": args.port,
             "dashboard": f"http://{current_host()}:{args.port}/",
+            # AT-Field's generic event-webhook subscription (see worker.py and
+            # at-field's reporter.py). The coordinator host runs AT-Field too;
+            # without this, a kill on the coordinator machine would be reported
+            # nowhere (only runner manifests advertised the webhook). Localhost
+            # since AT-Field is always co-located with the process it reports on.
+            "atfield_event_webhook": f"http://127.0.0.1:{args.port}/atfield/event",
             "log_path": current_log_path(),
             "auth": bool(token),
         },
