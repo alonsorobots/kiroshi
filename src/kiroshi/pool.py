@@ -118,6 +118,14 @@ def _run_one(payload: tuple[str, dict, int, float]) -> dict[str, Any]:
                     or (metrics.get("reason") if isinstance(metrics, dict) else None)
                     or "task reported error with no detail"
                 )
+            elif status == "requeue":
+                # Not a failure (jobstore.complete() clears this in the DB --
+                # "error is cleared, not a fault"), but still worth carrying
+                # through this intermediate result for in-flight visibility
+                # (e.g. a runner's own log/print) -- unlike the error/failed
+                # case, don't synthesize a placeholder if the task didn't
+                # give one; a requeue needs no explanation to be valid.
+                error = result.get("error")
             out = {
                 "subjob_id": subjob_id,
                 "status": status,
