@@ -72,6 +72,25 @@ def test_eol_only_change_reads_clean(repo: Path):
     assert codefinger.has_real_changes(str(repo)) is False
 
 
+def test_real_change_with_crlf_rewrite_reads_dirty(repo: Path):
+    # The exact production failure: a file whose endings ALSO flip LF->CRLF but
+    # that has a genuine content edit too. `git diff --quiet --ignore-cr-at-eol`
+    # wrongly reported this CLEAN on the real repo (it suppresses diff
+    # generation, so the ignore flag isn't honored for the exit code); the
+    # `--name-only` primitive must still see the content change. This guards
+    # against ever regressing back to the --quiet approach.
+    (repo / "a.txt").write_bytes(b"line1\r\nCHANGED\r\nline3\r\n")
+    assert codefinger.has_real_changes(str(repo)) is True
+
+
+def test_detector_is_deterministic_across_repeated_calls(repo: Path):
+    # The --quiet approach returned different answers on repeated calls / across
+    # process contexts for the same tree. The result must be stable.
+    (repo / "a.txt").write_bytes(b"line1\nCHANGED\nline3\n")
+    results = {codefinger.has_real_changes(str(repo)) for _ in range(5)}
+    assert results == {True}
+
+
 def test_untracked_file_reads_clean(repo: Path):
     # Every research repo has scratch/output/.pyc lying around; those must
     # never block a launch.

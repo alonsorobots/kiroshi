@@ -36,32 +36,47 @@ def has_real_changes(root: str) -> bool:
     """True iff ``root`` has uncommitted changes to TRACKED files that are
     real content differences -- NOT untracked files, NOT EOL/CRLF noise.
 
-    ``git status --porcelain`` (used by fingerprint_repos' dirty flag) is the
-    WRONG signal for a launch gate: it flags untracked scratch/output/.pyc
-    (every research repo has these) and CRLF<->LF line-ending artifacts (a
-    persistent condition on our Windows runners). Gating on that with no
-    override would refuse to start every runner, forever.
+    ``git status --porcelain`` (used originally by fingerprint_repos' dirty
+    flag) is the WRONG signal for a launch gate: it flags untracked
+    scratch/output/.pyc (every research repo has these) and CRLF<->LF
+    line-ending artifacts (a persistent condition on our Windows runners).
+    Gating on that with no override would refuse to start every runner.
 
-    ``git diff --quiet HEAD`` compares tracked working-tree content to HEAD:
-    it ignores untracked files entirely, and git normalizes line endings at
-    the content level so pure EOL noise reads as clean. ``--ignore-cr-at-eol``
-    is belt-and-suspenders for the CRLF case. Exit code: 0 = clean, 1 = real
-    changes. A missing/unusable git (returns None from _git-style call) is
-    treated as CLEAN -- we never invent dirtiness we can't verify, matching
-    how the remote preflight treats an unverifiable SHA as advisory.
+    ``git diff --name-only --ignore-cr-at-eol HEAD`` is the correct primitive:
+    it lists only TRACKED files whose *content* differs from HEAD (untracked
+    files never appear in a diff), and ``--ignore-cr-at-eol`` makes pure EOL
+    noise drop out of the list. Non-empty stdout => a real, tracked change.
+
+    Why NOT ``git diff --quiet ... HEAD`` (the obvious choice, and what this
+    used to do): ``--quiet`` implies ``--exit-code`` and suppresses actual
+    diff generation, so it does NOT reliably honor ``--ignore-cr-at-eol`` when
+    computing its exit status. Empirically (Demeter, held-frames campaign) it
+    returned exit 0 = "clean" for a file with a genuine 8-add/85-del change,
+    and its result even varied between an interactive shell and a Python
+    subprocess for the same tree -- a nondeterministic gate that silently
+    passed uncommitted code through, which is exactly the failure this gate
+    exists to prevent. ``--name-only`` forces the content comparison, so the
+    ignore flag is honored and the result is stable across calls.
+
+    stdout carries only changed filenames (git's CRLF-renormalization
+    "warning: ..." lines go to stderr, which we do not read). A git error /
+    non-repo (nonzero return) is treated as CLEAN -- we never invent dirtiness
+    we cannot verify, matching how the remote preflight treats an unverifiable
+    SHA as advisory.
     """
     git = r"C:\Program Files\Git\bin\git.exe"
     if not os.path.isfile(git):
         git = "git"
     try:
         r = subprocess.run(
-            [git, "-C", root, "diff", "--quiet", "--ignore-cr-at-eol", "HEAD"],
+            [git, "-C", root, "diff", "--name-only", "--ignore-cr-at-eol", "HEAD"],
             capture_output=True, text=True, timeout=8, check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
         return False  # can't verify -> don't block
-    # git diff --quiet: 0 = no diff, 1 = diff present, >1 = error (treat as clean)
-    return r.returncode == 1
+    if r.returncode != 0:
+        return False  # git error / not a repo -> can't verify -> don't block
+    return bool((r.stdout or "").strip())
 
 
 def dirty_repos(extra_syspath: Optional[list[str]] = None) -> list[str]:
