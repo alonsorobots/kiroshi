@@ -317,9 +317,26 @@ class Runner:
         return Path(appstate.state_dir()) / "worker_tuning" / f"{safe}.json"
 
     # ------------------------------------------------------ reproducibility gate
-    def _dirty_repos(self) -> list[str]:
-        from .codefinger import dirty_repos
-        return dirty_repos(self.extra_syspath)
+    def _closure_problems(self) -> list[str]:
+        """Uncommitted files in the task's import closure -- the code that will
+        ACTUALLY run (the task module + the local modules it transitively
+        imports, in the task repo AND the kiroshi framework). NOT a whole-repo
+        check: an unrelated edit elsewhere in a research monorepo does not
+        block, but an UNTRACKED local module the task imports does. See
+        codefinger.dirty_import_closure."""
+        from .codefinger import dirty_import_closure
+        import kiroshi as _kir
+        task_module = self.task_ref.split(":", 1)[0]
+        # FIRST-PARTY roots only: the task's own import roots plus the kiroshi
+        # source root. Deliberately NOT the full sys.path -- that includes
+        # site-packages/stdlib, and walking those would (a) explode the closure
+        # into every third-party dep and (b) flag vendored files (a .venv can
+        # even live inside a repo) as "untracked". Third-party deps are pinned
+        # by the environment, not the git tree, so a module that only resolves
+        # under site-packages simply drops out of the closure.
+        kiroshi_src = os.path.dirname(os.path.dirname(os.path.abspath(_kir.__file__)))
+        search_roots = list(self.extra_syspath) + [kiroshi_src]
+        return dirty_import_closure(task_module, search_roots)
 
     def _await_clean_tree(self) -> None:
         """Phase 6 reproducibility gate: refuse to run uncommitted code.
@@ -327,28 +344,32 @@ class Runner:
         A runner must execute committed code, or the mesh silently runs
         whatever local edits happen to be on this box -- exactly the drift
         that made "which code is actually running?" unanswerable during the
-        held-frames campaign. On a dirty tree we deliberately do NOT exit: a
+        held-frames campaign. On a dirty closure we deliberately do NOT exit: a
         silent process death under Task Scheduler is its own invisible-failure
         trap (a runner that "just isn't there"). Instead we BLOCK, log loudly,
         and re-check -- so the runner stays visibly alive and self-heals the
-        moment the operator commits. Detection ignores untracked files and
-        EOL/CRLF noise (see codefinger.has_real_changes); only REAL tracked
-        changes block. No override, by design -- commit is the way forward.
+        moment the operator commits.
+
+        Scope is the task's IMPORT CLOSURE, not the whole repo: only files the
+        running code actually imports gate the launch (untracked-module-in-the-
+        path fails; an unrelated committed-or-not sibling does not). No
+        override, by design -- commit is the way forward.
         """
         warned = False
         while not self._draining:
-            dirty = self._dirty_repos()
-            if not dirty:
+            problems = self._closure_problems()
+            if not problems:
                 if warned and not self.quiet:
-                    print("[runner] working tree clean now -- proceeding.", flush=True)
+                    print("[runner] import closure clean now -- proceeding.", flush=True)
                 return
             # Always print (even under --quiet): a blocked runner producing no
             # work must never be silent, or it looks identical to a crash.
             print(
-                f"[runner] REFUSING to start: uncommitted changes in "
-                f"{', '.join(dirty)}. Runs must be reproducible -- commit + push "
-                f"so every runner executes known code. Blocking until clean "
-                f"(re-checking every {_DIRTY_RECHECK_S:.0f}s; commit to proceed).",
+                f"[runner] REFUSING to start: task import closure has "
+                f"uncommitted code: {', '.join(problems)}. Runs must be "
+                f"reproducible -- commit + push so every runner executes known "
+                f"code. Blocking until clean (re-checking every "
+                f"{_DIRTY_RECHECK_S:.0f}s; commit to proceed).",
                 file=sys.stderr, flush=True,
             )
             warned = True

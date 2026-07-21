@@ -115,6 +115,72 @@ def test_dirty_repos_empty_when_clean(repo: Path):
     assert codefinger.dirty_repos([str(repo)]) == [] or "repo" not in codefinger.dirty_repos([str(repo)])
 
 
+# ------------------------------------------------------------ import-closure gate
+@pytest.fixture()
+def task_repo(tmp_path: Path) -> Path:
+    """A committed repo laid out like a task: a task module that imports two
+    local modules, one of which we'll leave untracked."""
+    root = tmp_path / "taskrepo"
+    (root / "pkg").mkdir(parents=True)
+    _run_git(root, "init", "-q")
+    _run_git(root, "config", "user.email", "t@t")
+    _run_git(root, "config", "user.name", "t")
+    (root / "pkg" / "__init__.py").write_bytes(b"")
+    (root / "pkg" / "task.py").write_bytes(
+        b"import os\nfrom helper import work\nfrom pkg.util import thing\n\ndef run(spec):\n    return work()\n")
+    (root / "helper.py").write_bytes(b"def work():\n    return 1\n")
+    (root / "pkg" / "util.py").write_bytes(b"thing = 2\n")
+    _run_git(root, "add", "-A")
+    _run_git(root, "commit", "-qm", "init")
+    return root
+
+
+def test_closure_resolves_task_and_local_imports(task_repo: Path):
+    files = codefinger.import_closure_files("pkg.task", [str(task_repo)])
+    names = {os.path.basename(f) for f in files}
+    assert "task.py" in names        # the task module
+    assert "helper.py" in names      # top-level `from helper import work`
+    assert "util.py" in names        # `from pkg.util import thing`
+
+
+def test_closure_ignores_stdlib(task_repo: Path):
+    files = codefinger.import_closure_files("pkg.task", [str(task_repo)])
+    # `import os` resolves to stdlib, which is not under search_roots -> excluded
+    assert not any("os.py" == os.path.basename(f) for f in files)
+
+
+def test_closure_clean_when_all_committed(task_repo: Path):
+    assert codefinger.dirty_import_closure("pkg.task", [str(task_repo)]) == []
+
+
+def test_closure_flags_untracked_imported_module(task_repo: Path):
+    # helper.py is imported by the task; make it untracked (rm from git, keep file)
+    _run_git(task_repo, "rm", "--cached", "-q", "helper.py")
+    _run_git(task_repo, "commit", "-qm", "drop helper from git")
+    probs = codefinger.dirty_import_closure("pkg.task", [str(task_repo)])
+    assert any("helper.py" in p and "untracked" in p for p in probs)
+
+
+def test_closure_flags_modified_imported_module(task_repo: Path):
+    (task_repo / "helper.py").write_bytes(b"def work():\n    return 999\n")
+    probs = codefinger.dirty_import_closure("pkg.task", [str(task_repo)])
+    assert any("helper.py" in p and "modified" in p for p in probs)
+
+
+def test_closure_ignores_unrelated_edit(task_repo: Path):
+    # A file the task never imports, edited -> must NOT block (the whole point).
+    (task_repo / "unrelated_paper.txt").write_bytes(b"draft edits\n")
+    _run_git(task_repo, "add", "unrelated_paper.txt")
+    _run_git(task_repo, "commit", "-qm", "add paper")
+    (task_repo / "unrelated_paper.txt").write_bytes(b"draft edits CHANGED\n")
+    assert codefinger.dirty_import_closure("pkg.task", [str(task_repo)]) == []
+
+
+def test_closure_empty_when_task_unresolvable(task_repo: Path):
+    # Can't find the task module -> no closure -> don't invent problems.
+    assert codefinger.dirty_import_closure("does.not.exist", [str(task_repo)]) == []
+
+
 # ------------------------------------------------------------ runner startup gate
 def test_runner_blocks_then_proceeds(monkeypatch):
     """_await_clean_tree loops while dirty and returns the moment it's clean,
@@ -130,11 +196,11 @@ def test_runner_blocks_then_proceeds(monkeypatch):
     # Dirty for the first two checks, clean on the third.
     calls = {"n": 0}
 
-    def fake_dirty():
+    def fake_problems():
         calls["n"] += 1
-        return ["repo"] if calls["n"] < 3 else []
+        return ["pmbpe:src/x.py (untracked)"] if calls["n"] < 3 else []
 
-    r._dirty_repos = fake_dirty  # type: ignore[method-assign]
+    r._closure_problems = fake_problems  # type: ignore[method-assign]
 
     sleeps: list[float] = []
     monkeypatch.setattr(worker.time, "sleep", lambda s: sleeps.append(s))
@@ -153,11 +219,11 @@ def test_runner_gate_returns_when_draining(monkeypatch):
     r._draining = False
     r.quiet = True
 
-    def fake_dirty():
+    def fake_problems():
         r._draining = True  # simulate SIGINT arriving mid-block
-        return ["repo"]
+        return ["pmbpe:src/x.py (untracked)"]
 
-    r._dirty_repos = fake_dirty  # type: ignore[method-assign]
+    r._closure_problems = fake_problems  # type: ignore[method-assign]
     monkeypatch.setattr(worker.time, "sleep", lambda s: None)
 
     r._await_clean_tree()  # returns because loop condition is `not self._draining`
