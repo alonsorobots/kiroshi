@@ -168,7 +168,15 @@ class WorkerTuner:
         self.enabled = True
 
         if headroom < self.DANGER:
-            new_target = max(self.floor, math.ceil(self.target * self.DECREASE_FACTOR))
+            # Multiplicative decrease that ALWAYS moves down by at least 1
+            # until the floor. Note ``math.ceil(n * 0.75) == n`` for small n
+            # (e.g. n=3 -> ceil(2.25)=3), which would plateau the descent and
+            # never reach the floor under sustained danger -- the exact
+            # failure this controller exists to prevent. ``math.floor`` plus
+            # the explicit ``target - 1`` cap guarantees monotonic progress
+            # to the floor for ANY DECREASE_FACTOR in (0, 1).
+            scaled = math.floor(self.target * self.DECREASE_FACTOR)
+            new_target = max(self.floor, min(self.target - 1, scaled))
             if new_target < self.target:
                 self.target = new_target
             self._last_decrease_at = now

@@ -104,6 +104,43 @@ def test_danger_never_undercuts_the_floor():
     assert t.target >= 2
 
 
+def test_sustained_danger_actually_reaches_the_floor():
+    """The invariant the original tests missed: sustained danger must
+    converge ALL THE WAY to the floor, not plateau above it. With the
+    original ceil()-based multiplicative decrease, ceil(3*0.75)==3 froze the
+    descent at 3 forever -- so on a machine where even 3 workers is too many
+    (Aurora's regime this session), the controller could never shrink enough
+    and would lean on AT-Field killing repeatedly, defeating its purpose."""
+    for floor in (1, 2):
+        t = _tuner(floor=floor, ceiling=8)
+        now = 0.0
+        while t.target < 8:
+            now += 1.0
+            t.step(0.9, now=now)
+        assert t.target == 8
+        # Sustained deep danger must drive it exactly to the floor.
+        for _ in range(30):
+            now += 1.0
+            t.step(0.01, now=now)
+        assert t.target == floor, f"expected descent to floor {floor}, stuck at {t.target}"
+
+
+def test_each_danger_step_strictly_decreases_until_floor():
+    """No plateau at any intermediate value -- every danger tick above the
+    floor must move the target strictly down."""
+    t = _tuner(floor=1, ceiling=8)
+    now = 0.0
+    while t.target < 8:
+        now += 1.0
+        t.step(0.9, now=now)
+    prev = t.target
+    while t.target > t.floor:
+        now += 1.0
+        t.step(0.01, now=now)
+        assert t.target < prev, f"danger tick did not decrease: stuck at {t.target}"
+        prev = t.target
+
+
 def test_decrease_starts_cooldown_blocking_immediate_regrowth():
     t = _tuner(floor=1, ceiling=8)
     now = 0.0
