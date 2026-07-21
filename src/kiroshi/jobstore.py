@@ -41,10 +41,24 @@ class LeaseResult:
 
 
 class JobStore:
+    # How long a (host, subjob_id) pair is excluded from THAT SAME host's own
+    # future /lease selections after a "requeue" result. Purely an
+    # anti-thrash measure, not a correctness mechanism: without it, a host
+    # that structurally cannot complete a gig (e.g. a GPU generation that
+    # can't decode a given codec) can immediately re-lease the exact same
+    # gig it just gave back, in a tight loop, wasting cycles instead of
+    # letting a DIFFERENT host (unaffected by the cooldown) pick it up on
+    # its own next poll. Deliberately in-memory/ephemeral, not persisted --
+    # a coordinator restart just resets to today's behavior (no cooldowns),
+    # which is safe, just briefly less efficient.
+    REQUEUE_COOLDOWN_S = 30.0
+
     def __init__(self, db_path: str, max_retries: int = 3):
         self.db_path = db_path
         self.max_retries = max_retries
         self._lock = threading.Lock()
+        # {f"{host}:{subjob_id}": cooldown_until_epoch}
+        self._requeue_cooldowns: dict[str, float] = {}
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
@@ -56,6 +70,26 @@ class JobStore:
             "regexp", 2,
             lambda pat, val: 1 if val is not None and re.search(pat, val) else 0)
         self._init_schema()
+
+    def _exclude_cooldown(self, rows: list, host: str, now: float) -> list:
+        """Drop rows this SPECIFIC host recently requeued and is still in
+        cooldown for. Other hosts are entirely unaffected -- this only ever
+        prevents a host from immediately re-leasing what it just gave back,
+        never blocks a gig from being leased by anyone else."""
+        if not self._requeue_cooldowns:
+            return rows
+        return [
+            r for r in rows
+            if self._requeue_cooldowns.get(f"{host}:{r['subjob_id']}", 0.0) <= now
+        ]
+
+    def _prune_requeue_cooldowns(self, now: float) -> None:
+        """Drop expired cooldown entries. Called under self._lock (already
+        held by every caller) whenever a new one is added -- cheap, since
+        this only runs on actual requeue events, not the hot lease path."""
+        expired = [k for k, until in self._requeue_cooldowns.items() if until <= now]
+        for k in expired:
+            del self._requeue_cooldowns[k]
 
     def _init_schema(self) -> None:
         with self._lock:
@@ -374,12 +408,20 @@ class JobStore:
                             ids=[]))
 
             if not disk_concurrency:
+                # Over-fetch a small buffer beyond `capacity` so that filtering
+                # out this host's own recently-requeued gigs (below) still
+                # leaves enough candidates to fill the request in the common
+                # case (no cooldowns active) without an extra round-trip. If
+                # cooldowns eat into the buffer on a given call, this host
+                # simply gets fewer than `capacity` that round -- self-corrects
+                # next poll, no gig is ever lost or double-counted.
+                fetch_limit = capacity + min(50, max(10, capacity))
                 cur = self._conn.execute(
                     "SELECT subjob_id, spec, disk FROM subjobs WHERE state='pending'"
                     + job_sql + " ORDER BY created_at LIMIT ?",
-                    job_args + (capacity,),
+                    job_args + (fetch_limit,),
                 )
-                rows = cur.fetchall()
+                rows = self._exclude_cooldown(cur.fetchall(), host, now)[:capacity]
                 if not rows:
                     return LeaseResult(
                         lease_id=None, gigs=[],
@@ -429,6 +471,10 @@ class JobStore:
                 + job_sql + " ORDER BY created_at",
                 job_args,
             ).fetchall()
+            # Already fetched every pending row for this job -- filtering out
+            # this host's own recently-requeued gigs costs nothing extra here
+            # (unlike the plain path above, no re-fetch/buffer needed).
+            rows = self._exclude_cooldown(rows, host, now)
             if not rows:
                 return LeaseResult(
                     lease_id=None, gigs=[],
@@ -603,6 +649,14 @@ class JobStore:
                     )
                     done += 1
                 elif status == "requeue":
+                    # Look up the host that held this lease BEFORE clearing it,
+                    # to record the anti-thrash cooldown below. Set at lease
+                    # time (_finalize_lease) and untouched by the UPDATE that
+                    # follows (only lease_id/lease_deadline/attempts change).
+                    row = self._conn.execute(
+                        "SELECT host FROM subjobs WHERE subjob_id=?", (jid,)
+                    ).fetchone()
+                    host = row["host"] if row else None
                     # Eviction: return to pending immediately. Undo the lease's
                     # attempts+1 so a flapping pressure pause can't exhaust the
                     # retry budget and mark a healthy sub-job 'failed' — the task was
@@ -614,6 +668,9 @@ class JobStore:
                         (jid,),
                     )
                     requeued += 1
+                    if host:
+                        self._requeue_cooldowns[f"{host}:{jid}"] = now + self.REQUEUE_COOLDOWN_S
+                        self._prune_requeue_cooldowns(now)
                 else:
                     row = self._conn.execute(
                         "SELECT attempts FROM subjobs WHERE subjob_id=?", (jid,)
