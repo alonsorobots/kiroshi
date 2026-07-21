@@ -1037,9 +1037,32 @@ def _io_preflight(args, read_root=None, write_root=None,
     return None
 
 
+def _require_clean_launch(args) -> Optional[int]:
+    """Phase 6 reproducibility gate for the launch/seed side: refuse if the
+    task or kiroshi repo has REAL uncommitted changes, so a job's outputs are
+    always traceable to a commit. No override, by design -- commit + push
+    (so runners pull known code) first. Detection ignores untracked files and
+    EOL/CRLF noise (see codefinger.has_real_changes). Returns an exit code to
+    propagate, or None when clean."""
+    from .codefinger import dirty_repos
+    dirty = dirty_repos(getattr(args, "syspath", None))
+    if dirty:
+        print(
+            f"[kiroshi] refusing: uncommitted changes in {', '.join(dirty)}. "
+            f"Job runs must be reproducible -- commit + push (so runners pull "
+            f"known code) before launching.",
+            file=sys.stderr,
+        )
+        return 2
+    return None
+
+
 def _cmd_run(args) -> int:
     from .runjob import run_job
 
+    rc = _require_clean_launch(args)
+    if rc is not None:
+        return rc
     rr, wr, s_src, s_dst = _sample_gig_io(getattr(args, "jobs", None))
     rc = _io_preflight(args, read_root=args.read_root or rr,
                        write_root=args.write_root or wr,
@@ -1155,6 +1178,9 @@ def _resolve_origin(cli_arg: Optional[str]) -> Optional[dict]:
 def _cmd_seed(args) -> int:
     import requests
 
+    rc = _require_clean_launch(args)
+    if rc is not None:
+        return rc
     args.coordinator = _resolve_coordinator_arg(args.coordinator)
     headers = _auth_headers(args)
     origin = _resolve_origin(getattr(args, "origin", None))

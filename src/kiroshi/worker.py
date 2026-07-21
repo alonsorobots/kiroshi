@@ -13,6 +13,7 @@ import os
 import re
 import signal
 import socket
+import sys
 import time
 import uuid
 from typing import Any, Optional
@@ -23,6 +24,9 @@ from . import security
 from .discovery import discover_coordinator
 from .pool import LocalPool
 from .worker_tuner import WorkerTuner
+
+# How often the Phase 6 clean-tree gate re-checks a dirty working tree.
+_DIRTY_RECHECK_S = 15.0
 
 # Sentinel values (any of these, or an empty url) trigger zero-config discovery.
 _AUTO = {"auto", "discover", "", "auto://", "http://auto"}
@@ -312,6 +316,44 @@ class Runner:
         safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", self.task_ref)
         return Path(appstate.state_dir()) / "worker_tuning" / f"{safe}.json"
 
+    # ------------------------------------------------------ reproducibility gate
+    def _dirty_repos(self) -> list[str]:
+        from .codefinger import dirty_repos
+        return dirty_repos(self.extra_syspath)
+
+    def _await_clean_tree(self) -> None:
+        """Phase 6 reproducibility gate: refuse to run uncommitted code.
+
+        A runner must execute committed code, or the mesh silently runs
+        whatever local edits happen to be on this box -- exactly the drift
+        that made "which code is actually running?" unanswerable during the
+        held-frames campaign. On a dirty tree we deliberately do NOT exit: a
+        silent process death under Task Scheduler is its own invisible-failure
+        trap (a runner that "just isn't there"). Instead we BLOCK, log loudly,
+        and re-check -- so the runner stays visibly alive and self-heals the
+        moment the operator commits. Detection ignores untracked files and
+        EOL/CRLF noise (see codefinger.has_real_changes); only REAL tracked
+        changes block. No override, by design -- commit is the way forward.
+        """
+        warned = False
+        while not self._draining:
+            dirty = self._dirty_repos()
+            if not dirty:
+                if warned and not self.quiet:
+                    print("[runner] working tree clean now -- proceeding.", flush=True)
+                return
+            # Always print (even under --quiet): a blocked runner producing no
+            # work must never be silent, or it looks identical to a crash.
+            print(
+                f"[runner] REFUSING to start: uncommitted changes in "
+                f"{', '.join(dirty)}. Runs must be reproducible -- commit + push "
+                f"so every runner executes known code. Blocking until clean "
+                f"(re-checking every {_DIRTY_RECHECK_S:.0f}s; commit to proceed).",
+                file=sys.stderr, flush=True,
+            )
+            warned = True
+            time.sleep(_DIRTY_RECHECK_S)
+
     # --------------------------------------------------------------- loop
     def run(self) -> None:
         self._install_signal_handlers()
@@ -322,6 +364,12 @@ class Runner:
         # so spawned workers inherit the Job Object membership.
         from .proctree import bind_job_object
         bind_job_object()
+        # Phase 6: block here until the working tree has no real uncommitted
+        # changes -- before we resolve a coordinator, register, or spawn any
+        # worker. Self-healing (proceeds on commit); never exits silently.
+        self._await_clean_tree()
+        if self._draining:
+            return
         self._resolve_coordinator()  # block until a Coordinator is known (auto mode)
         # Provision NAS creds into env BEFORE the pool spawns, so every worker
         # inherits them and smbprotocol authenticates directly in any logon type.
