@@ -98,15 +98,35 @@ def _run_one(payload: tuple[str, dict, int, float]) -> dict[str, Any]:
         profiler.start()
         try:
             result = _TASK_FN(spec) or {}  # type: ignore[misc]
+            status = result.get("status", "ok")
+            metrics = result.get("metrics", {})
+            # A task that reports failure WITHOUT raising (the pattern
+            # gpu_4fps.run()'s hardened wrapper uses: catch everything, return
+            # status="error" with the traceback in metrics) still needs a real
+            # top-level error string -- the coordinator persists only that
+            # string on the failed path (jobstore stores str(error), so a bare
+            # None became the literal "None", and the traceback in metrics was
+            # dropped entirely). Prefer the task's own error; otherwise
+            # synthesize one from wherever tasks conventionally stash it, so a
+            # real failure is never recorded as "None".
+            error = None
+            if status in ("error", "failed"):
+                error = (
+                    result.get("error")
+                    or (metrics.get("traceback") if isinstance(metrics, dict) else None)
+                    or (metrics.get("error") if isinstance(metrics, dict) else None)
+                    or (metrics.get("reason") if isinstance(metrics, dict) else None)
+                    or "task reported error with no detail"
+                )
             out = {
                 "subjob_id": subjob_id,
-                "status": result.get("status", "ok"),
-                "metrics": result.get("metrics", {}),
-                "error": None,
+                "status": status,
+                "metrics": metrics,
+                "error": error,
             }
             # attach the per-sub-job resource profile (empty dict if psutil absent)
             proc_profile = profiler.stop()
-            if proc_profile:
+            if proc_profile and isinstance(out["metrics"], dict):
                 out["metrics"]["proc"] = proc_profile
             return out
         except Exception as e:  # noqa: BLE001 - report everything

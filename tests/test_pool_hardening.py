@@ -183,3 +183,47 @@ def test_run_batch_max_pending_callable_exception_falls_back_to_default():
         assert all(r["status"] == "ok" for r in results)
     finally:
         pool.close()
+
+
+# ------------------------------------ _run_one error surfacing (not swallowing)
+def test_run_one_surfaces_task_reported_error_without_raising():
+    """A task that RETURNS status=error (rather than raising) -- the pattern
+    gpu_4fps.run()'s hardened wrapper uses -- must produce a real top-level
+    error string, not None. Otherwise the coordinator persists str(None) =
+    "None" and the traceback (which tasks stash in metrics) is lost."""
+    import kiroshi.pool as pool
+
+    orig = pool._TASK_FN
+    try:
+        # (a) task sets a top-level error explicitly
+        pool._TASK_FN = lambda spec: {"status": "error", "error": "boom explicit", "metrics": {}}
+        out = pool._run_one(("g1", {}, 0, 0.0))
+        assert out["status"] == "error"
+        assert out["error"] == "boom explicit"
+
+        # (b) gpu_4fps convention: no top-level error, traceback in metrics
+        pool._TASK_FN = lambda spec: {"status": "error", "metrics": {"traceback": "Traceback: kaboom"}}
+        out = pool._run_one(("g2", {}, 0, 0.0))
+        assert out["status"] == "error"
+        assert "kaboom" in out["error"]  # synthesized from metrics, never None
+
+        # (c) error status with truly no detail -> a placeholder, never "None"
+        pool._TASK_FN = lambda spec: {"status": "error", "metrics": {}}
+        out = pool._run_one(("g3", {}, 0, 0.0))
+        assert out["status"] == "error"
+        assert out["error"] and out["error"] != "None"
+        assert str(out["error"]).lower() != "none"
+
+        # (d) success path is unaffected: no error, status preserved
+        pool._TASK_FN = lambda spec: {"status": "ok", "metrics": {"n": 1}}
+        out = pool._run_one(("g4", {}, 0, 0.0))
+        assert out["status"] == "ok"
+        assert out["error"] is None
+
+        # (e) skipped is not an error -> no synthesized error string
+        pool._TASK_FN = lambda spec: {"status": "skipped", "metrics": {"reason": "exists"}}
+        out = pool._run_one(("g5", {}, 0, 0.0))
+        assert out["status"] == "skipped"
+        assert out["error"] is None
+    finally:
+        pool._TASK_FN = orig
