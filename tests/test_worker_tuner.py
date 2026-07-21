@@ -237,3 +237,65 @@ def test_max_pending_cap_trickle_when_braking():
     t = _tuner(floor=1, ceiling=6)
     t._braking = True
     assert t.max_pending_cap(default_cap=12) == 1
+
+
+# --------------------------------------------------------------- maybe_resize
+class _FakePool:
+    def __init__(self, workers: int):
+        self.workers = workers
+        self.resize_calls: list[int] = []
+
+    def resize(self, n: int) -> None:
+        self.resize_calls.append(n)
+        self.workers = n
+
+
+def test_maybe_resize_growth_is_rate_limited():
+    t = _tuner(floor=1, ceiling=8)
+    t.enabled = True
+    t.target = 4
+    pool = _FakePool(workers=1)
+    t._last_resize_at = 100.0
+    import kiroshi.worker_tuner as wt
+    orig_time = wt.time.time
+    try:
+        wt.time.time = lambda: 100.0 + 1.0  # well within MIN_RESIZE_INTERVAL_S
+        assert t.maybe_resize(pool) is False
+        assert pool.workers == 1  # unchanged -- growth deferred
+    finally:
+        wt.time.time = orig_time
+
+
+def test_maybe_resize_shrink_is_never_rate_limited():
+    """The exact bug found during live verification: a shrink arriving right
+    after a growth resize must apply immediately, not wait out
+    MIN_RESIZE_INTERVAL_S -- "fast to shrink" must hold at the actuation
+    layer, not just in the state machine's own target value."""
+    t = _tuner(floor=1, ceiling=8)
+    t.enabled = True
+    t.target = 2
+    pool = _FakePool(workers=6)
+    t._last_resize_at = 100.0  # a resize "just happened"
+    import kiroshi.worker_tuner as wt
+    orig_time = wt.time.time
+    try:
+        wt.time.time = lambda: 100.0 + 1.0  # 1s later -- well inside the interval
+        assert t.maybe_resize(pool) is True
+        assert pool.workers == 2  # applied immediately despite the interval
+    finally:
+        wt.time.time = orig_time
+
+
+def test_maybe_resize_no_op_when_disabled_or_already_at_target():
+    t = _tuner(floor=1, ceiling=8)
+    t.target = 4
+    pool = _FakePool(workers=1)
+
+    t.enabled = False
+    assert t.maybe_resize(pool) is False
+    assert pool.workers == 1
+
+    t.enabled = True
+    pool2 = _FakePool(workers=4)
+    assert t.maybe_resize(pool2) is False  # already at target
+    assert pool2.resize_calls == []

@@ -210,16 +210,25 @@ class WorkerTuner:
         return self.step(headroom, time.time())
 
     def maybe_resize(self, pool) -> bool:
-        """Apply ``self.target`` to ``pool`` if it differs and enough time
-        has passed since the last rebuild (independent thrash guard on top
-        of the state machine's own hysteresis/cooldown). Returns True if a
-        resize happened."""
+        """Apply ``self.target`` to ``pool`` if it differs. Returns True if a
+        resize happened.
+
+        The ``MIN_RESIZE_INTERVAL_S`` thrash guard applies ONLY to growth.
+        Shrinking must never be rate-limited: the whole point of "fast to
+        shrink" is that a pool sitting at a too-high process count while
+        real danger is measured must come down immediately, not wait out an
+        interval meant to stop rapid *growth* churn. (The mid-batch brake in
+        ``max_pending_cap`` already provides a faster, sub-interval reaction
+        by freezing new submissions -- this is the structural follow-through,
+        which must not lag behind it.)
+        """
         if not self.enabled:
             return False
         if pool.workers == self.target:
             return False
         now = time.time()
-        if now - self._last_resize_at < self.MIN_RESIZE_INTERVAL_S:
+        shrinking = self.target < pool.workers
+        if not shrinking and now - self._last_resize_at < self.MIN_RESIZE_INTERVAL_S:
             return False
         pool.resize(self.target)
         self._last_resize_at = now
