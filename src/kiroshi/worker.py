@@ -10,6 +10,7 @@ Graceful drain on Ctrl-C / SIGTERM: finish + report the current batch, then exit
 from __future__ import annotations
 
 import os
+import re
 import signal
 import socket
 import time
@@ -21,6 +22,7 @@ import requests
 from . import security
 from .discovery import discover_coordinator
 from .pool import LocalPool
+from .worker_tuner import WorkerTuner
 
 # Sentinel values (any of these, or an empty url) trigger zero-config discovery.
 _AUTO = {"auto", "discover", "", "auto://", "http://auto"}
@@ -301,6 +303,15 @@ class Runner:
         })
         self._registered = bool(ok)
 
+    # ----------------------------------------------------------- tuning
+    def _tuner_cache_path(self):
+        # Machine-local (appstate.state_dir() is per-machine), so keying by
+        # task_ref alone is enough -- no need to also fold in the host.
+        from . import appstate
+        from pathlib import Path
+        safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", self.task_ref)
+        return Path(appstate.state_dir()) / "worker_tuning" / f"{safe}.json"
+
     # --------------------------------------------------------------- loop
     def run(self) -> None:
         self._install_signal_handlers()
@@ -315,15 +326,29 @@ class Runner:
         # Provision NAS creds into env BEFORE the pool spawns, so every worker
         # inherits them and smbprotocol authenticates directly in any logon type.
         self._bootstrap_nas_creds()
+
+        # Phase 3 adaptive ramping: the operator's --workers becomes the
+        # CEILING the tuner will grow to, not a fixed value. One synchronous
+        # headroom probe up front decides the starting size -- if AT-Field
+        # isn't reachable, the tuner disables itself for the run and we start
+        # at the full requested count (today's behavior, unchanged). If it
+        # IS reachable, we deliberately start low (from the tuner's own
+        # floor/cache logic) rather than slamming the machine immediately.
+        tuner = WorkerTuner(floor=1, ceiling=self.workers, cache_path=self._tuner_cache_path())
+        tuner.step(tuner.poll_headroom(), time.time())
+        initial_workers = tuner.target if tuner.enabled else self.workers
+
         if not self.quiet:
+            tuning_note = "auto-tuning" if tuner.enabled else "static (AT-Field unreachable)"
             print(
-                f"[runner] {self.runner_id} on {self.host}: {self.workers} workers, "
+                f"[runner] {self.runner_id} on {self.host}: {initial_workers} workers "
+                f"({tuning_note}, ceiling {self.workers}), "
                 f"capacity {self.capacity}, task {self.task_ref}, coordinator {self.coordinator_url}",
                 flush=True,
             )
         pool = LocalPool(
             task_ref=self.task_ref,
-            workers=self.workers,
+            workers=initial_workers,
             extra_syspath=self.extra_syspath,
             item_retries=self.item_retries,
             item_backoff=self.item_backoff,
@@ -346,10 +371,13 @@ class Runner:
                     self._register()
                 if self._check_atfield_pause():
                     continue
+                # Lease against the CURRENT (possibly throttled-down) pool
+                # size, not the operator's ceiling -- don't over-lease work
+                # to a runner that's currently backed off under pressure.
                 lease = self._post(
                     "/lease",
                     {"runner_id": self.runner_id, "host": self.host,
-                     "capacity": min(self.capacity, self.workers * 2),
+                     "capacity": min(self.capacity, pool.workers * 2),
                      "heartbeat_interval": self.heartbeat_interval,
                      "job": self.job},
                 )
@@ -367,6 +395,14 @@ class Runner:
                     continue
 
                 def _hb() -> None:
+                    # Fast mid-batch pressure brake: re-check headroom on the
+                    # same cadence as the heartbeat and arm/disarm the
+                    # max_pending cap accordingly (see WorkerTuner.max_pending_cap).
+                    # This is what catches a burst of unusually heavy gigs
+                    # landing together within a single batch, faster than
+                    # waiting for the next between-batch AIMD step.
+                    if tuner.enabled:
+                        tuner.mid_batch_check()
                     if lease_id:
                         from .hostsample import sample_host
                         self._post("/heartbeat", {
@@ -376,12 +412,16 @@ class Runner:
                             "stats": {
                                 "job": self.job,
                                 "resources": sample_host(root_pid=os.getpid()),
+                                "workers_active": pool.workers,
+                                "workers_ceiling": self.workers,
+                                "tuning_enabled": bool(tuner.enabled),
                             },
                         })
 
+                default_max_pending = pool.workers * 2
                 results = pool.run_batch(
                     gigs,
-                    max_pending=self.workers * 2,
+                    max_pending=(lambda: tuner.max_pending_cap(default_max_pending)),
                     gig_timeout=self.gig_timeout,
                     heartbeat_cb=_hb,
                     hb_interval=self.heartbeat_interval,
@@ -394,6 +434,16 @@ class Runner:
                     ev = sum(1 for r in results if r["status"] == "requeue")
                     extra = f", {ev} evicted" if ev else ""
                     print(f"[runner] batch {len(gigs)} done ({ok} ok{extra})", flush=True)
+
+                # Between-batch: run_batch() has returned, so there is
+                # ZERO in-flight work right now -- the only point in the loop
+                # where resizing the pool (a tree-kill + respawn) is
+                # completely lossless. See WorkerTuner / LocalPool.resize.
+                if tuner.enabled:
+                    tuner.update_between_batches()
+                    if tuner.maybe_resize(pool) and not self.quiet:
+                        print(f"[runner] auto-tuned to {pool.workers} workers "
+                              f"(ceiling {self.workers})", flush=True)
         finally:
             pool.close()
             if reg is not None:

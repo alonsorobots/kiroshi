@@ -100,3 +100,86 @@ def test_pool_pause_cb_evicts_queued_keeps_running():
         assert elapsed < 15.0
     finally:
         pool.close()
+
+
+# ---------------------------------------------------- resize() (Phase 3: WorkerTuner)
+def test_pool_resize_changes_worker_count_and_no_op_when_unchanged():
+    from kiroshi.pool import LocalPool
+
+    pool = LocalPool(task_ref="examples.sleep_task:run", workers=2)
+    try:
+        assert pool.workers == 2
+        old_pool_obj = pool._pool
+
+        pool.resize(2)  # same size -> no-op, must NOT rebuild
+        assert pool._pool is old_pool_obj
+
+        pool.resize(4)
+        assert pool.workers == 4
+        assert pool._pool is not old_pool_obj  # rebuilt
+
+        # Confirm the resized pool is actually usable (not left half-torn-down).
+        results = pool.run_batch(
+            [{"subjob_id": f"g{i}", "spec": {"seconds": 0.05}} for i in range(4)],
+            max_pending=4, hb_interval=30.0,
+        )
+        assert len(results) == 4
+        assert all(r["status"] == "ok" for r in results)
+
+        pool.resize(1)
+        assert pool.workers == 1
+    finally:
+        pool.close()
+
+
+# ------------------------------------------ dynamic max_pending (Phase 3: fast brake)
+def test_run_batch_max_pending_accepts_live_callable():
+    """A callable max_pending must be re-resolved each refill -- lowering it
+    mid-batch stops new submissions without cancelling in-flight work (the
+    fast pressure brake), as opposed to pause_cb's hard eviction."""
+    from kiroshi.pool import LocalPool
+
+    pool = LocalPool(task_ref="examples.sleep_task:run", workers=4)
+    try:
+        cap = {"v": 4}
+
+        def dynamic_cap() -> int:
+            return cap["v"]
+
+        # 8 gigs, cap starts at 4. Drop the cap to 1 shortly after start so we
+        # can observe that refill() picks up the new (lower) value on its next
+        # call instead of continuing to submit up to the original cap.
+        def dropper():
+            time.sleep(0.1)
+            cap["v"] = 1
+
+        import threading
+        threading.Thread(target=dropper, daemon=True).start()
+
+        gigs = [{"subjob_id": f"g{i}", "spec": {"seconds": 0.3}} for i in range(8)]
+        results = pool.run_batch(gigs, max_pending=dynamic_cap, hb_interval=30.0)
+
+        # No gig lost or duplicated regardless of exact timing of the cap drop.
+        assert len(results) == 8
+        assert all(r["status"] == "ok" for r in results)
+    finally:
+        pool.close()
+
+
+def test_run_batch_max_pending_callable_exception_falls_back_to_default():
+    """A misbehaving tuner (raises) must never take the pool down with it."""
+    from kiroshi.pool import LocalPool
+
+    pool = LocalPool(task_ref="examples.sleep_task:run", workers=2)
+    try:
+        def broken_cap() -> int:
+            raise RuntimeError("tuner exploded")
+
+        results = pool.run_batch(
+            [{"subjob_id": f"g{i}", "spec": {"seconds": 0.05}} for i in range(3)],
+            max_pending=broken_cap, hb_interval=30.0,
+        )
+        assert len(results) == 3
+        assert all(r["status"] == "ok" for r in results)
+    finally:
+        pool.close()

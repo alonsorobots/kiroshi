@@ -40,7 +40,7 @@ import subprocess
 import sys
 import time
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional, Union
 
 try:
     from concurrent.futures.process import BrokenProcessPool
@@ -247,18 +247,51 @@ class LocalPool:
             self._hard_terminate(self._pool)
             self._pool = None
 
+    def resize(self, workers: int) -> None:
+        """Change the process count and rebuild the pool at the new size.
+
+        Only safe to call with NO in-flight work (tree-kills the current
+        pool). The runner's lease->run_batch->complete loop already
+        guarantees this between batches -- see WorkerTuner in worker.py,
+        which is the only caller and only calls this between `run_batch`
+        calls, never during one.
+        """
+        n = max(1, workers)
+        if n == self.workers:
+            return
+        self.workers = n
+        self._rebuild()
+
     # --------------------------------------------------------------- run batch
     def run_batch(
         self,
         gigs: Iterable[dict[str, Any]],
-        max_pending: Optional[int] = None,
+        max_pending: Optional[Union[int, Callable[[], int]]] = None,
         gig_timeout: Optional[float] = None,
         heartbeat_cb: Optional[Callable[[], None]] = None,
         hb_interval: float = 30.0,
         pause_cb: Optional[Callable[[], bool]] = None,
     ) -> list[dict[str, Any]]:
         queue = list(gigs)
-        max_pending = max_pending or max(1, self.workers * 2)
+        default_max_pending = max(1, self.workers * 2)
+
+        # ``max_pending`` may be a live callable (e.g. a WorkerTuner's current
+        # in-flight cap) instead of a fixed int -- the fast mid-batch pressure
+        # brake. ``refill()`` re-resolves it on every call (every loop
+        # iteration, via the completion-wait below), so lowering it mid-batch
+        # simply stops new submissions and lets in-flight gigs drain -- no
+        # cancellation, no lost work, no pool rebuild.
+        def resolve_max_pending() -> int:
+            if max_pending is None:
+                return default_max_pending
+            if callable(max_pending):
+                try:
+                    v = int(max_pending())
+                except Exception:
+                    return default_max_pending
+                return max(1, v)
+            return max(1, max_pending)
+
         idx = 0
         results: list[dict[str, Any]] = []
         inflight: dict[Any, list] = {}  # future -> [subjob_id, submit_time]
@@ -279,9 +312,10 @@ class LocalPool:
 
         def refill(stagger: float = 0.0) -> None:
             n = 0
-            while len(inflight) < max_pending and submit_next():
+            cap = resolve_max_pending()
+            while len(inflight) < cap and submit_next():
                 n += 1
-                if stagger and n < max_pending:
+                if stagger and n < cap:
                     time.sleep(stagger)
 
         # Staggered COLD START: space the initial submissions so worker init (task
