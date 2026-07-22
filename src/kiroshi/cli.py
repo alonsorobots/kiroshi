@@ -591,11 +591,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     pnc.add_argument("--ssh-target", default=None,
                      help="(rotate) ssh destination the coordinator reaches the NAS "
                           "as root, e.g. an ~/.ssh/config alias ('nas') or "
-                          "'root@192.168.50.69'. Required for rotate.")
+                          "'root@<nas-ip>'. Required for rotate.")
     pnc.add_argument("--verify-root", default=None,
                      help="(rotate, optional) a UNC path to confirm the mesh SMB "
                           "path authenticates after rotating, e.g. "
-                          r"'\\192.168.50.69\pipe_nvme'.")
+                          r"'\\<nas-host>\<share>'.")
 
     # ---- service (NSSM persistence) ----
     psvc = sub.add_parser("service",

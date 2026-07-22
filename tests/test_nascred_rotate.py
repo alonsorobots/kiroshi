@@ -85,12 +85,12 @@ def _probe_with(monkeypatch, raiser):
     monkeypatch.setattr(kfs, "have_creds", lambda s: True)
     monkeypatch.setattr(kfs, "_smbclient", lambda: type("SC", (), {"delete_session": staticmethod(lambda s: None)})())
     monkeypatch.setattr(kfs, "_ensure_session", raiser)
-    return kfs.smb_auth_probe("192.168.50.69")
+    return kfs.smb_auth_probe("192.0.2.1")
 
 
 def test_probe_none_when_no_creds(monkeypatch):
     monkeypatch.setattr(kfs, "have_creds", lambda s: False)
-    assert kfs.smb_auth_probe("192.168.50.69") is None
+    assert kfs.smb_auth_probe("192.0.2.1") is None
 
 
 def test_probe_ok(monkeypatch):

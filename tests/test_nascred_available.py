@@ -38,10 +38,10 @@ def _patch_status(monkeypatch, present, servers):
 
 
 def test_available_true_when_secret_stored(monkeypatch):
-    _patch_status(monkeypatch, present=True, servers=["192.168.50.69"])
+    _patch_status(monkeypatch, present=True, servers=["192.0.2.1"])
     with _client() as c:
         r = c.get("/mesh/nas-cred/available",
-                  params={"server": "192.168.50.69"}, headers=_hdr()).json()
+                  params={"server": "192.0.2.1"}, headers=_hdr()).json()
         assert r["available"] is True
 
 
@@ -51,7 +51,7 @@ def test_available_true_via_default_fallback(monkeypatch):
     _patch_status(monkeypatch, present=False, servers=["default"])
     with _client() as c:
         r = c.get("/mesh/nas-cred/available",
-                  params={"server": "192.168.50.69"}, headers=_hdr()).json()
+                  params={"server": "192.0.2.1"}, headers=_hdr()).json()
         assert r["available"] is True
 
 
