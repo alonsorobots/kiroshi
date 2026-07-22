@@ -752,6 +752,16 @@ class JobStore:
             self._conn.commit()
         return {"done": done, "requeued": requeued, "failed": failed}
 
+    # A single UPDATE over every matching row (thousands, on a busy campaign)
+    # holds the write lock -- and therefore self._lock, which every lease()/
+    # heartbeat() call also needs -- for the whole operation. On 2026-07-22 a
+    # ~9k-row requeue held the coordinator unresponsive (healthz + every
+    # runner's lease call timed out) for 10+ minutes. Batching bounds how long
+    # any single call holds the lock: each chunk commits and releases before
+    # the next, so a lease()/heartbeat() queued behind it gets in between
+    # batches instead of waiting for the entire requeue to finish.
+    _REQUEUE_BATCH = 500
+
     def requeue(self, states: tuple[str, ...] = ("failed",),
                 reset_attempts: bool = True) -> int:
         """Return gigs in the given states to ``pending``. Returns # requeued.
@@ -761,6 +771,12 @@ class JobStore:
         root cause — without re-seeding under fresh ``subjob_id``s. ``leased`` is a
         valid target too, to forcibly reclaim gigs from a wedged runner without
         waiting out the lease TTL.
+
+        Processed in bounded batches (``_REQUEUE_BATCH`` rows/commit) so a
+        large requeue can't monopolize the coordinator -- see the class-level
+        note. Each batch is its own short transaction; a crash mid-requeue
+        leaves already-processed rows pending (safe: they'll just be requeued
+        again on retry, not lost or double-counted).
         """
         states = tuple(states) or ("failed",)
         valid = {"failed", "leased", "pending", "done"}
@@ -769,15 +785,22 @@ class JobStore:
             return 0
         placeholders = ",".join("?" for _ in states)
         attempts_clause = ", attempts=0" if reset_attempts else ""
-        with self._lock:
-            cur = self._conn.execute(
-                f"UPDATE subjobs SET state='pending', lease_id=NULL, runner_id=NULL, "
-                f"leased_at=NULL, lease_deadline=NULL, error=NULL{attempts_clause} "
-                f"WHERE state IN ({placeholders})",
-                states,
-            )
-            self._conn.commit()
-            return cur.rowcount
+        sql = (
+            f"UPDATE subjobs SET state='pending', lease_id=NULL, runner_id=NULL, "
+            f"leased_at=NULL, lease_deadline=NULL, error=NULL{attempts_clause} "
+            f"WHERE subjob_id IN (SELECT subjob_id FROM subjobs "
+            f"WHERE state IN ({placeholders}) LIMIT ?)"
+        )
+        total = 0
+        while True:
+            with self._lock:
+                cur = self._conn.execute(sql, (*states, self._REQUEUE_BATCH))
+                self._conn.commit()
+                n = cur.rowcount
+            total += max(n, 0)
+            if n < self._REQUEUE_BATCH:
+                break
+        return total
 
     def cancel(self, job: str, *, purge: bool = False) -> dict[str, int]:
         """Cancel a job's queued work. Deletes its ``pending`` + ``leased`` gigs
