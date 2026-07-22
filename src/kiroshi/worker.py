@@ -530,6 +530,20 @@ class Runner:
         self._last_progress_at = time.time()
         self._start_watchdog()
 
+        # Startup orphan sweep: reclaim per-sub-job capture/marker files a
+        # PREVIOUS process left behind with no chance to clean up itself --
+        # a hard-killed worker (taskkill /F /T) or this runner's own watchdog
+        # os._exit both skip every finally/__exit__, so nothing but a fresh
+        # process's startup sweep ever reclaims them. Sized from gig_timeout
+        # when set (a stale marker outlives its own subjob-timeout many times
+        # over); best-effort, never fatal.
+        try:
+            from . import subjob_capture
+            sweep_age = max(1800.0, 2.0 * self.gig_timeout) if self.gig_timeout else 1800.0
+            subjob_capture.sweep_stale(sweep_age)
+        except Exception:  # noqa: BLE001
+            pass
+
         # Phase 3 adaptive ramping: the operator's --workers becomes the
         # CEILING the tuner will grow to, not a fixed value. One synchronous
         # headroom probe up front decides the starting size -- if AT-Field
@@ -617,6 +631,11 @@ class Runner:
                         tuner.mid_batch_check()
                     if lease_id:
                         from .hostsample import sample_host
+                        from . import subjob_capture
+                        try:
+                            in_flight = subjob_capture.list_inflight()
+                        except Exception:  # noqa: BLE001
+                            in_flight = []
                         self._post("/heartbeat", {
                             "lease_id": lease_id,
                             "runner_id": self.runner_id,
@@ -627,6 +646,7 @@ class Runner:
                                 "workers_active": pool.workers,
                                 "workers_ceiling": self.workers,
                                 "tuning_enabled": bool(tuner.enabled),
+                                "in_flight": in_flight,
                             },
                         })
 
@@ -640,6 +660,12 @@ class Runner:
                     pause_cb=self._pause_active,
                 )
                 self._last_progress_at = time.time()  # a full batch just finished
+                try:
+                    from . import subjob_capture
+                    subjob_capture.sweep_stale(
+                        max(1800.0, 2.0 * self.gig_timeout) if self.gig_timeout else 1800.0)
+                except Exception:  # noqa: BLE001
+                    pass
                 if lease_id:
                     self._post("/complete", {"lease_id": lease_id, "results": results})
                 if not self.quiet:

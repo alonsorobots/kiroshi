@@ -590,7 +590,7 @@ def create_app(
                 "runner_id": runner_id, "host": host, "launch_command": "",
                 "task": "", "workers": 0, "pid": None, "log_path": None,
                 "job": None, "code_fingerprint": None, "resources": {},
-                "started_at": now, "last_seen": now,
+                "in_flight": [], "started_at": now, "last_seen": now,
             }
             r = app.state.runners[runner_id]
         else:
@@ -602,6 +602,8 @@ def create_app(
                 r["resources"] = dict(stats["resources"])
             if stats.get("job") is not None:
                 r["job"] = stats.get("job")
+            if stats.get("in_flight") is not None:
+                r["in_flight"] = stats["in_flight"]
 
     def _groups_with_launch(limit: int = 200) -> list[dict[str, Any]]:
         rows = store.group_stats(limit=min(max(limit, 1), 2000))

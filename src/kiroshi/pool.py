@@ -89,15 +89,31 @@ def _init_worker(task_ref: str, extra_syspath: list[str]) -> None:
     _TASK_FN = resolve_task(task_ref)
 
 
+def _attach_tail_log(subjob_id: str, out: dict[str, Any], *, cap_active: bool) -> None:
+    """Best-effort: fold the sub-job's captured terminal tail into its result,
+    then discard the on-disk capture -- called on EVERY return path (success,
+    handled failure, unhandled exception), not conditionally on status. See
+    subjob_capture.py module docstring for why this is unconditional."""
+    from . import subjob_capture
+    if cap_active:
+        tail = subjob_capture.read_tail(subjob_id)
+        if tail and isinstance(out.get("metrics"), dict):
+            out["metrics"]["tail_log"] = tail
+    subjob_capture.discard(subjob_id)
+
+
 def _run_one(payload: tuple[str, dict, int, float]) -> dict[str, Any]:
     subjob_id, spec, retries, backoff = payload
     from .profiler import GigProfiler
+    from .subjob_capture import SubjobCapture
     last_err: Optional[BaseException] = None
     for attempt in range(retries + 1):
         profiler = GigProfiler()
         profiler.start()
+        cap = SubjobCapture(subjob_id)
         try:
-            result = _TASK_FN(spec) or {}  # type: ignore[misc]
+            with cap:
+                result = _TASK_FN(spec) or {}  # type: ignore[misc]
             status = result.get("status", "ok")
             metrics = result.get("metrics", {})
             # A task that reports failure WITHOUT raising (the pattern
@@ -136,6 +152,7 @@ def _run_one(payload: tuple[str, dict, int, float]) -> dict[str, Any]:
             proc_profile = profiler.stop()
             if proc_profile and isinstance(out["metrics"], dict):
                 out["metrics"]["proc"] = proc_profile
+            _attach_tail_log(subjob_id, out, cap_active=cap.active)
             return out
         except Exception as e:  # noqa: BLE001 - report everything
             profiler.stop()             # always stop, even on failure
@@ -147,11 +164,33 @@ def _run_one(payload: tuple[str, dict, int, float]) -> dict[str, Any]:
     # C-level leaks you can't patch; the real fix is evicting the accumulator).
     if _GC_BETWEEN_TASKS:
         gc.collect()
-    return {"subjob_id": subjob_id, "status": "error", "error": repr(last_err), "metrics": {}}
+    out = {"subjob_id": subjob_id, "status": "error", "error": repr(last_err), "metrics": {}}
+    _attach_tail_log(subjob_id, out, cap_active=cap.active)
+    return out
 
 
 def _err(subjob_id: str, msg: str) -> dict[str, Any]:
     return {"subjob_id": subjob_id, "status": "error", "error": msg, "metrics": {}}
+
+
+def _err_with_tail(subjob_id: str, msg: str) -> dict[str, Any]:
+    """Like _err, but reads back whatever the crashed/timed-out sub-job had
+    already written to its capture file (best-effort, may be a few ms stale
+    relative to the worker's very last write). This is the most valuable
+    capture point -- exactly the hang/crash case a worker's own return value
+    can never report, since it never got to return anything.
+
+    Deliberately does NOT discard the file: on Windows, a file another
+    process still has open can't be deleted (the call silently no-ops), and
+    at the moment this is called the still-wedged worker may well still hold
+    it open. Callers must discard AFTER the corresponding tree-kill actually
+    lands -- see the callers in run_batch."""
+    out = _err(subjob_id, msg)
+    from . import subjob_capture
+    tail = subjob_capture.read_tail(subjob_id)
+    if tail:
+        out["metrics"]["tail_log"] = tail
+    return out
 
 
 def _requeue(subjob_id: str, reason: str) -> dict[str, Any]:
@@ -358,15 +397,26 @@ class LocalPool:
         if pause_cb:
             poll = min(poll, _PAUSE_POLL_S)
 
-        def recover(stagger: float) -> None:
+        def recover(stagger: float, extra_jids: tuple[str, ...] = ()) -> None:
             """Handle a BrokenProcessPool cascade: mark inflight errors, rebuild
             once (deduped), refill staggered. Dedup stops the cascade from
-            spawning N pools; staggered refill avoids re-triggering the init race."""
+            spawning N pools; staggered refill avoids re-triggering the init race.
+
+            ``extra_jids`` lets a caller that already popped+errored a jid out of
+            `inflight` (the per-future catch below) still have its capture file
+            discarded on the SAME schedule -- after this rebuild, not before --
+            since discarding while a still-wedged worker holds the file open
+            silently no-ops on Windows.
+            """
+            from . import subjob_capture
+            jids = [jid for jid, _st in inflight.values()] + list(extra_jids)
             for jid, _st in inflight.values():
-                results.append(_err(jid, "BrokenProcessPool"))
+                results.append(_err_with_tail(jid, "BrokenProcessPool"))
             inflight.clear()
             if time.time() - self._last_rebuild >= _RECOVERY_DEDUP_S:
                 self._rebuild()
+            for jid in jids:
+                subjob_capture.discard(jid)
             refill(stagger=stagger)
 
         while inflight:
@@ -388,17 +438,25 @@ class LocalPool:
                 continue
 
             broke = False
+            broken_jids: list[str] = []
             for fut in done:
                 jid, _st = inflight.pop(fut)
                 try:
                     results.append(fut.result())
                 except BrokenProcessPool:
-                    results.append(_err(jid, "BrokenProcessPool"))
+                    results.append(_err_with_tail(jid, "BrokenProcessPool"))
                     broke = True
+                    broken_jids.append(jid)
                 except Exception as e:  # noqa: BLE001
-                    results.append(_err(jid, repr(e)))
+                    results.append(_err_with_tail(jid, repr(e)))
+                    # Not a pool crash -- the worker already returned/raised
+                    # normally, so _run_one's own capture cleanup already ran
+                    # in the child; discarding here is safe and just a no-op
+                    # if the file is already gone.
+                    from . import subjob_capture
+                    subjob_capture.discard(jid)
             if broke:
-                recover(_RECOVERY_STAGGER_S)
+                recover(_RECOVERY_STAGGER_S, extra_jids=tuple(broken_jids))
             elif not evicting:
                 refill()  # steady-state refill is instant (no stagger)
 
@@ -406,11 +464,16 @@ class LocalPool:
             if gig_timeout and inflight:
                 now = time.time()
                 if any(now - st > gig_timeout for _jid, st in inflight.values()):
+                    timed_out_jids = [jid for jid, _st in inflight.values()]
                     for fut, (jid, st) in list(inflight.items()):
                         results.append(
-                            _err(jid, "timeout" if now - st > gig_timeout else "pool_reset"))
+                            _err_with_tail(
+                                jid, "timeout" if now - st > gig_timeout else "pool_reset"))
                     inflight.clear()
                     self._rebuild()
+                    from . import subjob_capture
+                    for jid in timed_out_jids:
+                        subjob_capture.discard(jid)
                     refill(stagger=_RECOVERY_STAGGER_S)
 
             if heartbeat_cb and time.time() - last_hb >= hb_interval:

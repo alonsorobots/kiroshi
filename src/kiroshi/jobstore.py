@@ -735,18 +735,24 @@ class JobStore:
                         "SELECT attempts FROM subjobs WHERE subjob_id=?", (jid,)
                     ).fetchone()
                     attempts = row["attempts"] if row else 0
+                    # `metrics` (e.g. a captured tail_log from a crashed/timed-out
+                    # sub-job -- see subjob_capture.py) was previously dropped
+                    # entirely on this branch; only `error` was ever persisted.
+                    # That silently defeated per-sub-job output capture for
+                    # exactly the failure/timeout cases it exists to explain.
+                    metrics_json = jsonio.dumps(r.get("metrics", {}))
                     if attempts > self.max_retries:
                         self._conn.execute(
                             "UPDATE subjobs SET state='failed', completed_at=?, error=?, "
-                            "lease_id=NULL, lease_deadline=NULL WHERE subjob_id=?",
-                            (now, str(r.get("error", "unknown"))[:2000], jid),
+                            "metrics=?, lease_id=NULL, lease_deadline=NULL WHERE subjob_id=?",
+                            (now, str(r.get("error", "unknown"))[:2000], metrics_json, jid),
                         )
                         failed += 1
                     else:
                         self._conn.execute(
-                            "UPDATE subjobs SET state='pending', error=?, "
+                            "UPDATE subjobs SET state='pending', error=?, metrics=?, "
                             "lease_id=NULL, lease_deadline=NULL WHERE subjob_id=?",
-                            (str(r.get("error", "unknown"))[:2000], jid),
+                            (str(r.get("error", "unknown"))[:2000], metrics_json, jid),
                         )
                         requeued += 1
             self._conn.commit()

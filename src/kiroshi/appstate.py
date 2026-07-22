@@ -50,3 +50,15 @@ def registry_dir() -> Path:
     except OSError:
         pass
     return d
+
+
+def subjob_logs_dir() -> Path:
+    """Per-sub-job stdout/stderr capture files + in-flight marker files (see
+    ``subjob_capture.py``). Named to avoid colliding with jobstore's own
+    "in-flight lease" terminology."""
+    d = state_dir() / "subjob_logs"
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    return d
