@@ -375,6 +375,60 @@ class Runner:
             warned = True
             time.sleep(_DIRTY_RECHECK_S)
 
+    # ------------------------------------------------------ NAS credential gate
+    def _nas_servers_from_topology(self) -> list[str]:
+        """Distinct UNC server hosts in the coordinator's storage topology
+        (read/write/direct roots). Empty on any error -- never block on our own
+        inability to introspect."""
+        from . import kfs
+        try:
+            r = requests.get(f"{self.coordinator_url.rstrip('/')}/storage",
+                             headers=self._headers(), timeout=self.http_timeout)
+            r.raise_for_status()
+            disks = (r.json() or {}).get("disks", [])
+        except (requests.RequestException, ValueError):
+            return []
+        servers: set[str] = set()
+        for d in disks:
+            for key in ("read", "write", "direct_path"):
+                srv = kfs.server_of(d.get(key) or "")
+                if srv:
+                    servers.add(srv)
+        return sorted(servers)
+
+    def _nas_auth_preflight(self) -> None:
+        """Credential analogue of the clean-tree gate: refuse to start (loudly,
+        self-healing) if the NAS credential we hold is REJECTED by the server.
+
+        A wrong password is permanent -- leasing-and-retrying it is exactly what
+        DoS'd the NAS on 2026-07-21 (thousands of failed SMB3 auths). So we probe
+        the servers the topology actually uses BEFORE leasing, and an
+        ``auth_rejected`` blocks until fixed. A transient ``unreachable`` does NOT
+        block (the NAS may just be briefly down -- that's the leasing loop's
+        concern, not a credential fault). Self-heals the moment
+        ``kiroshi nas-cred rotate`` corrects the stored credential."""
+        from . import kfs
+        servers = self._nas_servers_from_topology()
+        if not servers:
+            return
+        warned = False
+        while not self._draining:
+            rejected = [s for s in servers if kfs.smb_auth_probe(s) == "auth_rejected"]
+            if not rejected:
+                if warned and not self.quiet:
+                    print("[runner] NAS credential accepted now -- proceeding.", flush=True)
+                return
+            print(
+                f"[runner] REFUSING to start: NAS credential REJECTED by "
+                f"{', '.join(rejected)} (LOGON_FAILURE) -- the stored password is "
+                f"wrong/stale. Fix it on the coordinator with "
+                f"`kiroshi nas-cred rotate --user <user> --ssh-target <nas>`. Not "
+                f"leasing (re-checking every {_DIRTY_RECHECK_S:.0f}s).",
+                file=sys.stderr, flush=True,
+            )
+            warned = True
+            time.sleep(_DIRTY_RECHECK_S)
+
     # --------------------------------------------------------------- loop
     def run(self) -> None:
         self._install_signal_handlers()
@@ -395,6 +449,12 @@ class Runner:
         # Provision NAS creds into env BEFORE the pool spawns, so every worker
         # inherits them and smbprotocol authenticates directly in any logon type.
         self._bootstrap_nas_creds()
+        # Credential preflight: if the NAS rejects our stored credential, block
+        # here (loud, self-healing) instead of leasing gigs that would each fail
+        # LOGON_FAILURE and hammer the NAS. Skips cleanly when no NAS/creds apply.
+        self._nas_auth_preflight()
+        if self._draining:
+            return
 
         # Phase 3 adaptive ramping: the operator's --workers becomes the
         # CEILING the tuner will grow to, not a fixed value. One synchronous

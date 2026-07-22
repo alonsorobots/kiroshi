@@ -165,6 +165,63 @@ def set_secret(user: str, password: str, *, server: str = "default") -> str:
     return path
 
 
+def rotate(user: str, *, server: str = "default", ssh_target: str,
+           length: int = 32) -> dict:
+    """Atomically rotate the NAS SMB password so the NAS side and the stored copy
+    can never drift.
+
+    Steps (all-or-nothing; the store is only written after the NAS provably
+    accepts the new password): generate a strong random password -> set it on the
+    NAS via ``smbpasswd`` (root over SSH) -> verify the NAS authenticates it
+    locally -> store it DPAPI-encrypted here -> confirm the DPAPI round-trip.
+
+    ``ssh_target`` is an ssh destination the coordinator can reach as root (an
+    ``~/.ssh/config`` alias like ``nas``, or ``root@<ip>``). The password is fed
+    to ``smbpasswd``/``smbclient`` over **stdin as bytes** — never on a command
+    line (no process-list exposure) and never on disk in the clear. Bytes (not
+    ``text=True``) is load-bearing: on Windows ``text=True`` rewrites ``\\n`` to
+    ``\\r\\n``, so ``smbpasswd`` would set a password with a trailing CR that then
+    fails to authenticate. Returns a non-secret summary; raises on any failure
+    (leaving the store untouched unless the NAS-side set already succeeded)."""
+    import secrets
+    import string as _string
+
+    alphabet = _string.ascii_letters + _string.digits
+    pw = "".join(secrets.choice(alphabet) for _ in range(length))
+
+    def _ssh(remote_cmd: str, stdin: bytes) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["ssh", "-T", "-o", "ConnectTimeout=15", "-o", "BatchMode=yes",
+             ssh_target, remote_cmd],
+            input=stdin, capture_output=True, timeout=45, check=False,
+        )
+
+    # 1) set it on the NAS
+    r = _ssh(f"smbpasswd -s {user}", f"{pw}\n{pw}\n".encode("utf-8"))
+    if r.returncode != 0:
+        raise RuntimeError(
+            f"smbpasswd failed on {ssh_target!r}: "
+            f"{r.stderr.decode('utf-8', 'replace').strip()[:200]}")
+
+    # 2) prove the NAS actually accepts it (guards a silent no-op set — smbpasswd
+    #    can return 0 while setting nothing useful, e.g. a mangled/empty password).
+    #    Share-agnostic: -L only needs a valid session. Password via stdin.
+    v = _ssh(f"smbclient -L //localhost -U {user} -m SMB3", (pw + "\n").encode("utf-8"))
+    vout = (v.stdout + v.stderr).decode("utf-8", "replace")
+    if "NT_STATUS" in vout and "Sharename" not in vout:
+        raise RuntimeError(
+            f"NAS rejected the freshly-set password for {user!r} "
+            f"(the set was a no-op or the account is unusable): {vout.strip()[:200]}")
+
+    # 3) store DPAPI-encrypted on the coordinator + confirm round-trip
+    path = set_secret(user, pw, server=server)
+    if load_secret(server) != (user, pw):
+        raise RuntimeError(
+            "CRITICAL: NAS password was changed but the DPAPI store round-trip "
+            "failed — NAS and coordinator are now OUT OF SYNC. Re-run rotate.")
+    return {"user": user, "server": server, "path": path, "pw_len": len(pw)}
+
+
 def load_secret(server: str = "default") -> Optional[tuple[str, str]]:
     """Load + decrypt (user, password) from the at-rest store, or None."""
     try:

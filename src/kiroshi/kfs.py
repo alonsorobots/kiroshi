@@ -231,6 +231,35 @@ def _smbclient():  # noqa: ANN202
     return smbclient
 
 
+def smb_auth_probe(server: str) -> Optional[str]:
+    """One cheap SMB auth attempt against ``server`` (just the session setup, no
+    file op). Returns ``None`` when auth succeeds OR when there are no creds
+    configured for it (nothing to check -- open/guest/local). On failure returns
+    a short, stable error class so callers can distinguish the *permanent*
+    "credential is wrong" case (``"auth_rejected"``) from a transient/unreachable
+    one. Never raises."""
+    if not have_creds(server):
+        return None
+    try:
+        # Force a genuinely fresh authentication: drop both our registration
+        # marker AND smbclient's own connection/session cache, or a previously
+        # authenticated connection gets reused and a wrong password reads as OK.
+        _REGISTERED.discard(server)
+        try:
+            _smbclient().delete_session(server)
+        except Exception:  # noqa: BLE001 - no existing session is fine
+            pass
+        _ensure_session(server)
+    except Exception as e:  # noqa: BLE001
+        blob = f"{type(e).__name__}: {e}"
+        if "LOGON_FAILURE" in blob or "LogonFailure" in blob or "0xc000006d" in blob:
+            return "auth_rejected"
+        if "STATUS_ACCESS_DENIED" in blob or "AccessDenied" in blob:
+            return "access_denied"
+        return "unreachable"
+    return None
+
+
 # --------------------------------------------------------------------- os-like API
 def exists(path: object) -> bool:
     if use_smb(path):

@@ -577,14 +577,25 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Manage the coordinator-brokered NAS SMB credential (encrypted at "
              "rest via machine-DPAPI; delivered to authed runners in-memory).",
     )
-    pnc.add_argument("action", choices=["set", "show", "test"],
+    pnc.add_argument("action", choices=["set", "show", "test", "rotate"],
                      help="set: store user+password encrypted on this node. "
-                          "show: non-secret status. test: decrypt round-trip.")
-    pnc.add_argument("--user", default=None, help="(set) SMB username, e.g. 'kiroshi'.")
+                          "show: non-secret status. test: decrypt round-trip. "
+                          "rotate: generate a new random password, set it on the "
+                          "NAS via SSH, and store it here in one atomic step "
+                          "(keeps NAS + coordinator in sync; nobody types a pw).")
+    pnc.add_argument("--user", default=None, help="(set/rotate) SMB username, e.g. 'kiroshi'.")
     pnc.add_argument("--password", default=None,
                      help="(set) SMB password. Omit to be prompted (not echoed).")
     pnc.add_argument("--server", default="default",
                      help="Per-server key; 'default' applies mesh-wide.")
+    pnc.add_argument("--ssh-target", default=None,
+                     help="(rotate) ssh destination the coordinator reaches the NAS "
+                          "as root, e.g. an ~/.ssh/config alias ('nas') or "
+                          "'root@192.168.50.69'. Required for rotate.")
+    pnc.add_argument("--verify-root", default=None,
+                     help="(rotate, optional) a UNC path to confirm the mesh SMB "
+                          "path authenticates after rotating, e.g. "
+                          r"'\\192.168.50.69\pipe_nvme'.")
 
     # ---- service (NSSM persistence) ----
     psvc = sub.add_parser("service",
@@ -1756,6 +1767,38 @@ def _cmd_nas_cred(args) -> int:
         user, pw = loaded
         print(f"[nas-cred] OK: decrypted {args.server!r} user={user!r} "
               f"(password length {len(pw)}).")
+        return 0
+
+    if args.action == "rotate":
+        user = args.user
+        if not user:
+            print("[nas-cred] --user is required for `rotate`.", file=sys.stderr)
+            return 2
+        if not args.ssh_target:
+            print("[nas-cred] --ssh-target is required for `rotate` (how the "
+                  "coordinator reaches the NAS as root over SSH).", file=sys.stderr)
+            return 2
+        try:
+            info = nascred.rotate(user, server=args.server, ssh_target=args.ssh_target)
+        except Exception as e:  # noqa: BLE001 - surface the reason, don't traceback-dump
+            print(f"[nas-cred] rotate FAILED: {e}", file=sys.stderr)
+            return 1
+        print(f"[nas-cred] rotated {args.server!r} (user={user!r}, {info['pw_len']}-char "
+              f"random pw) -- set on NAS + stored encrypted at {info['path']}; "
+              f"NAS accepted it locally.")
+        if args.verify_root:
+            loaded = nascred.load_secret(args.server)
+            os.environ["KIROSHI_NAS_USER"], os.environ["KIROSHI_NAS_PASS"] = loaded
+            os.environ.setdefault("KIROSHI_SMB_ENCRYPT", "1")
+            from . import kfs
+            try:
+                kfs.exists(args.verify_root)
+                print(f"[nas-cred] mesh SMB path verified: auth OK to {args.verify_root}")
+            except Exception as e:  # noqa: BLE001
+                print(f"[nas-cred] WARNING: stored+set, but mesh verify to "
+                      f"{args.verify_root} failed: {type(e).__name__}: {e}",
+                      file=sys.stderr)
+                return 1
         return 0
 
     # action == "set"
