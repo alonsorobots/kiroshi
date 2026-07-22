@@ -157,6 +157,16 @@ def _run_one(payload: tuple[str, dict, int, float]) -> dict[str, Any]:
         except Exception as e:  # noqa: BLE001 - report everything
             profiler.stop()             # always stop, even on failure
             last_err = e
+            # A permanent error (bad credential, unroutable path, ...) never
+            # succeeds on retry -- burning the retry budget on it just delays
+            # reporting a failure that was already certain. See errclass.py;
+            # this is a secondary guard (most tasks catch-and-return an error
+            # status rather than raising, so the real defense against
+            # hammering a failing dependency is the runner-side circuit
+            # breaker, which stops LEASING -- this only helps tasks that raise).
+            from .errclass import is_permanent
+            if is_permanent(repr(e)):
+                break
             if attempt < retries:
                 time.sleep(backoff * (2 ** attempt))
     # Optional per-task cleanup: prevents cross-task accumulation of fragmented

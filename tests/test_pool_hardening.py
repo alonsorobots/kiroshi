@@ -227,3 +227,36 @@ def test_run_one_surfaces_task_reported_error_without_raising():
         assert out["error"] is None
     finally:
         pool._TASK_FN = orig
+
+
+def test_run_one_does_not_retry_a_permanent_error():
+    """A task that RAISES a permanent error (bad credential, etc.) must not
+    burn its retry budget -- retrying is guaranteed useless. Contrast with a
+    transient exception, which still gets the full retry budget."""
+    import kiroshi.pool as pool
+
+    orig = pool._TASK_FN
+    try:
+        calls = {"n": 0}
+
+        def raises_permanent(spec):
+            calls["n"] += 1
+            raise RuntimeError("spnego.exceptions.LogonFailure: NT_STATUS_LOGON_FAILURE")
+
+        pool._TASK_FN = raises_permanent
+        out = pool._run_one(("perm-1", {}, 3, 0.0))  # retries=3 -> up to 4 attempts allowed
+        assert out["status"] == "error"
+        assert calls["n"] == 1, "a permanent error must stop after the first attempt"
+
+        calls["n"] = 0
+
+        def raises_transient(spec):
+            calls["n"] += 1
+            raise RuntimeError("connection reset")
+
+        pool._TASK_FN = raises_transient
+        out = pool._run_one(("trans-1", {}, 3, 0.0))
+        assert out["status"] == "error"
+        assert calls["n"] == 4, "a transient error must use the full retry budget"
+    finally:
+        pool._TASK_FN = orig

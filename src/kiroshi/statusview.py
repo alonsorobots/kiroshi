@@ -186,6 +186,7 @@ def enrich_status(
             "code_fingerprint": r.get("code_fingerprint"),
             "launch_command": r.get("launch_command"),
             "in_flight": r.get("in_flight") or [],
+            "circuit": r.get("circuit") or {"state": "closed"},
         } for r in job_runners]
         jobs_out.append({
             "job": slug,

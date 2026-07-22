@@ -24,6 +24,7 @@ import requests
 from . import security
 from .discovery import discover_coordinator
 from .pool import LocalPool
+from .failure_breaker import FailureBreaker
 from .worker_tuner import WorkerTuner
 
 # How often the Phase 6 clean-tree gate re-checks a dirty working tree.
@@ -91,6 +92,7 @@ class Runner:
         self.token = token if token is not None else security.resolve_token()
         self.launch_command = launch_command
         self._registered = False
+        self._warned_open = False  # print the CIRCUIT OPEN message once per episode
         self._verified_url: Optional[str] = None  # last Coordinator that passed the auth challenge
         self.task_ref = task_ref
         # Job-scoped leasing: this Runner only leases sub-jobs of ``self.job`` so
@@ -555,6 +557,11 @@ class Runner:
         tuner.step(tuner.poll_headroom(), time.time())
         initial_workers = tuner.target if tuner.enabled else self.workers
 
+        # Phase 9: error-class-aware backpressure. Stops the runner from
+        # hammering a permanently-broken dependency (e.g. a stale NAS
+        # credential) at full retry rate -- see failure_breaker.py.
+        breaker = FailureBreaker()
+
         if not self.quiet:
             tuning_note = "auto-tuning" if tuner.enabled else "static (AT-Field unreachable)"
             print(
@@ -588,18 +595,42 @@ class Runner:
                     self._register()
                 if self._check_atfield_pause():
                     continue
+                # Phase 9 circuit breaker: refuse to lease (or lease only a
+                # single half-open probe) while the dependency this runner
+                # depends on is failing systemically. Loud + visible (once
+                # per OPEN episode, not every poll) -- a silently-idle runner
+                # must never look identical to a crash.
+                may_lease, breaker_cap = breaker.allow_lease(time.time())
+                if not may_lease:
+                    if not self._warned_open and not self.quiet:
+                        snap = breaker.snapshot()
+                        print(
+                            f"[runner] CIRCUIT OPEN: repeated failures "
+                            f"({snap['dominant_error']}) -- not leasing until it "
+                            f"clears (cooldown {snap['cooldown_s']:.0f}s). Fix the "
+                            f"failing dependency (e.g. `kiroshi nas-cred rotate`).",
+                            file=sys.stderr, flush=True,
+                        )
+                        self._warned_open = True
+                    time.sleep(self.poll_interval)
+                    continue
+                self._warned_open = False
                 # Lease against the CURRENT (possibly throttled-down) pool
                 # size, not the operator's ceiling -- don't over-lease work
                 # to a runner that's currently backed off under pressure.
+                lease_capacity = min(self.capacity, pool.workers * 2)
+                if breaker_cap is not None:
+                    lease_capacity = min(lease_capacity, breaker_cap)
                 lease = self._post(
                     "/lease",
                     {"runner_id": self.runner_id, "host": self.host,
-                     "capacity": min(self.capacity, pool.workers * 2),
+                     "capacity": lease_capacity,
                      "heartbeat_interval": self.heartbeat_interval,
                      "job": self.job},
                 )
                 gigs = (lease or {}).get("gigs") or []
                 lease_id = (lease or {}).get("lease_id")
+                breaker.note_leased(len(gigs))
                 # M9: any advisories the Coordinator attached to this lease response
                 # are printed loudly on the Runner's stdout so they survive into
                 # the rotating log file — the "in-band" delivery channel that
@@ -647,6 +678,7 @@ class Runner:
                                 "workers_ceiling": self.workers,
                                 "tuning_enabled": bool(tuner.enabled),
                                 "in_flight": in_flight,
+                                "circuit": breaker.snapshot(),
                             },
                         })
 
@@ -660,6 +692,9 @@ class Runner:
                     pause_cb=self._pause_active,
                 )
                 self._last_progress_at = time.time()  # a full batch just finished
+                now = time.time()
+                for r in results:
+                    breaker.record(r.get("status", "ok"), r.get("error"), now)
                 try:
                     from . import subjob_capture
                     subjob_capture.sweep_stale(
