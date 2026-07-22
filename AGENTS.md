@@ -203,11 +203,31 @@ def run(spec: dict) -> dict:
 - `kfs.backend(path)` / `kfs.smb_diagnostics(server)` for debugging
 
 **SMB creds for scheduled tasks / services** (no interactive session, no
-mapped drives) — set these in the runner's environment:
+mapped drives) — the **coordinator-brokered credential is canonical**; don't
+hand-manage per-node env vars for this. `kiroshi nas-cred rotate --user <svc>
+--ssh-target <nas-ssh-alias>` atomically generates a password, sets it on the
+NAS, and stores it DPAPI-encrypted on the coordinator in one step — the NAS
+and the store can never drift, and nobody ever types or sees the password.
+Runners fetch it in-memory at startup (`_bootstrap_nas_creds`) and inject it
+into their own env; a runner refuses to start (loud, self-healing) if the
+credential is rejected (`worker._nas_auth_preflight` / `kfs.smb_auth_probe`).
 
-- `KIROSHI_SMB_USER`, `KIROSHI_SMB_PASS`  → explicit creds
+**Use a dedicated service account (e.g. `kiroshi`), never your personal NAS
+login**, for traceability (file ownership + auth logs point at the mesh, not
+you), independent revocation, and blast-radius containment (the cred lives on
+every node; a personal account would put more at risk if it leaked). Verified
+on our NAS: a dedicated service account and a personal account can hold
+identical share ACLs — the isolation is the only reason to keep them separate,
+so don't fold the mesh onto a personal login just because permissions match.
+
+Only if you must set it manually (env override, bypasses the broker):
+`KIROSHI_NAS_USER` / `KIROSHI_NAS_PASS` (also
+`KIROSHI_NAS_USER_<SERVER>`/`_PASS_<SERVER>` per-server). Also:
 - `KIROSHI_SMB_AUTH`  → `ntlm` (default) / `negotiate` / `kerberos`
 - `KIROSHI_SMB_ENCRYPT`  → `1` to force SMB3 payload encryption
+
+(`KIROSHI_SMB_USER`/`KIROSHI_SMB_PASS` do **not** exist in code — a stale doc
+reference; the vars kfs.py actually reads are `KIROSHI_NAS_USER`/`_PASS`.)
 
 **Path helpers** (`from kiroshi import paths`) — for resolving sub-job I/O:
 
