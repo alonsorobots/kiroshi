@@ -14,6 +14,7 @@ import re
 import signal
 import socket
 import sys
+import threading
 import time
 import uuid
 from typing import Any, Optional
@@ -111,6 +112,7 @@ class Runner:
         self.item_retries = item_retries
         self.item_backoff = item_backoff
         self.gig_timeout = gig_timeout
+        self._last_progress_at = time.time()  # re-armed in run(); see _start_watchdog
         self.max_tasks_per_child = max_tasks_per_child
         self.gc_between_tasks = gc_between_tasks
         self.http_timeout = http_timeout
@@ -429,6 +431,71 @@ class Runner:
             warned = True
             time.sleep(_DIRTY_RECHECK_S)
 
+    # ---------------------------------------------------------- watchdog
+    def _start_watchdog(self) -> None:
+        """Hard-exit the process if the lease/run_batch loop stops making
+        forward progress for too long -- the backstop for when run_batch's OWN
+        in-process ``--subjob-timeout`` enforcement is itself defeated.
+
+        Observed 2026-07-22: a worker crashed at the native/CUDA level (an
+        NVDEC decode-error storm on a corrupted clip) in a way that apparently
+        corrupted the ProcessPoolExecutor's internal bookkeeping -- `wait()`
+        stopped honoring its timeout, so the per-sub-job timeout check
+        (pool.py's own safety net) never got to run. The runner burned
+        GPU/CPU producing nothing for 14+ minutes with no way to recover
+        itself; only an external restart fixed it.
+
+        Deliberately a HARD exit (``os._exit``), not a graceful shutdown: by
+        definition we don't trust a wedged process to unwind cleanly (that's
+        the same failure mode that already defeated the in-process safety
+        net). A fresh process -- relaunched by whatever supervises this one
+        (Task Scheduler, a service manager) -- is simpler and safer than
+        trying to salvage unknown internal state.
+
+        Only armed when ``--subjob-timeout`` (``gig_timeout``) is set --
+        with no configured per-item ceiling there's nothing principled to
+        compare a "no progress" gap against. ``self._last_progress_at`` is
+        bumped by the runner's own heartbeat callback (fires from *inside*
+        run_batch's loop while it's genuinely cycling) and once per finished
+        batch -- so a single long-but-healthy batch doesn't false-trip this,
+        only a loop that has actually stopped advancing.
+        """
+        if not self.gig_timeout:
+            return
+        ceiling = self._watchdog_ceiling()
+        check_interval = self._watchdog_check_interval(ceiling)
+
+        def _watch() -> None:
+            while not self._draining:
+                time.sleep(check_interval)
+                if self._watchdog_should_exit(time.time()):
+                    gap = time.time() - self._last_progress_at
+                    print(
+                        f"[runner] WATCHDOG: no progress in {gap:.0f}s (ceiling "
+                        f"{ceiling:.0f}s = 2x --subjob-timeout {self.gig_timeout:.0f}s). "
+                        f"The lease/run_batch loop appears wedged past its own "
+                        f"per-sub-job timeout -- hard-exiting so the supervisor "
+                        f"relaunches a clean process.",
+                        file=sys.stderr, flush=True,
+                    )
+                    os._exit(1)
+
+        threading.Thread(target=_watch, name="kiroshi-watchdog", daemon=True).start()
+
+    def _watchdog_ceiling(self) -> float:
+        return 2.0 * self.gig_timeout
+
+    @staticmethod
+    def _watchdog_check_interval(ceiling: float) -> float:
+        return min(30.0, max(5.0, ceiling / 4))
+
+    def _watchdog_should_exit(self, now: float) -> bool:
+        """Pure decision (given ``now`` and the runner's own state) -- no
+        thread/sleep/os._exit involved, so this is directly unit-testable."""
+        if not self.gig_timeout:
+            return False
+        return (now - self._last_progress_at) > self._watchdog_ceiling()
+
     # --------------------------------------------------------------- loop
     def run(self) -> None:
         self._install_signal_handlers()
@@ -455,6 +522,13 @@ class Runner:
         self._nas_auth_preflight()
         if self._draining:
             return
+
+        # Arm the wedge-detection watchdog only now -- after the intentional,
+        # potentially-long blocking gates above (clean-tree, NAS preflight),
+        # which are legitimate waits-for-operator-action, not bugs. It must
+        # only ever supervise the lease/run_batch work loop below.
+        self._last_progress_at = time.time()
+        self._start_watchdog()
 
         # Phase 3 adaptive ramping: the operator's --workers becomes the
         # CEILING the tuner will grow to, not a fixed value. One synchronous
@@ -524,6 +598,15 @@ class Runner:
                     continue
 
                 def _hb() -> None:
+                    # Watchdog liveness pulse: this callback only fires from
+                    # *inside* run_batch's own inner loop while it's genuinely
+                    # cycling. Bumping here (not just once per finished batch)
+                    # means a single long-but-healthy batch keeps resetting the
+                    # clock throughout its run, so only a loop that has
+                    # actually stopped advancing goes stale -- see
+                    # _start_watchdog. Unconditional: must not depend on the
+                    # POST below succeeding.
+                    self._last_progress_at = time.time()
                     # Fast mid-batch pressure brake: re-check headroom on the
                     # same cadence as the heartbeat and arm/disarm the
                     # max_pending cap accordingly (see WorkerTuner.max_pending_cap).
@@ -556,6 +639,7 @@ class Runner:
                     hb_interval=self.heartbeat_interval,
                     pause_cb=self._pause_active,
                 )
+                self._last_progress_at = time.time()  # a full batch just finished
                 if lease_id:
                     self._post("/complete", {"lease_id": lease_id, "results": results})
                 if not self.quiet:
