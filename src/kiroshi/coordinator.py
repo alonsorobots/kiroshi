@@ -123,6 +123,15 @@ class CancelReq(BaseModel):
     purge: bool = False
 
 
+class BanHostReq(BaseModel):
+    host: str
+    reason: str = ""
+
+
+class UnbanHostReq(BaseModel):
+    host: str
+
+
 class RegisterReq(BaseModel):
     runner_id: str
     host: str = "?"
@@ -928,6 +937,29 @@ def create_app(
     def requeue(req: RequeueReq) -> dict[str, int]:
         n = store.requeue(tuple(req.states), reset_attempts=req.reset_attempts)
         return {"requeued": n}
+
+    @app.post("/admin/hosts/ban")
+    def ban_host(req: BanHostReq) -> dict[str, Any]:
+        """Refuse ALL future leases from ``req.host``, every job, until unbanned.
+
+        The lever of last resort for a runner the operator can't reach (SSH
+        dead, wedged, disk-full) -- the runner keeps polling, but the
+        Coordinator (the only party still in control) starts saying no. Does
+        NOT touch already-leased/in-flight gigs; they still expire via the
+        normal lease-TTL reap if that host never completes them."""
+        if not (req.host or "").strip():
+            return JSONResponse({"error": "host is required"}, status_code=400)
+        store.ban_host(req.host, req.reason)
+        return {"banned": req.host, "reason": req.reason}
+
+    @app.post("/admin/hosts/unban")
+    def unban_host(req: UnbanHostReq) -> dict[str, Any]:
+        existed = store.unban_host(req.host)
+        return {"host": req.host, "was_banned": existed}
+
+    @app.get("/admin/hosts/banned")
+    def list_banned_hosts() -> dict[str, Any]:
+        return {"banned": store.banned_hosts()}
 
     @app.post("/cancel")
     def cancel(req: CancelReq):

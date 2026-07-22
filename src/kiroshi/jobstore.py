@@ -144,6 +144,16 @@ class JobStore:
                     ts          REAL NOT NULL,
                     received_at REAL NOT NULL
                 );
+                -- Hosts explicitly banned from leasing (fleet-wide, all jobs).
+                -- For a runner the operator can't reach (SSH dead, wedged) --
+                -- the coordinator is the only party that can stop it leasing,
+                -- since the runner itself won't observe a drain signal it never
+                -- receives. Distinct from per-(host,subjob_id) retry cooldown.
+                CREATE TABLE IF NOT EXISTS banned_hosts (
+                    host       TEXT PRIMARY KEY,
+                    reason     TEXT,
+                    banned_at  REAL NOT NULL
+                );
                 """
             )
             # Column-level migration: if subjobs table existed without disk/job
@@ -225,6 +235,40 @@ class JobStore:
             if cfg:
                 out[row["job"]] = cfg
         return out
+
+    # ------------------------------------------------------------- host ban
+    def ban_host(self, host: str, reason: str = "") -> None:
+        """Refuse ALL future leases from ``host``, across every job, until
+        unbanned. The only lever the Coordinator has over a runner it can't
+        otherwise reach (SSH dead/wedged) -- the runner keeps polling, but
+        every lease call returns empty instead of granting work."""
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO banned_hosts (host, reason, banned_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(host) DO UPDATE SET reason=excluded.reason, "
+                "banned_at=excluded.banned_at",
+                (host, reason, time.time()),
+            )
+            self._conn.commit()
+
+    def unban_host(self, host: str) -> bool:
+        """Lift a ban. Returns True iff a ban existed."""
+        with self._lock:
+            before = self._conn.total_changes
+            self._conn.execute("DELETE FROM banned_hosts WHERE host=?", (host,))
+            self._conn.commit()
+            return self._conn.total_changes > before
+
+    def is_host_banned(self, host: str) -> bool:
+        return self._conn.execute(
+            "SELECT 1 FROM banned_hosts WHERE host=?", (host,)
+        ).fetchone() is not None
+
+    def banned_hosts(self) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            "SELECT host, reason, banned_at FROM banned_hosts ORDER BY banned_at DESC"
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     # ------------------------------------------------------------ at-field
     # Ring-buffer cap on the event log. The endpoint that feeds this is
@@ -378,6 +422,21 @@ class JobStore:
         job_sql = " AND job=?" if job is not None else ""
         job_args: tuple = (job,) if job is not None else ()
         with self._lock:
+            # Banned host: refuse before touching the queue. Checked first --
+            # a banned host gets nothing regardless of fair-share/disk budget.
+            if self._conn.execute(
+                "SELECT 1 FROM banned_hosts WHERE host=?", (host,)
+            ).fetchone() is not None:
+                return LeaseResult(
+                    lease_id=None, gigs=[],
+                    diag=self._lease_diag(
+                        requested=requested, effective=0, granted=0,
+                        binding_reason="HOST_BANNED", pending_total=0,
+                        host_inflight_before=0, fair_share_ceiling=host_share,
+                        disk_concurrency=disk_concurrency, inflight=None,
+                        granted_here=None, ids=[],
+                    ),
+                )
             # Pending count snapshot for diagnostics (cheap COUNT(*)).
             pending_total = self._conn.execute(
                 "SELECT COUNT(*) AS c FROM subjobs WHERE state='pending'" + job_sql,
