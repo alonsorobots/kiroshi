@@ -115,6 +115,45 @@ def list_inflight(max_age_s: Optional[float] = None) -> list[dict[str, Any]]:
     return out
 
 
+def stuck_workers(min_elapsed_s: float) -> list[dict[str, Any]]:
+    """In-flight sub-jobs whose WORKER has been running longer than
+    ``min_elapsed_s`` -- ``[{"subjob_id", "pid", "elapsed_s"}]`` carrying the
+    worker PID recorded in the marker.
+
+    This is what lets an INDEPENDENT reaper (pool.py) enforce the per-sub-job
+    timeout by tree-killing exactly the stuck worker, WITHOUT depending on
+    ``run_batch``'s own loop -- which the 2026-07-22/23 incident showed can
+    itself wedge (its ``wait()`` stops honoring its timeout), defeating the
+    in-loop timeout AND starving the heartbeat that the watchdog keyed off.
+    An out-of-band reader of the on-disk markers has no such dependency.
+
+    Markers lacking a numeric ``pid``/``started_at`` are skipped."""
+    out: list[dict[str, Any]] = []
+    now = time.time()
+    try:
+        entries = list(os.scandir(subjob_logs_dir()))
+    except OSError:
+        return out
+    for entry in entries:
+        if not entry.name.endswith(".json"):
+            continue
+        try:
+            with open(entry.path, encoding="utf-8") as f:
+                marker = json.load(f)
+        except (OSError, ValueError):
+            continue
+        started_at = marker.get("started_at")
+        pid = marker.get("pid")
+        subjob_id = marker.get("subjob_id")
+        if (not isinstance(started_at, (int, float)) or not isinstance(pid, int)
+                or isinstance(pid, bool) or not subjob_id):
+            continue
+        elapsed = now - started_at
+        if elapsed > min_elapsed_s:
+            out.append({"subjob_id": subjob_id, "pid": pid, "elapsed_s": round(elapsed, 1)})
+    return out
+
+
 def sweep_stale(max_age_s: float = _SWEEP_MAX_AGE_S_DEFAULT) -> int:
     """Delete capture/marker files older than ``max_age_s`` -- catches
     orphans that nothing explicitly claimed (a hard `os._exit` watchdog kill,

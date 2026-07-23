@@ -498,6 +498,18 @@ class Runner:
             return False
         return (now - self._last_progress_at) > self._watchdog_ceiling()
 
+    def _note_progress(self) -> None:
+        """Fix A: the watchdog's progress clock, bumped ONLY on a real sub-job
+        completion (run_batch's ``progress_cb``), never on a bare heartbeat.
+        A runner that keeps heartbeating while completing nothing therefore
+        ages the watchdog until it hard-exits -- the wedged-loop case that a
+        heartbeat-keyed watchdog silently rode out on 2026-07-23. With the
+        independent reaper (Fix B) killing stuck workers at gig_timeout, those
+        forced 'timeout' completions ALSO count as progress here, so the
+        watchdog only fires when even the reaper can't make anything complete
+        for 2x the per-sub-job ceiling -- a true, total wedge."""
+        self._last_progress_at = time.time()
+
     # --------------------------------------------------------------- loop
     def run(self) -> None:
         self._install_signal_handlers()
@@ -643,15 +655,13 @@ class Runner:
                     continue
 
                 def _hb() -> None:
-                    # Watchdog liveness pulse: this callback only fires from
-                    # *inside* run_batch's own inner loop while it's genuinely
-                    # cycling. Bumping here (not just once per finished batch)
-                    # means a single long-but-healthy batch keeps resetting the
-                    # clock throughout its run, so only a loop that has
-                    # actually stopped advancing goes stale -- see
-                    # _start_watchdog. Unconditional: must not depend on the
-                    # POST below succeeding.
-                    self._last_progress_at = time.time()
+                    # NOTE: the heartbeat does NOT bump _last_progress_at.
+                    # (Fix A, 2026-07-23.) A heartbeat only proves the loop is
+                    # *cycling*, not that any sub-job *completed* -- and a runner
+                    # wedged on hung workers keeps heartbeating while completing
+                    # nothing, which is exactly how a heartbeat-keyed watchdog
+                    # was defeated. Progress is now driven solely by real
+                    # completions via `progress_cb=self._note_progress` below.
                     # Fast mid-batch pressure brake: re-check headroom on the
                     # same cadence as the heartbeat and arm/disarm the
                     # max_pending cap accordingly (see WorkerTuner.max_pending_cap).
@@ -690,6 +700,7 @@ class Runner:
                     heartbeat_cb=_hb,
                     hb_interval=self.heartbeat_interval,
                     pause_cb=self._pause_active,
+                    progress_cb=self._note_progress,
                 )
                 self._last_progress_at = time.time()  # a full batch just finished
                 now = time.time()

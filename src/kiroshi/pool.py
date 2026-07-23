@@ -38,6 +38,7 @@ import gc
 import os
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from typing import Any, Callable, Iterable, Optional, Union
@@ -208,6 +209,31 @@ def _requeue(subjob_id: str, reason: str) -> dict[str, Any]:
     return {"subjob_id": subjob_id, "status": "requeue", "error": reason, "metrics": {}}
 
 
+def _tree_kill_pid(pid: int) -> None:
+    """Best-effort tree-kill of a raw PID (worker + any children it spawned).
+
+    The by-PID variant used by the independent timeout reaper, which only has
+    the PID recorded in the sub-job marker -- not a live process object. On
+    Windows ``taskkill /F /T /PID`` tree-kills so GPU/subprocess resources
+    actually release (a bare kill leaves VRAM pinned). On POSIX, SIGKILL the
+    process group if we can, else the pid.
+    """
+    if sys.platform == "win32":
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                capture_output=True, timeout=5,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+    else:
+        import signal
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def _tree_kill(proc) -> None:
     """Best-effort kill of a worker process AND its child tree.
 
@@ -221,13 +247,7 @@ def _tree_kill(proc) -> None:
     except Exception:
         return
     if sys.platform == "win32":
-        try:
-            subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(pid)],
-                capture_output=True, timeout=5,
-            )
-        except Exception:  # noqa: BLE001
-            pass
+        _tree_kill_pid(pid)
     else:
         try:
             proc.kill()
@@ -255,6 +275,12 @@ class LocalPool:
         self.gc_between_tasks = gc_between_tasks
         self._pool: Optional[ProcessPoolExecutor] = None
         self._last_rebuild = 0.0
+        # Sub-job ids the independent timeout reaper has tree-killed for
+        # exceeding gig_timeout. run_batch relabels their (BrokenProcessPool)
+        # results as "timeout" so the coordinator sees the true cause (and
+        # Fix C's poison-clip quarantine can act on it). set ops are atomic
+        # under CPython, and the reaper thread is the only other writer.
+        self._reaped_for_timeout: set[str] = set()
         self._propagate_pythonpath()
         self._open()
 
@@ -339,6 +365,62 @@ class LocalPool:
         self.workers = n
         self._rebuild()
 
+    # ---------------------------------------------------- independent timeout reaper
+    def _reap_stuck_workers(self, gig_timeout: float) -> None:
+        """One reaper pass: tree-kill any worker whose current sub-job has been
+        running longer than ``gig_timeout``, identified from the on-disk markers
+        (which carry the worker pid).
+
+        INDEPENDENT of ``run_batch``'s loop on purpose -- that is the whole fix
+        for 2026-07-22/23, where the loop wedged (its ``wait()`` stopped
+        honoring the timeout) so the in-line per-sub-job timeout never ran and
+        the heartbeat the watchdog keyed off went silent. A thread that reads
+        markers and kills PIDs directly has no dependency on that loop.
+
+        Only kills PIDs that are ACTUALLY current pool workers (guards against a
+        stale marker whose pid was since reused by an unrelated process). Killing
+        a worker makes its future raise BrokenProcessPool, which wakes the
+        run_batch loop; the reaped jid is recorded so run_batch relabels that
+        result ``"timeout"`` (its true cause) instead of ``"BrokenProcessPool"``.
+        """
+        from . import subjob_capture
+        try:
+            stuck = subjob_capture.stuck_workers(gig_timeout)
+        except Exception:  # noqa: BLE001
+            return
+        if not stuck:
+            return
+        live_pids = set((getattr(self._pool, "_processes", None) or {}).keys())
+        for s in stuck:
+            pid, jid = s.get("pid"), s.get("subjob_id")
+            if pid in live_pids and jid:
+                self._reaped_for_timeout.add(jid)
+                print(
+                    f"[pool] REAPER: tree-killing stuck worker pid={pid} "
+                    f"(sub-job {jid} ran {s.get('elapsed_s')}s > {gig_timeout:.0f}s "
+                    f"timeout) -- run_batch's own loop did not enforce it",
+                    file=sys.stderr, flush=True,
+                )
+                _tree_kill_pid(pid)
+
+    def _start_reaper(self, gig_timeout: float) -> tuple[Optional[threading.Thread],
+                                                         Optional[threading.Event]]:
+        """Spawn the reaper thread for the duration of one run_batch. Tick fast
+        enough to enforce the timeout promptly but not busy-spin."""
+        stop = threading.Event()
+        interval = min(5.0, max(1.0, gig_timeout / 10.0))
+
+        def _loop() -> None:
+            while not stop.wait(interval):
+                try:
+                    self._reap_stuck_workers(gig_timeout)
+                except Exception:  # noqa: BLE001 - reaper must never die silently-fatal
+                    pass
+
+        t = threading.Thread(target=_loop, name="kiroshi-timeout-reaper", daemon=True)
+        t.start()
+        return t, stop
+
     # --------------------------------------------------------------- run batch
     def run_batch(
         self,
@@ -348,6 +430,7 @@ class LocalPool:
         heartbeat_cb: Optional[Callable[[], None]] = None,
         hb_interval: float = 30.0,
         pause_cb: Optional[Callable[[], bool]] = None,
+        progress_cb: Optional[Callable[[], None]] = None,
     ) -> list[dict[str, Any]]:
         queue = list(gigs)
         default_max_pending = max(1, self.workers * 2)
@@ -373,6 +456,32 @@ class LocalPool:
         results: list[dict[str, Any]] = []
         inflight: dict[Any, list] = {}  # future -> [subjob_id, submit_time]
         evicting = False  # True once pause_cb fired: stop refilling, drain running
+        self._reaped_for_timeout.clear()  # no cross-batch leakage
+
+        def _record(r: dict[str, Any]) -> None:
+            """Append a completed sub-job result and pulse ``progress_cb``.
+
+            A real completion -- success OR failure -- is the ONLY thing that
+            counts as progress for the runner's watchdog (Fix A). A mere
+            heartbeat / loop-cycle does NOT: a loop that spins without
+            completing anything must age the watchdog so it can hard-exit a
+            wedged runner, which is exactly the case a heartbeat-keyed watchdog
+            missed on 2026-07-23."""
+            results.append(r)
+            if progress_cb:
+                try:
+                    progress_cb()
+                except Exception:  # noqa: BLE001
+                    pass
+
+        def _reaped_msg(jid: str, default: str) -> str:
+            """The independent reaper tree-kills a timed-out worker; its future
+            then surfaces as a BrokenProcessPool. Relabel that to its true
+            cause ('timeout') so the coordinator + Fix C's quarantine can act."""
+            if jid in self._reaped_for_timeout:
+                self._reaped_for_timeout.discard(jid)
+                return "timeout"
+            return default
 
         def submit_next() -> bool:
             nonlocal idx
@@ -399,6 +508,15 @@ class LocalPool:
         # import / model load) doesn't race. Only at startup, not steady-state.
         refill(stagger=_COLD_START_STAGGER_S)
 
+        # Fix B: the independent per-worker timeout reaper. Runs in its own
+        # thread for the life of this batch, enforcing gig_timeout by directly
+        # tree-killing stuck workers -- so a wedged run_batch loop can no longer
+        # defeat the timeout (the 2026-07-23 failure).
+        reaper_thread: Optional[threading.Thread] = None
+        reaper_stop: Optional[threading.Event] = None
+        if gig_timeout:
+            reaper_thread, reaper_stop = self._start_reaper(gig_timeout)
+
         last_hb = time.time()
         # poll faster when a timeout or pause check must be enforced
         poll = hb_interval
@@ -421,7 +539,7 @@ class LocalPool:
             from . import subjob_capture
             jids = [jid for jid, _st in inflight.values()] + list(extra_jids)
             for jid, _st in inflight.values():
-                results.append(_err_with_tail(jid, "BrokenProcessPool"))
+                _record(_err_with_tail(jid, _reaped_msg(jid, "BrokenProcessPool")))
             inflight.clear()
             if time.time() - self._last_rebuild >= _RECOVERY_DEDUP_S:
                 self._rebuild()
@@ -429,69 +547,81 @@ class LocalPool:
                 subjob_capture.discard(jid)
             refill(stagger=stagger)
 
-        while inflight:
-            # --- abort-with-eviction: a pause signal releases queued work now ---
-            if pause_cb and not evicting and pause_cb():
-                evicting = True
-                for fut in list(inflight):
-                    if fut.cancel():  # True = not yet started by a worker
-                        jid, _st = inflight.pop(fut)
-                        results.append(_requeue(jid, "evicted: pressure pause"))
-                if not inflight:
-                    break  # nothing was running; whole batch evicted
+        try:
+            while inflight:
+                # --- abort-with-eviction: a pause signal releases queued work now ---
+                if pause_cb and not evicting and pause_cb():
+                    evicting = True
+                    for fut in list(inflight):
+                        if fut.cancel():  # True = not yet started by a worker
+                            jid, _st = inflight.pop(fut)
+                            _record(_requeue(jid, "evicted: pressure pause"))
+                    if not inflight:
+                        break  # nothing was running; whole batch evicted
 
-            try:
-                done, _ = wait(list(inflight.keys()), timeout=poll,
-                               return_when=FIRST_COMPLETED)
-            except BrokenProcessPool:
-                recover(_RECOVERY_STAGGER_S)
-                continue
-
-            broke = False
-            broken_jids: list[str] = []
-            for fut in done:
-                jid, _st = inflight.pop(fut)
                 try:
-                    results.append(fut.result())
+                    done, _ = wait(list(inflight.keys()), timeout=poll,
+                                   return_when=FIRST_COMPLETED)
                 except BrokenProcessPool:
-                    results.append(_err_with_tail(jid, "BrokenProcessPool"))
-                    broke = True
-                    broken_jids.append(jid)
-                except Exception as e:  # noqa: BLE001
-                    results.append(_err_with_tail(jid, repr(e)))
-                    # Not a pool crash -- the worker already returned/raised
-                    # normally, so _run_one's own capture cleanup already ran
-                    # in the child; discarding here is safe and just a no-op
-                    # if the file is already gone.
-                    from . import subjob_capture
-                    subjob_capture.discard(jid)
-            if broke:
-                recover(_RECOVERY_STAGGER_S, extra_jids=tuple(broken_jids))
-            elif not evicting:
-                refill()  # steady-state refill is instant (no stagger)
+                    recover(_RECOVERY_STAGGER_S)
+                    continue
 
-            # per-sub-job timeout: abandon + kill, then carry on with a fresh pool
-            if gig_timeout and inflight:
-                now = time.time()
-                if any(now - st > gig_timeout for _jid, st in inflight.values()):
-                    timed_out_jids = [jid for jid, _st in inflight.values()]
-                    for fut, (jid, st) in list(inflight.items()):
-                        results.append(
-                            _err_with_tail(
-                                jid, "timeout" if now - st > gig_timeout else "pool_reset"))
-                    inflight.clear()
-                    self._rebuild()
-                    from . import subjob_capture
-                    for jid in timed_out_jids:
+                broke = False
+                broken_jids: list[str] = []
+                for fut in done:
+                    jid, _st = inflight.pop(fut)
+                    try:
+                        _record(fut.result())
+                    except BrokenProcessPool:
+                        _record(_err_with_tail(jid, _reaped_msg(jid, "BrokenProcessPool")))
+                        broke = True
+                        broken_jids.append(jid)
+                    except Exception as e:  # noqa: BLE001
+                        _record(_err_with_tail(jid, _reaped_msg(jid, repr(e))))
+                        # Not a pool crash -- the worker already returned/raised
+                        # normally, so _run_one's own capture cleanup already ran
+                        # in the child; discarding here is safe and just a no-op
+                        # if the file is already gone.
+                        from . import subjob_capture
                         subjob_capture.discard(jid)
-                    refill(stagger=_RECOVERY_STAGGER_S)
+                if broke:
+                    recover(_RECOVERY_STAGGER_S, extra_jids=tuple(broken_jids))
+                elif not evicting:
+                    refill()  # steady-state refill is instant (no stagger)
 
-            if heartbeat_cb and time.time() - last_hb >= hb_interval:
-                try:
-                    heartbeat_cb()
-                except Exception:
-                    pass
-                last_hb = time.time()
+                # per-sub-job timeout: in-loop enforcement -- SECONDARY now (the
+                # independent reaper is primary and works even when this loop is
+                # wedged). Kept as belt-and-suspenders for when the loop IS
+                # cycling: whichever fires first kills the worker.
+                if gig_timeout and inflight:
+                    now = time.time()
+                    if any(now - st > gig_timeout for _jid, st in inflight.values()):
+                        timed_out_jids = [jid for jid, _st in inflight.values()]
+                        for fut, (jid, st) in list(inflight.items()):
+                            _record(
+                                _err_with_tail(
+                                    jid, "timeout" if now - st > gig_timeout else "pool_reset"))
+                        inflight.clear()
+                        self._rebuild()
+                        from . import subjob_capture
+                        for jid in timed_out_jids:
+                            subjob_capture.discard(jid)
+                            self._reaped_for_timeout.discard(jid)
+                        refill(stagger=_RECOVERY_STAGGER_S)
+
+                if heartbeat_cb and time.time() - last_hb >= hb_interval:
+                    try:
+                        heartbeat_cb()
+                    except Exception:
+                        pass
+                    last_hb = time.time()
+        finally:
+            # Stop the reaper before returning -- it must never outlive its
+            # batch and start killing a *later* batch's workers.
+            if reaper_stop is not None:
+                reaper_stop.set()
+            if reaper_thread is not None:
+                reaper_thread.join(timeout=2.0)
 
         return results
 

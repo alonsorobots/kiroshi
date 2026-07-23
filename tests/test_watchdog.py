@@ -135,3 +135,19 @@ def test_watchdog_loop_exits_process_when_wedged(monkeypatch):
     # ceiling = 20s; check_interval = 5s (20/4). After enough fake-sleep steps
     # the clock exceeds the ceiling and os._exit(1) must fire exactly once.
     assert exits == [1]
+
+
+# --------------------------------------------------- Fix A: progress = completions
+def test_note_progress_bumps_the_clock_off_a_stale_gap():
+    """`_note_progress` (run_batch's progress_cb) is the ONLY thing that resets
+    the watchdog now -- a real completion, never a bare heartbeat. Bumping it
+    clears an otherwise-stale gap."""
+    import time as _t
+    r = _runner(gig_timeout=300, last_progress_at=1000.0)
+    assert r._watchdog_should_exit(now=1601.0) is True   # stale: >600s ceiling
+    before = _t.time()
+    r._note_progress()
+    assert r._last_progress_at >= before
+    # from the fresh progress mark, we're well inside the ceiling again
+    assert r._watchdog_should_exit(now=r._last_progress_at + 1.0) is False
+    assert r._watchdog_should_exit(now=r._last_progress_at + 601.0) is True

@@ -732,27 +732,44 @@ class JobStore:
                         self._prune_requeue_cooldowns(now)
                 else:
                     row = self._conn.execute(
-                        "SELECT attempts FROM subjobs WHERE subjob_id=?", (jid,)
+                        "SELECT attempts, error FROM subjobs WHERE subjob_id=?", (jid,)
                     ).fetchone()
                     attempts = row["attempts"] if row else 0
+                    prev_error = (row["error"] if row else None) or ""
+                    err_str = str(r.get("error", "unknown"))
                     # `metrics` (e.g. a captured tail_log from a crashed/timed-out
                     # sub-job -- see subjob_capture.py) was previously dropped
                     # entirely on this branch; only `error` was ever persisted.
                     # That silently defeated per-sub-job output capture for
                     # exactly the failure/timeout cases it exists to explain.
                     metrics_json = jsonio.dumps(r.get("metrics", {}))
-                    if attempts > self.max_retries:
+                    # Fix C -- poison-clip quarantine (2026-07-23): a sub-job that
+                    # HANGS past its per-sub-job timeout almost always hangs again
+                    # (the clip itself is the problem), so retrying just re-wedges
+                    # a worker every gig_timeout seconds, mesh-wide. The SECOND
+                    # consecutive "timeout" quarantines it immediately (fail, no
+                    # requeue) instead of burning the whole retry budget at
+                    # gig_timeout apiece. Migration-free: keyed off the prior
+                    # `error` column. Only the exact "timeout" label counts --
+                    # NOT "pool_reset" (collateral) or any transient error.
+                    is_timeout = err_str.strip().lower() == "timeout"
+                    quarantine = is_timeout and prev_error.strip().lower() == "timeout"
+                    if quarantine or attempts > self.max_retries:
+                        reason = (
+                            "quarantined: repeated per-sub-job timeout (poison clip)"
+                            if quarantine else err_str
+                        )
                         self._conn.execute(
                             "UPDATE subjobs SET state='failed', completed_at=?, error=?, "
                             "metrics=?, lease_id=NULL, lease_deadline=NULL WHERE subjob_id=?",
-                            (now, str(r.get("error", "unknown"))[:2000], metrics_json, jid),
+                            (now, reason[:2000], metrics_json, jid),
                         )
                         failed += 1
                     else:
                         self._conn.execute(
                             "UPDATE subjobs SET state='pending', error=?, metrics=?, "
                             "lease_id=NULL, lease_deadline=NULL WHERE subjob_id=?",
-                            (str(r.get("error", "unknown"))[:2000], metrics_json, jid),
+                            (err_str[:2000], metrics_json, jid),
                         )
                         requeued += 1
             self._conn.commit()
