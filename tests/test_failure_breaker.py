@@ -222,3 +222,34 @@ def test_is_open_property():
     b.record("error", "LogonFailure", 1000.0)
     b.record("error", "LogonFailure", 1000.0)
     assert b.is_open is True
+
+
+# ------------------------------- Fix D: a poison-clip timeout storm must NOT trip
+def test_homogeneous_timeout_storm_does_not_trip():
+    """A whole window of per-sub-job timeouts (a bad shard) must NOT open the
+    breaker -- otherwise the runner idles on cooldown instead of grinding past
+    the bad clips (reaper kills them, quarantine removes them). Contrast with a
+    homogeneous *dependency* failure, which still trips."""
+    b = FailureBreaker()
+    t = 1000.0
+    for _ in range(20):
+        b.record("error", "timeout", t)
+    assert not b.is_open
+    may, _ = b.allow_lease(t)
+    assert may is True
+
+    # pool_reset collateral is likewise ignored
+    b2 = FailureBreaker()
+    for _ in range(20):
+        b2.record("error", "pool_reset", 1000.0)
+    assert not b2.is_open
+
+
+def test_dependency_failures_still_trip_after_the_timeout_change():
+    # Regression guard: Fix D must not weaken the NAS-DoS protection.
+    b = FailureBreaker()
+    t = 1000.0
+    b.record("error", "NT_STATUS_LOGON_FAILURE", t)
+    b.record("error", "NT_STATUS_LOGON_FAILURE", t)
+    b.record("error", "NT_STATUS_LOGON_FAILURE", t)
+    assert b.is_open

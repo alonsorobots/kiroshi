@@ -36,6 +36,22 @@ def is_permanent(error_str: Optional[str]) -> bool:
     return any(sig in low for sig in _PERMANENT_SIGNATURES)
 
 
+# Local per-sub-job COMPUTE faults -- the pool's exact labels for a sub-job it
+# abandoned/killed for exceeding its own timeout (and the collateral in-flight
+# killed alongside it). These are NOT signals about a shared dependency (the
+# NAS, a coordinator), so they must NOT feed the circuit breaker: a cluster of
+# bad clips in one shard is per-clip bad data handled by the reaper + poison
+# quarantine (Fix B/C, 2026-07-23), and stopping ALL leasing over it just idles
+# the whole runner instead of grinding past the bad region. Matched EXACTLY
+# (not substring) so a genuine dependency error like "connection timeout" is
+# still classified transient and can still trip the breaker.
+_LOCAL_COMPUTE_FAULTS = ("timeout", "pool_reset")
+
+
+def is_local_compute_fault(error_str: Optional[str]) -> bool:
+    return bool(error_str) and error_str.strip().lower() in _LOCAL_COMPUTE_FAULTS
+
+
 def classify(status: str, error_str: Optional[str]) -> str:
     """Returns "ok" | "permanent" | "transient".
 
@@ -43,10 +59,17 @@ def classify(status: str, error_str: Optional[str]) -> str:
     status == "requeue" -> "ok" (an eviction under pressure, not a fault --
     the sub-job was preempted, not tried and failed; matches jobstore's own
     "error is cleared, not a fault" treatment of requeue).
+    A local per-sub-job compute fault (exact "timeout"/"pool_reset") -> "ok"
+    for BREAKER purposes: it's handled by the reaper + poison quarantine, and
+    is not evidence a shared dependency is failing. (This does not change
+    is_permanent / pool.py retry behavior, which never saw these as permanent
+    anyway.)
     Otherwise (error/failed): "permanent" if the error matches a known
     permanent signature, else "transient".
     """
     if status in ("ok", "skipped", "requeue"):
+        return "ok"
+    if is_local_compute_fault(error_str):
         return "ok"
     return "permanent" if is_permanent(error_str) else "transient"
 

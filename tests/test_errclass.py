@@ -86,3 +86,27 @@ def test_signature_groups_similar_transient_errors_by_prefix():
 
 def test_signature_none_error():
     assert errclass.signature(None) == "<none>"
+
+
+# --------------------------------- Fix D: local compute faults don't feed breaker
+def test_local_compute_faults_classify_ok_not_transient():
+    # The pool's exact timeout labels must NOT trip the breaker -- they are
+    # per-clip faults handled by the reaper + poison quarantine, not a
+    # shared-dependency signal.
+    assert errclass.classify("error", "timeout") == "ok"
+    assert errclass.classify("error", "pool_reset") == "ok"
+    assert errclass.is_local_compute_fault("timeout")
+    assert errclass.is_local_compute_fault("  POOL_RESET  ")  # trimmed + case-insensitive
+
+
+def test_genuine_dependency_timeout_still_transient():
+    # EXACT match only: a real dependency error that merely contains the word
+    # must still be classifiable as transient (breaker-eligible).
+    assert errclass.classify("error", "connection timeout to 10.0.0.5") == "transient"
+    assert errclass.is_local_compute_fault("connection timeout") is False
+    assert errclass.classify("error", "socket timed out") == "transient"
+
+
+def test_local_compute_fault_does_not_shadow_permanent():
+    # A permanent (auth) error is still permanent regardless.
+    assert errclass.classify("error", "NT_STATUS_LOGON_FAILURE") == "permanent"
