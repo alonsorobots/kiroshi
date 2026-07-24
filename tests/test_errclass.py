@@ -110,3 +110,12 @@ def test_genuine_dependency_timeout_still_transient():
 def test_local_compute_fault_does_not_shadow_permanent():
     # A permanent (auth) error is still permanent regardless.
     assert errclass.classify("error", "NT_STATUS_LOGON_FAILURE") == "permanent"
+
+
+def test_smb_access_denied_is_permanent():
+    # The exact string the 2026-07-23 live run surfaced: kiroshi could auth but
+    # lacked write permission -> STATUS_ACCESS_DENIED / 0xc0000022 (no nt_ prefix).
+    err = ("smbprotocol.exceptions.SMBOSError: [Error 0] [NtStatus 0xc0000022] "
+           "STATUS_ACCESS_DENIED: '\\host\share\out'")
+    assert errclass.is_permanent(err)
+    assert errclass.classify("error", err) == "permanent"

@@ -21,7 +21,14 @@ from typing import Optional
 # useless" cases, not guesses.
 _PERMANENT_SIGNATURES = (
     "nt_status_logon_failure", "logonfailure", "0xc000006d",   # bad credential
-    "nt_status_access_denied", "accessdenied", "permissionerror",  # perms
+    # Permission denied. The SMB layer surfaces this as "STATUS_ACCESS_DENIED"
+    # / NtStatus "0xc0000022" (NO "nt_" prefix), so match the underscore form
+    # and the hex too -- the 2026-07-23 live run hit exactly this (the kiroshi
+    # user could auth but lacked write/mkdir permission on the output path) and
+    # it was being misclassified transient, so the breaker only tripped slowly
+    # via the window instead of fast-tripping and surfacing "fix permissions".
+    "nt_status_access_denied", "access_denied", "accessdenied",
+    "0xc0000022", "permissionerror",
     "no_smb_creds", "unclassified_nas",   # io-gate fail-closed tokens
 )
 
